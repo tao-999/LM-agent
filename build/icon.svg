@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="120" y1="96" x2="890" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C6CF6"/>
+      <stop offset="0.52" stop-color="#5543D8"/>
+      <stop offset="1" stop-color="#18233A"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="360" y1="294" x2="690" y2="736" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.48" stop-color="#DCD6FF"/>
+      <stop offset="1" stop-color="#8EE8FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="36" y="36" width="952" height="952" rx="242" fill="url(#background)"/>
+  <rect x="64" y="64" width="896" height="896" rx="216" fill="none" stroke="#FFFFFF" stroke-opacity=".14" stroke-width="12"/>
+  <path d="M229 588C279 745 431 835 589 805C691 785 778 722 828 634" fill="none" stroke="#B7ACFF" stroke-opacity=".48" stroke-width="38" stroke-linecap="round"/>
+  <circle cx="237" cy="600" r="39" fill="#8EE8FF"/>
+  <circle cx="817" cy="624" r="23" fill="#FFFFFF" fill-opacity=".84"/>
+  <path d="M512 214C546 362 611 427 760 462C611 496 546 562 512 710C478 562 412 496 264 462C412 427 478 362 512 214Z" fill="url(#spark)"/>
+  <path d="M677 606C692 670 721 699 785 714C721 729 692 758 677 822C662 758 633 729 569 714C633 699 662 670 677 606Z" fill="#FFFFFF" fill-opacity=".9"/>
+</svg>

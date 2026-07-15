@@ -1,0 +1,76 @@
+{
+  "name": "local-agent-studio",
+  "version": "0.7.74",
+  "private": true,
+  "description": "星伴 AI｜你的本地 AI 伙伴",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "icon:build": "node scripts/build-icon.cjs",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "dist": "npm run icon:build && npm run build && electron-builder --win",
+    "pack": "npm run icon:build && npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^0.468.0",
+    "katex": "^0.17.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "react-virtuoso": "^4.18.9",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "zustand": "^5.0.14",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "dompurify": "^3.4.11"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.15.43",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6"
+  },
+  "build": {
+    "appId": "com.local.agent.studio",
+    "productName": "星伴 AI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "build/icon.svg",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "星伴 AI",
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    }
+  }
+}
