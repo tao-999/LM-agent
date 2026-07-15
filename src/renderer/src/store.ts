@@ -99,6 +99,7 @@ type AppStore = {
   editorSelection: EditorSelection | null
   editorTheme: EditorTheme
   model: ModelConfig
+  customModels: ModelConfig[]
   globalInstructions: string
   skills: SkillDefinition[]
   agentPermissionMode: AgentPermissionMode
@@ -135,6 +136,8 @@ type AppStore = {
   applyAgentChanges: (changes: AgentChange[]) => void
   applyLiveAgentChanges: (changes: AgentChange[]) => void
   setModel: (model: ModelConfig) => void
+  saveCustomModel: (model: ModelConfig) => void
+  deleteCustomModel: (connectionId: string) => void
   setGlobalInstructions: (value: string) => void
   setSkills: (skills: SkillDefinition[]) => void
   setAgentPermissionMode: (mode: AgentPermissionMode) => void
@@ -347,6 +350,7 @@ export const useAppStore = create<AppStore>()(
       editorSelection: null,
       editorTheme: 'one-dark-pro',
       model: defaultModel,
+      customModels: [],
       globalInstructions: '',
       skills: [],
       agentPermissionMode: 'read-write-manual',
@@ -589,6 +593,23 @@ export const useAppStore = create<AppStore>()(
           }
         }),
       setModel: (model) => set({ model }),
+      saveCustomModel: (model) =>
+        set((state) => ({
+          customModels: [
+            ...state.customModels.filter(
+              (item) => item.connectionId !== model.connectionId
+            ),
+            { ...model, apiKey: undefined }
+          ]
+        })),
+      deleteCustomModel: (connectionId) =>
+        set((state) => ({
+          customModels: state.customModels.filter(
+            (item) => item.connectionId !== connectionId
+          ),
+          model:
+            state.model.connectionId === connectionId ? { ...defaultModel } : state.model
+        })),
       setGlobalInstructions: (globalInstructions) => set({ globalInstructions }),
       setSkills: (skills) => set({ skills }),
       setAgentPermissionMode: (agentPermissionMode) => set({ agentPermissionMode }),
@@ -740,7 +761,7 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 13,
+      version: 14,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -760,6 +781,7 @@ export const useAppStore = create<AppStore>()(
                 ? 'read-write-auto'
                 : 'read-write-manual'
         if (!state.editorTheme) state.editorTheme = 'one-dark-pro'
+        if (!state.customModels) state.customModels = []
         if (!state.tokenUsageRecords) state.tokenUsageRecords = []
         if (!state.comfyBaseUrl) state.comfyBaseUrl = 'http://127.0.0.1:8188'
         if (!state.comfyWorkflows) state.comfyWorkflows = []
@@ -773,6 +795,7 @@ export const useAppStore = create<AppStore>()(
         workspaceRoots: state.workspaceRoots,
         editorTheme: state.editorTheme,
         model: { ...state.model, apiKey: undefined },
+        customModels: state.customModels.map((item) => ({ ...item, apiKey: undefined })),
         globalInstructions: state.globalInstructions,
         skills: state.skills,
         agentPermissionMode: state.agentPermissionMode,

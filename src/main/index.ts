@@ -83,6 +83,7 @@ let imageQueueProcessing = false
 
 type SecureCredentials = {
   kimiCodeApiKey?: string
+  modelApiKeys?: Record<string, string>
 }
 
 function secureCredentialsPath(): string {
@@ -92,11 +93,26 @@ function secureCredentialsPath(): string {
 async function readSecureCredentials(): Promise<SecureCredentials> {
   try {
     const content = await fs.readFile(secureCredentialsPath(), 'utf8')
-    const stored = JSON.parse(content) as Record<string, string | undefined>
-    if (!stored.kimiCodeApiKey || !safeStorage.isEncryptionAvailable()) return {}
+    const stored = JSON.parse(content) as Record<string, unknown>
+    if (!safeStorage.isEncryptionAvailable()) return {}
+    const encryptedKimiKey =
+      typeof stored.kimiCodeApiKey === 'string' ? stored.kimiCodeApiKey : ''
+    const encryptedModelKeys =
+      stored.modelApiKeys && typeof stored.modelApiKeys === 'object'
+        ? (stored.modelApiKeys as Record<string, string>)
+        : {}
     return {
-      kimiCodeApiKey: safeStorage.decryptString(
-        Buffer.from(stored.kimiCodeApiKey, 'base64')
+      kimiCodeApiKey: encryptedKimiKey
+        ? safeStorage.decryptString(Buffer.from(encryptedKimiKey, 'base64'))
+        : undefined,
+      modelApiKeys: Object.fromEntries(
+        Object.entries(encryptedModelKeys).flatMap(([id, encrypted]) => {
+          try {
+            return [[id, safeStorage.decryptString(Buffer.from(encrypted, 'base64'))]]
+          } catch {
+            return []
+          }
+        })
       )
     }
   } catch {
@@ -104,22 +120,48 @@ async function readSecureCredentials(): Promise<SecureCredentials> {
   }
 }
 
-async function saveKimiCodeApiKey(apiKey: string): Promise<void> {
+async function writeSecureCredentials(credentials: SecureCredentials): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('当前系统无法启用安全凭据存储，请检查 Windows 登录凭据服务')
   }
-  const trimmed = apiKey.trim()
-  if (!trimmed) {
+  const modelApiKeys = Object.fromEntries(
+    Object.entries(credentials.modelApiKeys ?? {})
+      .filter(([, value]) => value.trim())
+      .map(([id, value]) => [id, safeStorage.encryptString(value.trim()).toString('base64')])
+  )
+  const stored = {
+    ...(credentials.kimiCodeApiKey?.trim()
+      ? {
+          kimiCodeApiKey: safeStorage
+            .encryptString(credentials.kimiCodeApiKey.trim())
+            .toString('base64')
+        }
+      : {}),
+    ...(Object.keys(modelApiKeys).length ? { modelApiKeys } : {})
+  }
+  if (!Object.keys(stored).length) {
     await fs.rm(secureCredentialsPath(), { force: true })
     return
   }
-  const encrypted = safeStorage.encryptString(trimmed).toString('base64')
   await fs.mkdir(path.dirname(secureCredentialsPath()), { recursive: true })
   await fs.writeFile(
     secureCredentialsPath(),
-    JSON.stringify({ kimiCodeApiKey: encrypted }, null, 2),
+    JSON.stringify(stored, null, 2),
     'utf8'
   )
+}
+
+async function saveKimiCodeApiKey(apiKey: string): Promise<void> {
+  const current = await readSecureCredentials()
+  await writeSecureCredentials({ ...current, kimiCodeApiKey: apiKey.trim() || undefined })
+}
+
+async function saveModelApiKey(connectionId: string, apiKey: string): Promise<void> {
+  const current = await readSecureCredentials()
+  const modelApiKeys = { ...(current.modelApiKeys ?? {}) }
+  if (apiKey.trim()) modelApiKeys[connectionId] = apiKey.trim()
+  else delete modelApiKeys[connectionId]
+  await writeSecureCredentials({ ...current, modelApiKeys })
 }
 
 function normalizeWorkspaceFile(root: string, filePath: string): string | null {
@@ -591,6 +633,16 @@ function registerIpc(): void {
     await saveKimiCodeApiKey(apiKey)
     return true
   })
+  ipcMain.handle('credentials:getModelApiKey', async (_event, connectionId: string) =>
+    (await readSecureCredentials()).modelApiKeys?.[connectionId] ?? ''
+  )
+  ipcMain.handle(
+    'credentials:setModelApiKey',
+    async (_event, connectionId: string, apiKey: string) => {
+      await saveModelApiKey(connectionId, apiKey)
+      return true
+    }
+  )
   ipcMain.handle('workspace:open', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],

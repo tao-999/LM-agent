@@ -1419,6 +1419,7 @@ async function attachmentFromFile(file: globalThis.File): Promise<ChatAttachment
 export function ChatPanel(): React.JSX.Element {
   const model = useAppStore((state) => state.model)
   const setModel = useAppStore((state) => state.setModel)
+  const customModels = useAppStore((state) => state.customModels)
   const globalInstructions = useAppStore((state) => state.globalInstructions)
   const skills = useAppStore((state) => state.skills)
   const agentPermissionMode = useAppStore((state) => state.agentPermissionMode)
@@ -1821,7 +1822,19 @@ export function ChatPanel(): React.JSX.Element {
   }, [mode, selectedComfyWorkflow?.id, comfyBaseUrl])
 
   const displayedModels = useMemo(() => {
-    const available = [...KIMI_CODE_MODELS, ...modelOptions]
+    const customModelOptions: ModelOption[] = customModels
+      .filter((item) => item.connectionId && item.model && item.baseUrl)
+      .map((item) => ({
+        id: `custom:${item.connectionId}`,
+        name: item.model,
+        provider: item.provider,
+        baseUrl: item.baseUrl,
+        source: '自定义',
+        connectionId: item.connectionId,
+        contextLength: item.contextLength,
+        maxContextLength: item.maxContextLength
+      }))
+    const available = [...KIMI_CODE_MODELS, ...customModelOptions, ...modelOptions]
     if (
       model.model &&
       !available.some(
@@ -1840,10 +1853,13 @@ export function ChatPanel(): React.JSX.Element {
           source:
             model.preset === 'kimi-code'
               ? ('Kimi Code' as const)
+              : model.connectionId
+                ? ('自定义' as const)
               : model.provider === 'ollama'
                 ? ('Ollama' as const)
                 : ('LM Studio' as const),
           preset: model.preset,
+          connectionId: model.connectionId,
           contextLength: model.contextLength,
           maxContextLength: model.maxContextLength
         },
@@ -1851,7 +1867,7 @@ export function ChatPanel(): React.JSX.Element {
       ]
     }
     return available
-  }, [model, modelOptions])
+  }, [customModels, model, modelOptions])
 
   const selectedModelId =
     displayedModels.find(
@@ -2858,15 +2874,17 @@ export function ChatPanel(): React.JSX.Element {
                     baseUrl: '',
                     apiKey: undefined,
                     preset: undefined,
+                    connectionId: undefined,
                     contextLength: undefined,
                     maxContextLength: undefined
                   })
                   return
                 }
                 void (async () => {
-                  const apiKey =
-                    selected.preset === 'kimi-code'
-                      ? await window.localAgent.credentials.getKimiCodeApiKey()
+                  const apiKey = selected.preset === 'kimi-code'
+                    ? await window.localAgent.credentials.getKimiCodeApiKey()
+                    : selected.connectionId
+                      ? await window.localAgent.credentials.getModelApiKey(selected.connectionId)
                       : undefined
                   if (selected.preset === 'kimi-code' && !apiKey) {
                     setActionNotice('请先在设置中填写并保存 Kimi Code API Key')
@@ -2879,6 +2897,7 @@ export function ChatPanel(): React.JSX.Element {
                     model: selected.name,
                     apiKey: apiKey || undefined,
                     preset: selected.preset,
+                    connectionId: selected.connectionId,
                     contextLength: selected.contextLength,
                     maxContextLength: selected.maxContextLength
                   })
@@ -2890,7 +2909,7 @@ export function ChatPanel(): React.JSX.Element {
                   ? '正在扫描本地模型…'
                   : '选择模型'}
               </option>
-              {(['Kimi Code', 'Ollama', 'LM Studio', 'llama.cpp'] as const).map((source) => {
+              {(['Kimi Code', '自定义', 'Ollama', 'LM Studio', 'llama.cpp'] as const).map((source) => {
                 const options = displayedModels.filter((item) => item.source === source)
                 if (!options.length) return null
                 return (

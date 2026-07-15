@@ -24,6 +24,7 @@ export type ModelConfig = {
   model: string
   apiKey?: string
   preset?: ModelPreset
+  connectionId?: string
   contextLength?: number
   maxContextLength?: number
 }
@@ -42,8 +43,9 @@ export type ModelOption = {
   name: string
   provider: ModelProvider
   baseUrl: string
-  source: 'Ollama' | 'LM Studio' | 'llama.cpp' | 'Kimi Code'
+  source: 'Ollama' | 'LM Studio' | 'llama.cpp' | 'Kimi Code' | '自定义'
   preset?: ModelPreset
+  connectionId?: string
   contextLength?: number
   maxContextLength?: number
 }

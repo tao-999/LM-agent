@@ -1052,8 +1052,70 @@ function createThinkRouter(
   }
 }
 
+function toolCallIds(message: LlmMessage): string[] {
+  if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) return []
+  return message.tool_calls.flatMap((call) => {
+    if (!call || typeof call !== 'object') return []
+    const id = (call as { id?: unknown }).id
+    return typeof id === 'string' && id.trim() ? [id] : []
+  })
+}
+
+/**
+ * OpenAI-compatible endpoints require every assistant tool_calls entry to be
+ * followed immediately by one tool message for each id. Runtime guidance can be
+ * produced while parallel tools are being executed, so collect the matching tool
+ * results ahead of that guidance before the request leaves the app. Missing
+ * results are represented explicitly instead of sending an invalid conversation.
+ */
+export function normalizeToolMessageSequence(messages: LlmMessage[]): LlmMessage[] {
+  const normalized: LlmMessage[] = []
+  const consumedToolIndexes = new Set<number>()
+
+  for (let index = 0; index < messages.length; index += 1) {
+    if (consumedToolIndexes.has(index)) continue
+    const message = messages[index]
+    const expectedIds = toolCallIds(message)
+    if (!expectedIds.length) {
+      if (message.role !== 'tool') normalized.push(message)
+      continue
+    }
+
+    normalized.push(message)
+    const matchingResults = new Map<string, { index: number; message: LlmMessage }>()
+    for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
+      const candidate = messages[cursor]
+      if (candidate.role === 'assistant') break
+      if (
+        candidate.role === 'tool' &&
+        candidate.tool_call_id &&
+        expectedIds.includes(candidate.tool_call_id) &&
+        !matchingResults.has(candidate.tool_call_id)
+      ) {
+        matchingResults.set(candidate.tool_call_id, { index: cursor, message: candidate })
+      }
+    }
+
+    for (const id of expectedIds) {
+      const matched = matchingResults.get(id)
+      if (matched) {
+        consumedToolIndexes.add(matched.index)
+        normalized.push(matched.message)
+      } else {
+        normalized.push({
+          role: 'tool',
+          tool_call_id: id,
+          content: '工具调用未产生可用结果：执行被中断、取消或历史裁剪。请重新评估后再决定是否调用。'
+        })
+      }
+    }
+  }
+
+  return normalized
+}
+
 function providerMessages(model: ModelConfig, messages: LlmMessage[]): unknown[] {
-  const serialized = messages.map((message) => ({
+  const serialized = normalizeToolMessageSequence(messages).map((message) => ({
     ...message,
     content:
       message.role === 'system' || message.role === 'user'

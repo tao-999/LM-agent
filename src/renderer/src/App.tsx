@@ -522,6 +522,18 @@ export default function App(): React.JSX.Element {
           latest.setModel({ ...latest.model, apiKey })
         }
       })
+    } else if (state.model.connectionId && !state.model.apiKey) {
+      const connectionId = state.model.connectionId
+      void window.localAgent.credentials.getModelApiKey(connectionId).then((apiKey) => {
+        const latest = useAppStore.getState()
+        if (
+          apiKey &&
+          latest.model.connectionId === connectionId &&
+          !latest.model.apiKey
+        ) {
+          latest.setModel({ ...latest.model, apiKey })
+        }
+      })
     }
   }, [])
 

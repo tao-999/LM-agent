@@ -5267,7 +5267,75 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 .custom-connection {
   display: grid;
   gap: 9px;
-  padding-top: 5px;
+}
+
+.remote-model-select {
+  padding-top: 3px;
+  border-top: 1px solid rgba(125, 139, 166, 0.16);
+}
+
+.remote-config-card {
+  animation: remote-config-enter 160ms ease-out;
+}
+
+.custom-connection.remote-config-card {
+  padding: 12px;
+  border: 1px solid rgba(102, 142, 202, 0.28);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(67, 126, 207, 0.13), transparent 44%),
+    #121821;
+}
+
+.custom-connection-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.custom-connection-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.custom-connection-header small {
+  color: #7f8999;
+  font-size: 9px;
+}
+
+.custom-connection-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.danger-text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  padding: 7px 4px;
+  border: 0;
+  color: #ff8492;
+  background: transparent;
+  cursor: pointer;
+}
+
+.danger-text-button:hover {
+  color: #ffabb4;
+}
+
+@keyframes remote-config-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .skill-editor-overlay {

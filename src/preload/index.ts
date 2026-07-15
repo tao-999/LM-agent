@@ -115,7 +115,11 @@ const api = {
     getKimiCodeApiKey: () =>
       ipcRenderer.invoke('credentials:getKimiCodeApiKey') as Promise<string>,
     setKimiCodeApiKey: (apiKey: string) =>
-      ipcRenderer.invoke('credentials:setKimiCodeApiKey', apiKey) as Promise<boolean>
+      ipcRenderer.invoke('credentials:setKimiCodeApiKey', apiKey) as Promise<boolean>,
+    getModelApiKey: (connectionId: string) =>
+      ipcRenderer.invoke('credentials:getModelApiKey', connectionId) as Promise<string>,
+    setModelApiKey: (connectionId: string, apiKey: string) =>
+      ipcRenderer.invoke('credentials:setModelApiKey', connectionId, apiKey) as Promise<boolean>
   },
   skills: {
     import: () => ipcRenderer.invoke('skills:import')

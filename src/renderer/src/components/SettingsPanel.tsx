@@ -135,6 +135,9 @@ function TokenCalendar({ records }: { records: TokenUsageRecord[] }): React.JSX.
 export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.Element {
   const model = useAppStore((state) => state.model)
   const setModel = useAppStore((state) => state.setModel)
+  const customModels = useAppStore((state) => state.customModels)
+  const saveCustomModel = useAppStore((state) => state.saveCustomModel)
+  const deleteCustomModel = useAppStore((state) => state.deleteCustomModel)
   const globalInstructions = useAppStore((state) => state.globalInstructions)
   const setGlobalInstructions = useAppStore((state) => state.setGlobalInstructions)
   const skills = useAppStore((state) => state.skills)
@@ -144,7 +147,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
   const [discovering, setDiscovering] = useState(false)
   const [testResult, setTestResult] = useState('')
   const [testing, setTesting] = useState(false)
-  const [showCustomConnection, setShowCustomConnection] = useState(false)
+  const [remoteSelection, setRemoteSelection] = useState(
+    model.preset === 'kimi-code' ? 'kimi-code' : model.connectionId ?? ''
+  )
   const [kimiApiKey, setKimiApiKey] = useState(model.preset === 'kimi-code' ? model.apiKey ?? '' : '')
   const [kimiModel, setKimiModel] = useState(
     model.preset === 'kimi-code' ? model.model : 'kimi-for-coding'
@@ -237,6 +242,73 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
     setKimiApiKey('')
     setKimiResult('已清除 Kimi Code API Key')
     if (model.preset === 'kimi-code') setModel({ ...model, apiKey: undefined })
+  }
+
+  const selectRemoteModel = async (selection: string): Promise<void> => {
+    setRemoteSelection(selection)
+    setTestResult('')
+    if (selection === 'kimi-code' || !selection) return
+    if (selection === 'new') {
+      setCustomConnection({
+        provider: 'openai',
+        baseUrl: 'https://api.x.ai/v1',
+        model: '',
+        apiKey: ''
+      })
+      return
+    }
+    const saved = customModels.find((item) => item.connectionId === selection)
+    if (!saved?.connectionId) return
+    const apiKey = await window.localAgent.credentials.getModelApiKey(saved.connectionId)
+    setCustomConnection({ ...saved, apiKey })
+  }
+
+  const connectCustomModel = async (): Promise<void> => {
+    const connectionId = customConnection.connectionId || uid()
+    const apiKey = customConnection.apiKey?.trim() ?? ''
+    const pending: ModelConfig = {
+      ...customConnection,
+      connectionId,
+      baseUrl: customConnection.baseUrl.trim(),
+      model: customConnection.model.trim(),
+      apiKey: apiKey || undefined,
+      preset: undefined
+    }
+    setTesting(true)
+    setTestResult('')
+    try {
+      const context = await window.localAgent.model.context(pending)
+      const next = {
+        ...pending,
+        contextLength: context.contextLength,
+        maxContextLength: context.maxContextLength
+      }
+      await window.localAgent.credentials.setModelApiKey(connectionId, apiKey)
+      saveCustomModel(next)
+      setModel(next)
+      setRemoteSelection(connectionId)
+      setCustomConnection(next)
+      setTestResult('远程模型配置已保存并启用')
+    } catch (error) {
+      setTestResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const removeCustomModel = async (): Promise<void> => {
+    const connectionId = customConnection.connectionId
+    if (!connectionId) return
+    await window.localAgent.credentials.setModelApiKey(connectionId, '')
+    deleteCustomModel(connectionId)
+    setRemoteSelection('')
+    setCustomConnection({
+      provider: 'openai',
+      baseUrl: 'https://api.x.ai/v1',
+      model: '',
+      apiKey: ''
+    })
+    setTestResult('自定义模型配置已删除')
   }
 
   const saveSkill = (): void => {
@@ -407,6 +479,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
                   contextLength: selected.contextLength,
                   maxContextLength: selected.maxContextLength
                 })
+                setRemoteSelection('')
                 setTestResult('')
               }}
             >
@@ -430,93 +503,97 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
               )}
             </select>
           </label>
-          {model.model && (
-            <div className="active-model-card">
-              <span className="status-dot online" />
-              <div>
-                <strong>{model.model}</strong>
-                <small>{model.baseUrl}</small>
-                <small>
-                  当前上下文 {model.contextLength?.toLocaleString() || '自动读取'} Token
-                  {model.maxContextLength
-                    ? ` · 模型上限 ${model.maxContextLength.toLocaleString()}`
-                    : ''}
-                </small>
-              </div>
-            </div>
-          )}
-          <button className="secondary-button full" onClick={() => void test()} disabled={testing}>
-            {testing ? <LoaderCircle size={15} className="spin" /> : <PlugZap size={15} />}
-            测试当前连接
-          </button>
-          {testResult && (
-            <div className="test-result">
-              <CheckCircle2 size={15} /> {testResult}
-            </div>
-          )}
-
-          <div className="kimi-code-card">
-            <header>
-              <span className="kimi-code-icon"><KeyRound size={17} /></span>
-              <div>
-                <strong>Kimi Code</strong>
-                <small>会员 API Key · OpenAI 兼容协议 · 256K 上下文</small>
-              </div>
-              {model.preset === 'kimi-code' && model.apiKey && (
-                <span className="kimi-code-connected">已启用</span>
+          <label className="field-label remote-model-select">
+            远程模型
+            <select
+              value={remoteSelection}
+              onChange={(event) => void selectRemoteModel(event.target.value)}
+            >
+              <option value="">选择远程模型</option>
+              <optgroup label="内置服务">
+                <option value="kimi-code">Kimi Code</option>
+              </optgroup>
+              {customModels.length > 0 && (
+                <optgroup label="自定义服务">
+                  {customModels.map((item) => (
+                    <option key={item.connectionId} value={item.connectionId}>
+                      {item.model} · {item.baseUrl}
+                    </option>
+                  ))}
+                </optgroup>
               )}
-            </header>
-            <label className="field-label">
-              速度档位
-              <select value={kimiModel} onChange={(event) => setKimiModel(event.target.value)}>
-                <option value="kimi-for-coding">普通版</option>
-                <option value="kimi-for-coding-highspeed">高速版</option>
-              </select>
-            </label>
-            <label className="field-label">
-              Kimi Code API Key
-              <input
-                type="password"
-                autoComplete="off"
-                value={kimiApiKey}
-                onChange={(event) => setKimiApiKey(event.target.value)}
-                placeholder="从 Kimi Code 控制台创建"
-              />
-            </label>
-            <div className="kimi-code-actions">
-              <button
-                className="secondary-button"
-                onClick={() =>
-                  void window.localAgent.app.openExternal('https://www.kimi.com/code/console')
-                }
-              >
-                打开控制台
-              </button>
-              {kimiApiKey && (
-                <button className="icon-button" onClick={() => void clearKimiCode()} title="清除密钥">
-                  <Trash2 size={14} />
+              <option value="new">＋ 添加自定义模型</option>
+            </select>
+          </label>
+
+          {remoteSelection === 'kimi-code' && (
+            <div className="kimi-code-card remote-config-card">
+              <header>
+                <span className="kimi-code-icon"><KeyRound size={17} /></span>
+                <div>
+                  <strong>Kimi Code</strong>
+                  <small>会员 API Key · OpenAI 兼容协议 · 256K 上下文</small>
+                </div>
+                {model.preset === 'kimi-code' && model.apiKey && (
+                  <span className="kimi-code-connected">当前使用</span>
+                )}
+              </header>
+              <label className="field-label">
+                速度档位
+                <select value={kimiModel} onChange={(event) => setKimiModel(event.target.value)}>
+                  <option value="kimi-for-coding">普通版</option>
+                  <option value="kimi-for-coding-highspeed">高速版</option>
+                </select>
+              </label>
+              <label className="field-label">
+                Kimi Code API Key
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={kimiApiKey}
+                  onChange={(event) => setKimiApiKey(event.target.value)}
+                  placeholder="从 Kimi Code 控制台创建"
+                />
+              </label>
+              <div className="kimi-code-actions">
+                <button
+                  className="secondary-button"
+                  onClick={() =>
+                    void window.localAgent.app.openExternal('https://www.kimi.com/code/console')
+                  }
+                >
+                  打开控制台
                 </button>
-              )}
-              <button
-                className="primary-button"
-                disabled={!kimiApiKey.trim() || kimiConnecting}
-                onClick={() => void connectKimiCode()}
-              >
-                {kimiConnecting ? <LoaderCircle size={14} className="spin" /> : <Rocket size={14} />}
-                保存并连接
-              </button>
+                {kimiApiKey && (
+                  <button className="icon-button" onClick={() => void clearKimiCode()} title="清除密钥">
+                    <Trash2 size={14} />
+                  </button>
+                )}
+                <button
+                  className="primary-button"
+                  disabled={!kimiApiKey.trim() || kimiConnecting}
+                  onClick={() => void connectKimiCode()}
+                >
+                  {kimiConnecting ? <LoaderCircle size={14} className="spin" /> : <Rocket size={14} />}
+                  保存并连接
+                </button>
+              </div>
+              {kimiResult && <div className="kimi-code-result">{kimiResult}</div>}
             </div>
-            {kimiResult && <div className="kimi-code-result">{kimiResult}</div>}
-          </div>
+          )}
 
-          <button
-            className="settings-link-button"
-            onClick={() => setShowCustomConnection((value) => !value)}
-          >
-            {showCustomConnection ? '收起自定义连接' : '添加自定义接口'}
-          </button>
-          {showCustomConnection && (
-            <div className="custom-connection">
+          {remoteSelection && remoteSelection !== 'kimi-code' && (
+            <div className="custom-connection remote-config-card">
+              <header className="custom-connection-header">
+                <span className="kimi-code-icon"><PlugZap size={17} /></span>
+                <div>
+                  <strong>{customConnection.connectionId ? customConnection.model : '自定义远程模型'}</strong>
+                  <small>兼容 OpenAI 或 Ollama API</small>
+                </div>
+                {model.connectionId === customConnection.connectionId && (
+                  <span className="kimi-code-connected">当前使用</span>
+                )}
+              </header>
               <label className="field-label">
                 服务类型
                 <select
@@ -554,27 +631,57 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
                 密钥，可留空
                 <input
                   type="password"
+                  autoComplete="off"
                   value={customConnection.apiKey ?? ''}
                   onChange={(event) =>
                     setCustomConnection({ ...customConnection, apiKey: event.target.value })
                   }
                 />
               </label>
-              <button
-                className="primary-button full"
-                disabled={!customConnection.baseUrl.trim() || !customConnection.model.trim()}
-                onClick={async () => {
-                  const context = await window.localAgent.model.context(customConnection)
-                  setModel({
-                    ...customConnection,
-                    contextLength: context.contextLength,
-                    maxContextLength: context.maxContextLength
-                  })
-                  setShowCustomConnection(false)
-                }}
-              >
-                保存为当前模型
-              </button>
+              <div className="custom-connection-actions">
+                {customConnection.connectionId && (
+                  <button className="danger-text-button" onClick={() => void removeCustomModel()}>
+                    <Trash2 size={14} /> 删除配置
+                  </button>
+                )}
+                <button
+                  className="primary-button"
+                  disabled={
+                    !customConnection.baseUrl.trim() ||
+                    !customConnection.model.trim() ||
+                    testing
+                  }
+                  onClick={() => void connectCustomModel()}
+                >
+                  {testing ? <LoaderCircle size={14} className="spin" /> : <Rocket size={14} />}
+                  保存并连接
+                </button>
+              </div>
+            </div>
+          )}
+
+          {model.model && (
+            <div className="active-model-card">
+              <span className="status-dot online" />
+              <div>
+                <strong>{model.model}</strong>
+                <small>{model.baseUrl}</small>
+                <small>
+                  当前上下文 {model.contextLength?.toLocaleString() || '自动读取'} Token
+                  {model.maxContextLength
+                    ? ` · 模型上限 ${model.maxContextLength.toLocaleString()}`
+                    : ''}
+                </small>
+              </div>
+            </div>
+          )}
+          <button className="secondary-button full" onClick={() => void test()} disabled={testing}>
+            {testing ? <LoaderCircle size={15} className="spin" /> : <PlugZap size={15} />}
+            测试当前连接
+          </button>
+          {testResult && (
+            <div className="test-result">
+              <CheckCircle2 size={15} /> {testResult}
             </div>
           )}
         </div>
