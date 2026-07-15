@@ -745,6 +745,28 @@ function qwen36ChatTemplateOptions(
   }
 }
 
+function compatibleToolRequest(
+  model: ModelConfig,
+  messages: LlmMessage[],
+  tools: ToolDefinition[],
+  requested: 'auto' | 'required'
+): { messages: LlmMessage[]; toolChoice: 'auto' | 'required' } {
+  if (model.preset !== 'kimi-code' || requested !== 'required') {
+    return { messages, toolChoice: requested }
+  }
+  const names = tools.map((tool) => tool.function.name).join('、')
+  return {
+    messages: [
+      ...messages,
+      {
+        role: 'system',
+        content: `当前步骤必须调用一个可用工具后再继续，禁止直接结束任务。可用工具：${names}`
+      }
+    ],
+    toolChoice: 'auto'
+  }
+}
+
 function hostAttribute(attributes: string, name: string): string {
   const match = attributes.match(
     new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i')
@@ -2094,8 +2116,9 @@ async function streamCompleteWithTools(
   onContent: (content: string) => void
 ): Promise<CompletionResult> {
   const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
+  const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
   const estimatedPrompt =
-    prepared.messages.reduce(
+    compatible.messages.reduce(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
     ) + estimateTextTokens(JSON.stringify(tools))
@@ -2248,9 +2271,9 @@ async function streamCompleteWithTools(
     signal,
     body: safeJsonBody({
       model: model.model,
-      messages: providerMessages(model, prepared.messages),
+      messages: providerMessages(model, compatible.messages),
       tools,
-      tool_choice: toolChoice,
+      tool_choice: compatible.toolChoice,
       stream: true,
       stream_options: { include_usage: true },
       ...qwen36ChatTemplateOptions(model, true)
@@ -2422,8 +2445,9 @@ export async function completeWithTools(
     )
   }
   const prepared = await prepareMessages(model, messages, tools, signal)
+  const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
   const estimatedPrompt =
-    prepared.messages.reduce(
+    compatible.messages.reduce(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
     ) + estimateTextTokens(JSON.stringify(tools))
@@ -2515,9 +2539,9 @@ export async function completeWithTools(
     signal,
     body: safeJsonBody({
       model: model.model,
-      messages: providerMessages(model, prepared.messages),
+      messages: providerMessages(model, compatible.messages),
       tools,
-      tool_choice: toolChoice,
+      tool_choice: compatible.toolChoice,
       stream: false,
       ...qwen36ChatTemplateOptions(model, true)
     })
