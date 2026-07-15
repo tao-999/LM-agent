@@ -192,6 +192,7 @@ export async function workspaceEntryInfo(
 export async function searchWorkspace(
   root: string,
   query: string,
+  scopePath = '',
   limit = 160
 ): Promise<SearchResult[]> {
   const results: SearchResult[] = []
@@ -207,6 +208,40 @@ export async function searchWorkspace(
   if (!groups.length) return results
   let scanned = 0
 
+  const searchFile = async (fullPath: string): Promise<void> => {
+    if (results.length >= limit || scanned >= 2500) return
+    scanned += 1
+    const stat = await fs.stat(fullPath)
+    if (stat.size > 8 * 1024 * 1024) return
+    let content: string
+    try {
+      content = await fs.readFile(fullPath, 'utf8')
+    } catch {
+      return
+    }
+    if (content.includes('\u0000')) return
+    const loweredContent = content.toLocaleLowerCase()
+    const matchedGroups = groups.filter((group) =>
+      group.every((term) => loweredContent.includes(term))
+    )
+    if (!matchedGroups.length) return
+    const activeTerms = [...new Set(matchedGroups.flat())]
+    const lines = content.split(/\r?\n/)
+    lines.forEach((line, index) => {
+      if (results.length >= limit) return
+      const loweredLine = line.toLocaleLowerCase()
+      const matches = activeTerms.filter((term) => loweredLine.includes(term))
+      if (matches.length) {
+        results.push({
+          path: fullPath,
+          line: index + 1,
+          preview: line.trim().slice(0, 220),
+          matches
+        })
+      }
+    })
+  }
+
   const walk = async (directory: string): Promise<void> => {
     if (results.length >= limit || scanned >= 2500) return
     const entries = await fs.readdir(directory, { withFileTypes: true })
@@ -219,39 +254,14 @@ export async function searchWorkspace(
         continue
       }
       if (!entry.isFile()) continue
-      scanned += 1
-      const stat = await fs.stat(fullPath)
-      if (stat.size > 8 * 1024 * 1024) continue
-      let content: string
-      try {
-        content = await fs.readFile(fullPath, 'utf8')
-      } catch {
-        continue
-      }
-      if (content.includes('\u0000')) continue
-      const loweredContent = content.toLocaleLowerCase()
-      const matchedGroups = groups.filter((group) =>
-        group.every((term) => loweredContent.includes(term))
-      )
-      if (!matchedGroups.length) continue
-      const activeTerms = [...new Set(matchedGroups.flat())]
-      const lines = content.split(/\r?\n/)
-      lines.forEach((line, index) => {
-        if (results.length >= limit) return
-        const loweredLine = line.toLocaleLowerCase()
-        const matches = activeTerms.filter((term) => loweredLine.includes(term))
-        if (matches.length) {
-          results.push({
-            path: fullPath,
-            line: index + 1,
-            preview: line.trim().slice(0, 220),
-            matches
-          })
-        }
-      })
+      await searchFile(fullPath)
     }
   }
 
-  await walk(path.resolve(root))
+  const target = scopePath.trim() ? resolveInWorkspace(root, scopePath.trim()) : path.resolve(root)
+  const targetStat = await fs.stat(target)
+  if (targetStat.isFile()) await searchFile(target)
+  else if (targetStat.isDirectory()) await walk(target)
+  else throw new Error(`检索路径既非文件也非目录：${scopePath}`)
   return results
 }

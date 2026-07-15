@@ -217,8 +217,8 @@ function describeToolCall(
       }`
     },
     search_files: {
-      title: `search_files · ${text(args.query) || '未指定关键词'}`,
-      detail: `正在搜索“${text(args.query)}”`
+      title: `search_files · ${pathValue || '全部工作区'} · ${text(args.query) || '未指定关键词'}`,
+      detail: `正在${pathValue ? `限定 ${pathValue}` : '全局'}搜索“${text(args.query)}”`
     },
     search_conversation_history: {
       title: `search_conversation_history · ${text(args.query) || '未指定关键词'}`,
@@ -2414,21 +2414,32 @@ export async function runAgent(
       function: {
         name: 'search_files',
         description:
-          '在工作区文件内容中定位关键词与行号。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词；混合表达式按 OR 分组、组内 AND 处理。',
+          '像 grep 一样在文件内容中定位关键词与行号。已知目标文件或目录时必须传 path 限定范围；需要跨文件查找或目标未知时省略 path，搜索全部工作区。由你根据当前任务自主选择范围。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词；混合表达式按 OR 分组、组内 AND 处理。',
         parameters: {
           type: 'object',
           required: ['query'],
-          properties: { query: { type: 'string' } }
+          properties: {
+            query: { type: 'string', description: '关键词表达式，支持 | 与 &' },
+            path: {
+              type: 'string',
+              description: '可选的工作区相对文件或目录路径；传入时仅搜索该范围，省略时全局搜索'
+            }
+          }
         }
       }
     },
     execute: async (args) => {
-      const results = await searchWorkspace(request.workspaceRoot, text(args.query))
+      const scopePath = text(args.path).trim()
+      const results = await searchWorkspace(request.workspaceRoot, text(args.query), scopePath)
       return stringifyResult(
-        results.map((result) => ({
-          ...result,
-          path: path.relative(request.workspaceRoot, result.path)
-        }))
+        {
+          scope: scopePath || '全部工作区',
+          query: text(args.query),
+          matches: results.map((result) => ({
+            ...result,
+            path: path.relative(request.workspaceRoot, result.path)
+          }))
+        }
       )
     }
   })
@@ -3015,7 +3026,7 @@ export async function runAgent(
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
-    '资料检索优先规则：目标位置未知时，优先调用 search_files 定位关键词与行号；query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。命中后调用 read_file 并传 around_line 与 context_lines 精准读取。已有用户选区、明确行号或可靠命中区间时，可直接 read_file 读取该区间上下文。只有用户明确要求通读、总结、审查或重构全文，或局部区间无法满足任务时，才读取全文。',
+    '资料检索优先规则：search_files 相当于 grep。已知目标文件或目录时传 path 限定范围；目标未知、需要查人物设定或跨文件关系时省略 path 进行全局搜索，由你根据任务自主决定。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。命中后调用 read_file 并传 around_line 与 context_lines 精准读取。已有用户选区、明确行号或可靠命中区间时，可直接 read_file 读取该区间上下文，但仍可继续检索。只有用户明确要求通读、总结、审查或重构全文，或局部区间无法满足任务时，才读取全文。',
     '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 search_files 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
     requiresWritingLoreResearch
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 search_files 检索本地项目资料；命中后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
@@ -3940,7 +3951,10 @@ export async function runAgent(
         knowledgeResearchStage === 'local-search' &&
         call.name === 'search_files'
       ) {
-        if (result.trim() === '[]') {
+        if (
+          result.trim() === '[]' ||
+          /"matches"\s*:\s*\[\s*\]/.test(result)
+        ) {
           knowledgeResearchStage = 'web-search'
           forceToolNext = true
           messages.push({
