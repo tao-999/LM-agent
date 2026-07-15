@@ -3264,10 +3264,10 @@ export async function runAgent(
     'normalize_chinese_quotes'
   ])
   const allowedKnowledgeTools = (): string[] => {
-    if (knowledgeResearchStage === 'anchor-read') return ['read_file']
+    if (knowledgeResearchStage === 'anchor-read') return ['search_files', 'read_file']
     if (knowledgeResearchStage === 'local-search') return ['search_files']
-    if (knowledgeResearchStage === 'local-read') return ['read_file', 'search_files']
-    if (knowledgeResearchStage === 'web-search') return ['search_web']
+    if (knowledgeResearchStage === 'local-read') return ['search_files', 'read_file']
+    if (knowledgeResearchStage === 'web-search') return ['search_files', 'search_web']
     return []
   }
   const requiredKnowledgeToolLabel = (): string => {
@@ -3286,13 +3286,14 @@ export async function runAgent(
       .map((range) => `${range.path} 第 ${range.startLine}-${range.endLine} 行`)
       .join('、')
   const buildModelToolDefinitions = (): ToolDefinition[] => {
-    const allowedTools = new Set(
+    const restrictedTools =
       replaceRecovery
         ? ['read_file']
         : replaceLinesFallbackPath
           ? ['replace_lines']
           : allowedKnowledgeTools()
-    )
+    const allowedTools = new Set<string>(restrictedTools)
+    if (allowedTools.size > 0) allowedTools.add('search_files')
     return [...tools.entries()]
       .filter(([name]) => allowedTools.size === 0 || allowedTools.has(name))
       .filter(([name]) => readFilePaths.size > 0 || !existingFileEditTools.has(name))
@@ -3328,7 +3329,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                '编辑工具状态：尚未通过 read_file 读取任何目标文件，replace_in_file、replace_lines、insert_lines、normalize_chinese_quotes 暂不开放。若要修改现有文件，下一步必须先调用 read_file 读取目标文件或用 search_files 定位后再 read_file。'
+                '编辑工具状态：尚未通过 read_file 读取任何目标文件，replace_in_file、replace_lines、insert_lines、normalize_chinese_quotes 暂不开放。search_files 始终可用且检索优先级高于 read_file；先用 search_files 像 grep 一样定位关键词与行号，再用 read_file 读取目标区间上下文。已知用户选区时可直接读取选区上下文，但不得把选区理解为禁止继续检索。'
             }
           ]
         : []),
@@ -3339,7 +3340,7 @@ export async function runAgent(
         ? [
             {
               role: 'system' as const,
-              content: `replace_in_file 恢复状态：刚才对 ${replaceRecovery.path} 的精确匹配失败。当前只开放 read_file；下一步必须重新读取同一文件的最新目标区间，禁止输出正文，禁止再次提交旧 search。失败原因：${replaceRecovery.failure}`
+                content: `replace_in_file 恢复状态：刚才对 ${replaceRecovery.path} 的精确匹配失败。search_files 始终可用；优先检索目标文本取得最新行号，再用 read_file 读取同一文件的最新目标区间，禁止输出正文，禁止再次提交旧的替换文本。失败原因：${replaceRecovery.failure}`
             }
           ]
         : replaceLinesFallbackPath
@@ -3358,12 +3359,12 @@ export async function runAgent(
               role: 'system' as const,
               content:
                 knowledgeResearchStage === 'anchor-read'
-                  ? `当前选区锚点读取阶段：用户选区只负责定位当前问题，不代表资料完整。只调用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文；若未显式提供范围，程序会自动扩展选区前后各约 50 行。读取完成后必须重新判断信息缺口，可继续 search_files 检索当前文件、其他文件或项目资料；涉及外部事实、陌生知识或本地资料不足时可继续 search_web。严禁把存在选区理解成禁止检索。`
+                  ? `当前选区锚点阶段：用户选区只负责定位当前问题，不代表资料完整。search_files 始终可用且优先级高于 read_file；需要定位关键词、同义表达或跨文件资料时优先检索。已知目标区间时调用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文；若未显式提供范围，程序会自动扩展选区前后各约 50 行。读取完成后必须重新判断信息缺口，可继续检索当前文件、其他文件或项目资料。严禁把存在选区理解成禁止检索。`
                   : knowledgeResearchStage === 'local-search'
                   ? '当前强制任务：从用户本轮内容提取人物名、服装形象、关系、武学、门派、情节或其他关键设定词，只调用 search_files 检索本地项目资料。此阶段 search_web 不可用；禁止输出正文、禁止编辑、禁止调用其他工具。'
                   : knowledgeResearchStage === 'local-read'
                     ? '当前本地检索阶段：优先调用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；若现有命中不够精准，可继续调用 search_files 更换关键词、增加同义词或使用 OR 条件细化查询。此阶段 search_web 与写入工具不可用，取得足够本地上下文后再继续任务。'
-                    : '本地资料未命中。当前强制任务：只调用 search_web 查询用户涉及的人物、武学或既有设定，查询词必须包含准确名称与作品名。此时禁止输出正文、禁止编辑、禁止调用其他工具。'
+                    : '本地资料未命中。当前强制任务：调用 search_web 查询用户涉及的人物、武学或既有设定，查询词必须包含准确名称与作品名。search_files 仍保持可用，可在发现新的本地关键词后继续补充检索；此时禁止输出正文与编辑。'
             }
           ]
         : [])
