@@ -92,7 +92,7 @@ export type AgentUserFileEditLock = {
 
 type RegisteredTool = {
   definition: ToolDefinition
-  risk: 'read' | 'write' | 'command'
+  risk: 'read' | 'write' | 'create' | 'delete' | 'command'
   preview?: (args: Record<string, unknown>) => Promise<AgentChange[]>
   execute: (args: Record<string, unknown>, preview?: AgentChange[]) => Promise<string>
 }
@@ -1761,19 +1761,6 @@ export async function runAgent(
     /(?:(?:读取|查看|检查|审查|分析|总结|通读|重构|重写|格式化).{0,16}(?:全文|全篇|整个文件|完整文件|全部内容|所有内容)|(?:全文|全篇|整个文件|完整文件|全部内容|所有内容).{0,16}(?:读取|查看|检查|审查|分析|总结|通读|重构|重写|格式化))/i.test(
       currentTaskText
     )
-  const creationProhibited =
-    /(?:禁止|严禁|不要|不得|不允许|不可).{0,24}(?:新建|创建|新增|生成|复制).{0,16}(?:文件|目录|文件夹|脚本|项目|页面|模块|组件|副本|备份)/i.test(
-      currentTaskText
-    )
-  const userRequestedFileCreation =
-    !creationProhibited &&
-    /(?:(?:新建|创建|新增|生成|复制).{0,20}(?:文件|目录|文件夹|脚本|项目|页面|模块|组件|副本)|(?:搭建|开发|编写|写一个|做一个|制作).{0,16}(?:项目|应用|程序|脚本|页面|文件|模块|组件|游戏)|(?:构建|打包|安装|初始化|生成安装包))/i.test(
-      currentTaskText
-    )
-  const backupProhibited =
-    /(?:禁止|严禁|不要|不得|不允许|不可).{0,20}(?:备份|backup|\.bak\b)/i.test(currentTaskText)
-  const userRequestedBackup =
-    !backupProhibited && /(?:备份|backup|\.bak\b)/i.test(currentTaskText)
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，只允许搜索、读取和引用 ${restrictedWebHosts.join('、')}，禁止访问其他网站，也禁止为了凑来源跨站核验。`
     : '用户未指定网页来源时，才执行多网站交叉核验。'
@@ -1875,29 +1862,6 @@ export async function runAgent(
     const current = currentContent ?? (await readTextFile(request.workspaceRoot, relative))
     if (fingerprintText(current) === expectedFingerprint) return
     throwEditConflict(relative, normalized)
-  }
-
-  const isBackupPath = (value: string): boolean =>
-    /(?:^|[\\/])[^\\/]+\.(?:bak|backup)(?:\.[^\\/]*)?$/i.test(value.trim())
-  const assertFileCreationAllowed = (target = ''): void => {
-    if (!userRequestedFileCreation) {
-      throw new Error('用户本轮未要求创建文件，已阻止未经授权的新建操作')
-    }
-    if (target && isBackupPath(target) && !userRequestedBackup) {
-      throw new Error(`用户本轮未要求创建备份，已阻止生成：${target}`)
-    }
-  }
-
-  const snapshotWorkspaceEntries = async (): Promise<Map<string, 'file' | 'directory'>> => {
-    const entries = new Map<string, 'file' | 'directory'>()
-    const collect = (nodes: Awaited<ReturnType<typeof buildFileTree>>): void => {
-      for (const node of nodes) {
-        entries.set(path.resolve(node.path).toLocaleLowerCase(), node.kind)
-        if (node.children?.length) collect(node.children)
-      }
-    }
-    collect(await buildFileTree(request.workspaceRoot, 20))
-    return entries
   }
 
   const normalizeToolCallArguments = async (
@@ -2551,7 +2515,7 @@ export async function runAgent(
   })
 
   tools.set('create_file', {
-    risk: 'write',
+    risk: 'create',
     definition: {
       type: 'function',
       function: {
@@ -2570,7 +2534,6 @@ export async function runAgent(
     },
     preview: async (args) => {
       const relative = text(args.path)
-      assertFileCreationAllowed(relative)
       await requireReadBeforeEdit(relative)
       const preview = await createTextPreview(relative, () => text(args.content), true, true)
       if (preview[0].beforeExists && preview[0].before.length > 0) {
@@ -2580,7 +2543,6 @@ export async function runAgent(
     },
     execute: async (args, preview) => {
       const relative = text(args.path)
-      assertFileCreationAllowed(relative)
       await applyTextPreview(
         preview ?? (await createTextPreview(relative, () => text(args.content), true, true))
       )
@@ -2589,7 +2551,7 @@ export async function runAgent(
   })
 
   tools.set('create_directory', {
-    risk: 'write',
+    risk: 'create',
     definition: {
       type: 'function',
       function: {
@@ -2604,7 +2566,6 @@ export async function runAgent(
     },
     execute: async (args) => {
       const relative = text(args.path)
-      assertFileCreationAllowed(relative)
       const parent = path.dirname(relative)
       const name = path.basename(relative)
       await createWorkspaceEntry(request.workspaceRoot, parent, name, 'directory')
@@ -2613,7 +2574,7 @@ export async function runAgent(
   })
 
   tools.set('delete_path', {
-    risk: 'write',
+    risk: 'delete',
     definition: {
       type: 'function',
       function: {
@@ -2670,9 +2631,6 @@ export async function runAgent(
     preview: async (args) => {
       const source = text(args.source)
       const target = text(args.target)
-      if (isBackupPath(target) && !userRequestedBackup) {
-        throw new Error(`用户本轮未要求创建备份，已阻止移动到：${target}`)
-      }
       const info = await workspaceEntryInfo(request.workspaceRoot, source)
       if (info.kind !== 'file') return []
       const content = await readTextFile(request.workspaceRoot, source)
@@ -2694,9 +2652,6 @@ export async function runAgent(
       ]
     },
     execute: async (args, preview) => {
-      if (isBackupPath(text(args.target)) && !userRequestedBackup) {
-        throw new Error(`用户本轮未要求创建备份，已阻止移动到：${text(args.target)}`)
-      }
       if (preview?.length) {
         await applyTextPreview(preview)
         return `已移动到 ${text(args.target)}`
@@ -2711,7 +2666,7 @@ export async function runAgent(
   })
 
   tools.set('copy_path', {
-    risk: 'write',
+    risk: 'create',
     definition: {
       type: 'function',
       function: {
@@ -2730,7 +2685,6 @@ export async function runAgent(
     preview: async (args) => {
       const source = text(args.source)
       const target = text(args.target)
-      assertFileCreationAllowed(target)
       const info = await workspaceEntryInfo(request.workspaceRoot, source)
       if (info.kind !== 'file') return []
       const content = await readTextFile(request.workspaceRoot, source)
@@ -2745,7 +2699,6 @@ export async function runAgent(
       ]
     },
     execute: async (args, preview) => {
-      assertFileCreationAllowed(text(args.target))
       if (preview?.length) {
         await applyTextPreview(preview)
         return `已复制到 ${text(args.target)}`
@@ -2958,7 +2911,7 @@ export async function runAgent(
       function: {
         name: 'run_command',
         description:
-          '在当前工作区执行系统命令，用于安装、构建、测试、查看状态或按用户要求编辑已有文件。命令修改文件后编辑器会自动刷新；严禁在用户未明确要求时创建新文件、副本或备份。',
+          '在当前工作区执行系统命令，仅用于安装依赖、构建、测试、运行程序与查看状态。创建文件或文件夹必须调用 create_file/create_directory，删除必须调用 delete_path，复制必须调用 copy_path，普通文件编辑必须调用精准编辑工具；严禁用 Python、PowerShell、Shell、重定向或脚本绕过对应的聊天确认模块。命令产生的构建输出会自动刷新。',
         parameters: {
           type: 'object',
           required: ['command'],
@@ -2968,44 +2921,12 @@ export async function runAgent(
     },
     execute: async (args) => {
       const command = text(args.command)
-      if (!userRequestedBackup && /(?:\.bak\b|\.backup\b|backup)/i.test(command)) {
-        throw new Error('用户本轮未要求创建备份，已阻止包含备份路径或备份命令的操作')
-      }
-      const beforeEntries = await snapshotWorkspaceEntries()
       const { stdout, stderr } = await execAsync(command, {
         cwd: request.workspaceRoot,
         timeout: 120000,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true
       })
-      const afterEntries = await snapshotWorkspaceEntries()
-      const unauthorized = [...afterEntries.entries()]
-        .filter(([entryPath]) => !beforeEntries.has(entryPath))
-        .filter(
-          ([entryPath]) =>
-            !userRequestedFileCreation || (!userRequestedBackup && isBackupPath(entryPath))
-        )
-        .map(([entryPath]) => entryPath)
-        .sort((left, right) => left.length - right.length)
-        .filter(
-          (entryPath, index, entries) =>
-            !entries
-              .slice(0, index)
-              .some(
-                (parent) =>
-                  entryPath.startsWith(`${parent}\\`) || entryPath.startsWith(`${parent}/`)
-              )
-        )
-      if (unauthorized.length) {
-        for (const entryPath of unauthorized) {
-          await deleteWorkspaceEntry(request.workspaceRoot, entryPath)
-        }
-        throw new Error(
-          `命令创建了用户未授权的新路径，程序已自动回滚：${unauthorized
-            .map((entryPath) => path.relative(request.workspaceRoot, entryPath))
-            .join('、')}`
-        )
-      }
       return stringifyResult({ stdout, stderr })
     }
   })
@@ -3100,12 +3021,8 @@ export async function runAgent(
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 search_files 检索本地项目资料；命中后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
       : '',
     '未知知识检索规则：该规则同样适用于代码与普通问答。遇到模型训练资料中可能不存在、版本可能变化、记忆不确定、项目专有、第三方库或 API 行为不明确的事实，严禁凭印象猜测。先调用 search_files 检索本地项目文档、源码与配置；本地资料缺失或不足时必须调用 search_web。只有现有上下文已经给出可靠依据时才可跳过检索。',
-    userRequestedFileCreation
-      ? '文件创建权限：用户本轮明确要求创建文件，可按目标创建必要文件；仍禁止额外副本和未获授权的备份。'
-      : '文件创建权限：用户本轮未要求创建任何文件。严禁调用 create_file、create_directory、copy_path，严禁通过命令、脚本、重定向或复制操作私自生成新文件、副本、备份或 .bak。',
-    userRequestedBackup
-      ? '备份权限：用户本轮明确要求备份，可创建与目标直接相关的备份文件。'
-      : '备份权限：用户本轮未要求备份。严禁创建 .bak、.backup 或任何备份副本。',
+    '创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。create_file、create_directory、copy_path 与 delete_path 是否执行只由当前权限模式和聊天内审批决定；即使处于读写自动模式，这些工具也必须逐次显示独立确认模块并等待用户允许。',
+    '专用工具规则：创建文件使用 create_file，创建目录使用 create_directory，复制使用 copy_path，删除使用 delete_path。严禁调用 run_command、Python、PowerShell、Shell、重定向或临时脚本绕过创建与删除确认模块。',
     '中文引号修复最高优先级：用户要求把英文双引号或英文单引号改成中文引号、修复小说引号、统一中文标点时，必须先 read_file 读取目标文件，再调用 normalize_chinese_quotes，禁止手动逐行替换或重写全文。',
     request.instructions,
     '你是运行在个人电脑中的星伴 AI。',
@@ -3148,7 +3065,7 @@ export async function runAgent(
     '网页事实核验规则：最终回答必须列出实际读取过的来源标题与直接网址，禁止引用必应或 DuckDuckGo 跳转链接。',
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
-    `当前权限模式：${request.permissionMode || 'confirm'}。必须服从工具层权限限制，不得尝试绕过审批。`,
+    `当前权限模式：${request.permissionMode || 'read-write-manual'}。只读模式禁止全部写入、创建、删除与命令；读写手动模式要求普通写入与命令逐次确认；读写自动模式允许普通写入自动执行。创建、复制、删除与命令始终逐次确认，严禁绕过审批。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
     '文件工具中的路径必须使用工作区相对路径。'
   ]
@@ -3346,7 +3263,6 @@ export async function runAgent(
     'insert_lines',
     'normalize_chinese_quotes'
   ])
-  const fileCreationTools = new Set(['create_file', 'create_directory', 'copy_path'])
   const allowedKnowledgeTools = (): string[] => {
     if (knowledgeResearchStage === 'anchor-read') return ['read_file']
     if (knowledgeResearchStage === 'local-search') return ['search_files']
@@ -3380,7 +3296,6 @@ export async function runAgent(
     return [...tools.entries()]
       .filter(([name]) => allowedTools.size === 0 || allowedTools.has(name))
       .filter(([name]) => readFilePaths.size > 0 || !existingFileEditTools.has(name))
-      .filter(([name]) => userRequestedFileCreation || !fileCreationTools.has(name))
       .sort(
         ([leftName], [rightName]) =>
           (toolPriority.get(leftName) ?? 20) - (toolPriority.get(rightName) ?? 20)
@@ -3777,26 +3692,38 @@ export async function runAgent(
           )
         }
         if (!tool) throw new Error(`未知工具：${call.name}`)
-        const permissionMode = request.permissionMode || 'confirm'
+        const permissionMode = request.permissionMode || 'read-write-manual'
         if (permissionMode === 'read-only' && tool.risk !== 'read') {
           result = '权限已阻止：当前会话为只读模式，请仅分析并向用户说明需要执行的操作'
         } else {
           const needsApproval =
-            (tool.risk === 'write' && permissionMode === 'confirm') ||
-            (tool.risk === 'command' && permissionMode !== 'full-auto')
+            (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
+            tool.risk === 'create' ||
+            tool.risk === 'delete' ||
+            tool.risk === 'command'
           preview = tool.preview ? await tool.preview(call.arguments) : undefined
           if (needsApproval) {
+            const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'
+            const approvalTitle = {
+              write: '确认文件修改',
+              create: '确认创建内容',
+              delete: '确认删除内容',
+              command: '确认执行命令'
+            }[approvalRisk]
+            const approvalDescription = {
+              write: `修改范围：${preview?.length || 0} 个文件`,
+              create: `创建范围：${preview?.length || 0} 个路径`,
+              delete: `删除范围：${preview?.length || 0} 个路径`,
+              command: `待确认命令：${call.name}`
+            }[approvalRisk]
             const approval: AgentApproval = {
               requestId: request.requestId,
               approvalId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              title: tool.risk === 'command' ? '确认执行操作' : '确认文件修改',
-              description:
-                tool.risk === 'command'
-                  ? `待确认命令：${call.name}`
-                  : `修改范围：${preview?.length || 0} 个文件`,
+              title: approvalTitle,
+              description: approvalDescription,
               toolName: call.name,
               toolArgs: call.arguments,
-              risk: tool.risk === 'write' ? 'write' : 'command',
+              risk: approvalRisk,
               changes: preview
             }
             const approved = await requestApproval(approval)
@@ -4053,7 +3980,7 @@ export async function runAgent(
           content: `<runtime_web_status fetched_at="${currentTime}">search_web 已由程序真实执行成功。上一条 tool 消息包含实时网页正文。请直接依据查询结果继续完成目标；禁止用训练截止日期质疑、否定或覆盖工具结果，禁止输出“可能是幻觉”之类的判断。</runtime_web_status>`
         })
       }
-      if (toolSucceeded && tool?.risk === 'write') {
+      if (toolSucceeded && (tool?.risk === 'write' || tool?.risk === 'create')) {
         await appendPostEditReview(preview)
       }
       send({

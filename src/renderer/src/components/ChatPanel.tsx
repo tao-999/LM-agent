@@ -72,6 +72,28 @@ const USER_MESSAGE_COLLAPSE_CHARACTERS = 720
 const USER_MESSAGE_COLLAPSE_HEIGHT = 280
 const LONG_PASTE_ATTACHMENT_THRESHOLD = 4_000
 const MAX_MESSAGE_ATTACHMENTS = 12
+const KIMI_CODE_MODELS: ModelOption[] = [
+  {
+    id: 'kimi-code:standard',
+    name: 'kimi-for-coding',
+    provider: 'openai',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    source: 'Kimi Code',
+    preset: 'kimi-code',
+    contextLength: 262144,
+    maxContextLength: 262144
+  },
+  {
+    id: 'kimi-code:highspeed',
+    name: 'kimi-for-coding-highspeed',
+    provider: 'openai',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    source: 'Kimi Code',
+    preset: 'kimi-code',
+    contextLength: 262144,
+    maxContextLength: 262144
+  }
+]
 
 type MentionEntry = {
   path: string
@@ -1799,9 +1821,10 @@ export function ChatPanel(): React.JSX.Element {
   }, [mode, selectedComfyWorkflow?.id, comfyBaseUrl])
 
   const displayedModels = useMemo(() => {
+    const available = [...KIMI_CODE_MODELS, ...modelOptions]
     if (
       model.model &&
-      !modelOptions.some(
+      !available.some(
         (item) =>
           item.name === model.model &&
           item.provider === model.provider &&
@@ -1814,14 +1837,20 @@ export function ChatPanel(): React.JSX.Element {
           name: model.model,
           provider: model.provider,
           baseUrl: model.baseUrl,
-          source: model.provider === 'ollama' ? ('Ollama' as const) : ('LM Studio' as const),
+          source:
+            model.preset === 'kimi-code'
+              ? ('Kimi Code' as const)
+              : model.provider === 'ollama'
+                ? ('Ollama' as const)
+                : ('LM Studio' as const),
+          preset: model.preset,
           contextLength: model.contextLength,
           maxContextLength: model.maxContextLength
         },
-        ...modelOptions
+        ...available
       ]
     }
-    return modelOptions
+    return available
   }, [model, modelOptions])
 
   const selectedModelId =
@@ -2803,16 +2832,21 @@ export function ChatPanel(): React.JSX.Element {
                     setAgentPermissionMode(event.target.value as AgentPermissionMode)
                   }
                 >
-                  <option value="read-only">只读（禁止修改）</option>
-                  <option value="confirm">每次修改都确认</option>
-                  <option value="auto-edit">自动改文件（命令确认）</option>
-                  <option value="full-auto">全部自动（含命令）</option>
+                  <option value="read-only">只读</option>
+                  <option value="read-write-manual">读写（手动）</option>
+                  <option value="read-write-auto">读写（自动）</option>
                 </select>
               </label>
             </>
           )}
           <div className="model-picker">
-            <span className={`status-dot ${selectedModelId ? 'online' : 'offline'}`} />
+            <span
+              className={`status-dot ${
+                selectedModelId && (model.preset !== 'kimi-code' || model.apiKey)
+                  ? 'online'
+                  : 'offline'
+              }`}
+            />
             <select
               value={selectedModelId}
               onChange={(event) => {
@@ -2822,29 +2856,41 @@ export function ChatPanel(): React.JSX.Element {
                     ...model,
                     model: '',
                     baseUrl: '',
+                    apiKey: undefined,
+                    preset: undefined,
                     contextLength: undefined,
                     maxContextLength: undefined
                   })
                   return
                 }
-                setModel({
-                  ...model,
-                  provider: selected.provider,
-                  baseUrl: selected.baseUrl,
-                  model: selected.name,
-                  contextLength: selected.contextLength,
-                  maxContextLength: selected.maxContextLength
-                })
+                void (async () => {
+                  const apiKey =
+                    selected.preset === 'kimi-code'
+                      ? await window.localAgent.credentials.getKimiCodeApiKey()
+                      : undefined
+                  if (selected.preset === 'kimi-code' && !apiKey) {
+                    setActionNotice('请先在设置中填写并保存 Kimi Code API Key')
+                  } else {
+                    setActionNotice('')
+                  }
+                  setModel({
+                    provider: selected.provider,
+                    baseUrl: selected.baseUrl,
+                    model: selected.name,
+                    apiKey: apiKey || undefined,
+                    preset: selected.preset,
+                    contextLength: selected.contextLength,
+                    maxContextLength: selected.maxContextLength
+                  })
+                })()
               }}
             >
               <option value="">
                 {discovering
                   ? '正在扫描本地模型…'
-                  : displayedModels.length
-                    ? '选择本地模型'
-                    : '未发现本地模型'}
+                  : '选择模型'}
               </option>
-              {(['Ollama', 'LM Studio', 'llama.cpp'] as const).map((source) => {
+              {(['Kimi Code', 'Ollama', 'LM Studio', 'llama.cpp'] as const).map((source) => {
                 const options = displayedModels.filter((item) => item.source === source)
                 if (!options.length) return null
                 return (

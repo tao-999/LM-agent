@@ -514,6 +514,15 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     useAppStore.getState().settleInterruptedConversations()
+    const state = useAppStore.getState()
+    if (state.model.preset === 'kimi-code' && !state.model.apiKey) {
+      void window.localAgent.credentials.getKimiCodeApiKey().then((apiKey) => {
+        const latest = useAppStore.getState()
+        if (apiKey && latest.model.preset === 'kimi-code' && !latest.model.apiKey) {
+          latest.setModel({ ...latest.model, apiKey })
+        }
+      })
+    }
   }, [])
 
   useEffect(() => {

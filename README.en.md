@@ -9,6 +9,7 @@ StarMate AI is a local-first desktop AI workspace that combines chat, autonomous
 ### Local Models and Chat
 
 - Automatically discovers and connects to LM Studio, Ollama, and OpenAI-compatible local APIs.
+- Includes first-class Kimi Code support with Standard and HighSpeed tiers; the membership API key is encrypted with the operating system's secure storage.
 - Streams final responses and visible reasoning with Markdown, code blocks, tables, formulas, links, and images.
 - Provides Chat, Agent, and Image modes, with the selected mode persisted per conversation.
 - Supports attachments, screenshots, full-size image previews, `@file` mentions, and editor selections.
@@ -23,7 +24,7 @@ StarMate AI is a local-first desktop AI workspace that combines chat, autonomous
 - Existing files must be read before editing, while fingerprints and user-edit locks prevent overwriting concurrent user changes.
 - After an exact replacement mismatch, the agent must refresh the file; repeated failed arguments are blocked and redirected to line-range replacement.
 - Tool cards show the real function name, target file, operation range, duration, result, and error reason.
-- Supports Read Only, Confirm Changes, Auto Edit, and Full Auto permission modes.
+- Supports Read Only, Read/Write (Manual), and Read/Write (Automatic) modes; creation, copying, deletion, and commands always require a dedicated confirmation.
 
 ### Editor and Projects
 
@@ -54,6 +55,7 @@ StarMate AI is a local-first desktop AI workspace that combines chat, autonomous
 - Node.js 22 or newer (recommended)
 - npm
 - At least one local model service: LM Studio, Ollama, or an OpenAI-compatible endpoint
+- Kimi Code is optional and requires an active membership plus a Kimi Code API key
 - An accessible ComfyUI service for image generation
 
 ## Development
@@ -111,4 +113,3 @@ build/          Application icon assets
 ## Project Status
 
 The project is under active development. Use Git for important files and review the working tree before running Full Auto agent tasks.
-

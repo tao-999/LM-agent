@@ -450,7 +450,9 @@ export function FileWorkspace(): React.JSX.Element {
     }
   }, [activeFile?.content, activeFile?.path, isImage])
   const approvalChanges =
-    agentApproval?.risk === 'write' ? agentApproval.changes ?? [] : []
+    agentApproval && ['write', 'create', 'delete'].includes(agentApproval.risk)
+      ? agentApproval.changes ?? []
+      : []
   const reviewCheckpoint = agentCheckpoints.find((item) => item.id === reviewCheckpointId)
   const reviewChanges = approvalChanges.length
     ? approvalChanges

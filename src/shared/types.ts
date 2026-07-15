@@ -16,11 +16,14 @@ export type SearchResult = {
 
 export type ModelProvider = 'ollama' | 'openai'
 
+export type ModelPreset = 'kimi-code'
+
 export type ModelConfig = {
   provider: ModelProvider
   baseUrl: string
   model: string
   apiKey?: string
+  preset?: ModelPreset
   contextLength?: number
   maxContextLength?: number
 }
@@ -39,14 +42,15 @@ export type ModelOption = {
   name: string
   provider: ModelProvider
   baseUrl: string
-  source: 'Ollama' | 'LM Studio' | 'llama.cpp'
+  source: 'Ollama' | 'LM Studio' | 'llama.cpp' | 'Kimi Code'
+  preset?: ModelPreset
   contextLength?: number
   maxContextLength?: number
 }
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
-export type AgentPermissionMode = 'read-only' | 'confirm' | 'auto-edit' | 'full-auto'
+export type AgentPermissionMode = 'read-only' | 'read-write-manual' | 'read-write-auto'
 
 export type AgentStep = {
   id: string
@@ -323,7 +327,7 @@ export type AgentApproval = {
   description: string
   toolName: string
   toolArgs: Record<string, unknown>
-  risk: 'write' | 'command'
+  risk: 'write' | 'create' | 'delete' | 'command'
   changes?: AgentChange[]
 }
 

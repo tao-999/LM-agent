@@ -111,6 +111,12 @@ const api = {
     discover: () => ipcRenderer.invoke('model:discover'),
     context: (model: ModelConfig) => ipcRenderer.invoke('model:context', model)
   },
+  credentials: {
+    getKimiCodeApiKey: () =>
+      ipcRenderer.invoke('credentials:getKimiCodeApiKey') as Promise<string>,
+    setKimiCodeApiKey: (apiKey: string) =>
+      ipcRenderer.invoke('credentials:setKimiCodeApiKey', apiKey) as Promise<boolean>
+  },
   skills: {
     import: () => ipcRenderer.invoke('skills:import')
   },

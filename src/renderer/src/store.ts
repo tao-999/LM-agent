@@ -349,7 +349,7 @@ export const useAppStore = create<AppStore>()(
       model: defaultModel,
       globalInstructions: '',
       skills: [],
-      agentPermissionMode: 'confirm',
+      agentPermissionMode: 'read-write-manual',
       agentApproval: null,
       agentCheckpoints: [],
       reviewCheckpointId: '',
@@ -740,7 +740,7 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 12,
+      version: 13,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -750,7 +750,15 @@ export const useAppStore = create<AppStore>()(
         if (state.workspaceRoot && !state.workspaceRoots?.length) {
           state.workspaceRoots = [state.workspaceRoot]
         }
-        if (!state.agentPermissionMode) state.agentPermissionMode = 'confirm'
+        const legacyPermissionMode = state.agentPermissionMode as string | undefined
+        state.agentPermissionMode =
+          legacyPermissionMode === 'read-only'
+            ? 'read-only'
+            : legacyPermissionMode === 'auto-edit' || legacyPermissionMode === 'full-auto'
+              ? 'read-write-auto'
+              : legacyPermissionMode === 'read-write-auto'
+                ? 'read-write-auto'
+                : 'read-write-manual'
         if (!state.editorTheme) state.editorTheme = 'one-dark-pro'
         if (!state.tokenUsageRecords) state.tokenUsageRecords = []
         if (!state.comfyBaseUrl) state.comfyBaseUrl = 'http://127.0.0.1:8188'
@@ -764,7 +772,7 @@ export const useAppStore = create<AppStore>()(
         workspaceRoot: state.workspaceRoot,
         workspaceRoots: state.workspaceRoots,
         editorTheme: state.editorTheme,
-        model: state.model,
+        model: { ...state.model, apiKey: undefined },
         globalInstructions: state.globalInstructions,
         skills: state.skills,
         agentPermissionMode: state.agentPermissionMode,

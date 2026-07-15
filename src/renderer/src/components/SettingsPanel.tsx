@@ -6,11 +6,13 @@ import {
   ChevronLeft,
   ChevronRight,
   FileInput,
+  KeyRound,
   LoaderCircle,
   Pencil,
   PlugZap,
   Plus,
   RefreshCw,
+  Rocket,
   Save,
   Trash2,
   Wrench,
@@ -143,6 +145,12 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
   const [testResult, setTestResult] = useState('')
   const [testing, setTesting] = useState(false)
   const [showCustomConnection, setShowCustomConnection] = useState(false)
+  const [kimiApiKey, setKimiApiKey] = useState(model.preset === 'kimi-code' ? model.apiKey ?? '' : '')
+  const [kimiModel, setKimiModel] = useState(
+    model.preset === 'kimi-code' ? model.model : 'kimi-for-coding'
+  )
+  const [kimiConnecting, setKimiConnecting] = useState(false)
+  const [kimiResult, setKimiResult] = useState('')
   const [customConnection, setCustomConnection] = useState<ModelConfig>({
     provider: 'openai',
     baseUrl: 'http://127.0.0.1:1234/v1',
@@ -162,6 +170,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
 
   useEffect(() => {
     void discover()
+    void window.localAgent.credentials.getKimiCodeApiKey().then((apiKey) => {
+      if (apiKey) setKimiApiKey(apiKey)
+    })
   }, [])
 
   const selectedModelId =
@@ -190,6 +201,42 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
     const result = await window.localAgent.model.test(model)
     setTesting(false)
     setTestResult(result.message)
+  }
+
+  const connectKimiCode = async (): Promise<void> => {
+    const apiKey = kimiApiKey.trim()
+    if (!apiKey) {
+      setKimiResult('请先填写 Kimi Code API Key')
+      return
+    }
+    setKimiConnecting(true)
+    setKimiResult('')
+    const next: ModelConfig = {
+      provider: 'openai',
+      preset: 'kimi-code',
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      model: kimiModel,
+      apiKey,
+      contextLength: 262144,
+      maxContextLength: 262144
+    }
+    try {
+      await window.localAgent.credentials.setKimiCodeApiKey(apiKey)
+      const result = await window.localAgent.model.test(next)
+      setKimiResult(result.message)
+      if (result.ok) setModel(next)
+    } catch (error) {
+      setKimiResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setKimiConnecting(false)
+    }
+  }
+
+  const clearKimiCode = async (): Promise<void> => {
+    await window.localAgent.credentials.setKimiCodeApiKey('')
+    setKimiApiKey('')
+    setKimiResult('已清除 Kimi Code API Key')
+    if (model.preset === 'kimi-code') setModel({ ...model, apiKey: undefined })
   }
 
   const saveSkill = (): void => {
@@ -407,6 +454,60 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
               <CheckCircle2 size={15} /> {testResult}
             </div>
           )}
+
+          <div className="kimi-code-card">
+            <header>
+              <span className="kimi-code-icon"><KeyRound size={17} /></span>
+              <div>
+                <strong>Kimi Code</strong>
+                <small>会员 API Key · OpenAI 兼容协议 · 256K 上下文</small>
+              </div>
+              {model.preset === 'kimi-code' && model.apiKey && (
+                <span className="kimi-code-connected">已启用</span>
+              )}
+            </header>
+            <label className="field-label">
+              速度档位
+              <select value={kimiModel} onChange={(event) => setKimiModel(event.target.value)}>
+                <option value="kimi-for-coding">普通版</option>
+                <option value="kimi-for-coding-highspeed">高速版</option>
+              </select>
+            </label>
+            <label className="field-label">
+              Kimi Code API Key
+              <input
+                type="password"
+                autoComplete="off"
+                value={kimiApiKey}
+                onChange={(event) => setKimiApiKey(event.target.value)}
+                placeholder="从 Kimi Code 控制台创建"
+              />
+            </label>
+            <div className="kimi-code-actions">
+              <button
+                className="secondary-button"
+                onClick={() =>
+                  void window.localAgent.app.openExternal('https://www.kimi.com/code/console')
+                }
+              >
+                打开控制台
+              </button>
+              {kimiApiKey && (
+                <button className="icon-button" onClick={() => void clearKimiCode()} title="清除密钥">
+                  <Trash2 size={14} />
+                </button>
+              )}
+              <button
+                className="primary-button"
+                disabled={!kimiApiKey.trim() || kimiConnecting}
+                onClick={() => void connectKimiCode()}
+              >
+                {kimiConnecting ? <LoaderCircle size={14} className="spin" /> : <Rocket size={14} />}
+                保存并连接
+              </button>
+            </div>
+            {kimiResult && <div className="kimi-code-result">{kimiResult}</div>}
+          </div>
 
           <button
             className="settings-link-button"

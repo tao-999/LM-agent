@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron'
 import {
   spawn,
   type ChildProcess,
@@ -80,6 +80,47 @@ let lastRequestedModel: ModelConfig | null = null
 const imageQueue: ImageGenerationRequest[] = []
 let activeImageRequest: ImageGenerationRequest | null = null
 let imageQueueProcessing = false
+
+type SecureCredentials = {
+  kimiCodeApiKey?: string
+}
+
+function secureCredentialsPath(): string {
+  return path.join(app.getPath('userData'), 'secure-credentials.json')
+}
+
+async function readSecureCredentials(): Promise<SecureCredentials> {
+  try {
+    const content = await fs.readFile(secureCredentialsPath(), 'utf8')
+    const stored = JSON.parse(content) as Record<string, string | undefined>
+    if (!stored.kimiCodeApiKey || !safeStorage.isEncryptionAvailable()) return {}
+    return {
+      kimiCodeApiKey: safeStorage.decryptString(
+        Buffer.from(stored.kimiCodeApiKey, 'base64')
+      )
+    }
+  } catch {
+    return {}
+  }
+}
+
+async function saveKimiCodeApiKey(apiKey: string): Promise<void> {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('当前系统无法启用安全凭据存储，请检查 Windows 登录凭据服务')
+  }
+  const trimmed = apiKey.trim()
+  if (!trimmed) {
+    await fs.rm(secureCredentialsPath(), { force: true })
+    return
+  }
+  const encrypted = safeStorage.encryptString(trimmed).toString('base64')
+  await fs.mkdir(path.dirname(secureCredentialsPath()), { recursive: true })
+  await fs.writeFile(
+    secureCredentialsPath(),
+    JSON.stringify({ kimiCodeApiKey: encrypted }, null, 2),
+    'utf8'
+  )
+}
 
 function normalizeWorkspaceFile(root: string, filePath: string): string | null {
   const absoluteRoot = path.resolve(root)
@@ -543,6 +584,13 @@ function registerIpc(): void {
   ipcMain.handle('app:openExternal', async (_event, url: string) =>
     openExternalUrl(url)
   )
+  ipcMain.handle('credentials:getKimiCodeApiKey', async () =>
+    (await readSecureCredentials()).kimiCodeApiKey ?? ''
+  )
+  ipcMain.handle('credentials:setKimiCodeApiKey', async (_event, apiKey: string) => {
+    await saveKimiCodeApiKey(apiKey)
+    return true
+  })
   ipcMain.handle('workspace:open', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],

@@ -30,7 +30,7 @@ The Windows installer is generated in the `release` directory.
 - LM Studio or any OpenAI-compatible local API
 - Ollama
 - ComfyUI
+- Kimi Code（可选：会员 API Key，支持普通版与高速版） / Kimi Code (optional membership API key, Standard and HighSpeed)
 
 项目默认保持模型、会话和文件操作在本机完成；网页搜索仅在任务需要时启用。  
 Models, conversations, and file operations remain local by default; web search is used only when required by the task.
-

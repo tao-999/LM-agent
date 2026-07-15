@@ -5200,6 +5200,70 @@ body.is-resizing-vertical .terminal-resize-handle::after {
   font-size: 9px;
 }
 
+.kimi-code-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(126, 108, 255, 0.35);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(122, 97, 255, 0.16), transparent 42%),
+    #121821;
+}
+
+.kimi-code-card > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.kimi-code-card > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.kimi-code-card > header small {
+  color: #7f8999;
+  font-size: 9px;
+}
+
+.kimi-code-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(150, 132, 255, 0.42);
+  border-radius: 9px;
+  color: #b2a6ff;
+  place-items: center;
+  background: rgba(115, 91, 255, 0.13);
+}
+
+.kimi-code-connected {
+  margin-left: auto;
+  color: #5bdd9b;
+  font-size: 9px;
+}
+
+.kimi-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.kimi-code-actions .primary-button {
+  margin-left: auto;
+}
+
+.kimi-code-result {
+  padding: 7px 9px;
+  border-radius: 7px;
+  color: #aeb8c8;
+  font-size: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
 .custom-connection {
   display: grid;
   gap: 9px;

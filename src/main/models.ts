@@ -4,6 +4,7 @@ import type {
   ModelOption,
   TokenUsage
 } from '../shared/types'
+import { session, type Session } from 'electron'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -70,6 +71,28 @@ function normalizeBaseUrl(value: string): string {
 function openAiEndpoint(baseUrl: string, suffix: string): string {
   const base = normalizeBaseUrl(baseUrl)
   return base.endsWith('/v1') ? `${base}${suffix}` : `${base}/v1${suffix}`
+}
+
+let systemProxySession: Promise<Session> | null = null
+
+async function fetchModel(
+  model: ModelConfig,
+  input: string | Request,
+  init?: RequestInit
+): Promise<Response> {
+  if (model.preset !== 'kimi-code') return fetch(input, init)
+  if (!systemProxySession) {
+    systemProxySession = (async () => {
+      const current = session.defaultSession
+      await current.setProxy({ mode: 'system' })
+      return current
+    })().catch((error) => {
+      systemProxySession = null
+      throw error
+    })
+  }
+  const current = await systemProxySession
+  return current.fetch(input, init)
 }
 
 function sanitizeUnicodeString(value: string): string {
@@ -672,7 +695,29 @@ function createChannelRouter(
 function headers(model: ModelConfig): Record<string, string> {
   const result: Record<string, string> = { 'Content-Type': 'application/json' }
   if (model.apiKey) result.Authorization = `Bearer ${model.apiKey}`
+  if (model.preset === 'kimi-code') {
+    result['User-Agent'] = 'Xingban-AI/desktop'
+    result['X-Client-Name'] = 'Xingban AI'
+  }
   return result
+}
+
+async function responseError(response: Response): Promise<string> {
+  const body = await response.text().catch(() => '')
+  if (!body.trim()) return `${response.status} ${response.statusText}`.trim()
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: string; code?: string } | string
+      message?: string
+    }
+    const detail =
+      typeof parsed.error === 'string'
+        ? parsed.error
+        : parsed.error?.message || parsed.message || body
+    return `${response.status} ${detail}`.trim()
+  } catch {
+    return `${response.status} ${body.slice(0, 800)}`.trim()
+  }
 }
 
 function textField(value: unknown): string {
@@ -1254,7 +1299,7 @@ async function generateSemanticSummary(
     })
     const reasoningStream = createStreamingTextNormalizer(onProgress)
     if (model.provider === 'ollama') {
-      const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+      const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
         method: 'POST',
         headers: headers(model),
         signal,
@@ -1306,7 +1351,7 @@ async function generateSemanticSummary(
         }
       }
     } else {
-      const response = await fetch(openAiEndpoint(model.baseUrl, '/chat/completions'), {
+      const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
         method: 'POST',
         headers: headers(model),
         signal,
@@ -1370,7 +1415,7 @@ async function generateSemanticSummary(
     }
     onProgress('\n\n**上下文压缩完成，继续处理当前任务。**\n\n')
   } else if (model.provider === 'ollama') {
-    const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+    const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
       method: 'POST',
       headers: headers(model),
       signal,
@@ -1393,7 +1438,7 @@ async function generateSemanticSummary(
         ? createUsage(data.prompt_eval_count ?? 0, data.eval_count ?? 0)
         : createUsage(usage.promptTokens, estimateTextTokens(summary), true)
   } else {
-    const response = await fetch(openAiEndpoint(model.baseUrl, '/chat/completions'), {
+    const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: headers(model),
       signal,
@@ -1539,11 +1584,34 @@ export async function testModelConnection(
   model: ModelConfig
 ): Promise<{ ok: boolean; models: string[]; message: string }> {
   try {
+    if (model.preset === 'kimi-code') {
+      if (!model.apiKey?.trim()) throw new Error('请先填写 Kimi Code API Key')
+      const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: headers(model),
+        signal: AbortSignal.timeout(30000),
+        body: safeJsonBody({
+          model: model.model || 'kimi-for-coding',
+          messages: [{ role: 'user', content: 'Reply OK.' }],
+          max_tokens: 1,
+          stream: false
+        })
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      return {
+        ok: true,
+        models: ['kimi-for-coding', 'kimi-for-coding-highspeed'],
+        message:
+          model.model === 'kimi-for-coding-highspeed'
+            ? 'Kimi Code 高速版连接成功'
+            : 'Kimi Code 普通版连接成功'
+      }
+    }
     const url =
       model.provider === 'ollama'
         ? `${normalizeBaseUrl(model.baseUrl)}/api/tags`
         : openAiEndpoint(model.baseUrl, '/models')
-    const response = await fetch(url, { headers: headers(model) })
+    const response = await fetchModel(model, url, { headers: headers(model) })
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     const data = (await response.json()) as {
       models?: Array<{ name?: string; id?: string }>
@@ -1579,9 +1647,12 @@ export async function unloadLocalModel(model: ModelConfig): Promise<{
   if (!model.baseUrl || !model.model) {
     return { ok: true, message: '未选择模型，无需卸载' }
   }
+  if (model.preset === 'kimi-code') {
+    return { ok: true, message: 'Kimi Code 是云端服务，无需卸载本地模型' }
+  }
   try {
     if (model.provider === 'ollama') {
-      const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+      const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
         method: 'POST',
         headers: headers(model),
         signal: AbortSignal.timeout(5000),
@@ -1598,7 +1669,7 @@ export async function unloadLocalModel(model: ModelConfig): Promise<{
 
     const origin = new URL(model.baseUrl).origin
     const unloadInstance = async (instanceId: string): Promise<boolean> => {
-      const response = await fetch(`${origin}/api/v1/models/unload`, {
+      const response = await fetchModel(model, `${origin}/api/v1/models/unload`, {
         method: 'POST',
         headers: headers(model),
         signal: AbortSignal.timeout(6000),
@@ -1607,7 +1678,7 @@ export async function unloadLocalModel(model: ModelConfig): Promise<{
       return response.ok
     }
 
-    const listResponse = await fetch(`${origin}/api/v1/models`, {
+    const listResponse = await fetchModel(model, `${origin}/api/v1/models`, {
       headers: headers(model),
       signal: AbortSignal.timeout(3000)
     })
@@ -1662,13 +1733,20 @@ export async function unloadLocalModel(model: ModelConfig): Promise<{
 export async function inspectModelContext(
   model: ModelConfig
 ): Promise<{ contextLength: number; maxContextLength: number; source: string }> {
+  if (model.preset === 'kimi-code') {
+    return {
+      contextLength: 262144,
+      maxContextLength: 262144,
+      source: 'Kimi Code 官方配置'
+    }
+  }
   const fallback = Math.max(2048, model.contextLength || 8192)
   if (!model.baseUrl || !model.model) {
     return { contextLength: fallback, maxContextLength: fallback, source: '保守默认值' }
   }
   try {
     if (model.provider === 'ollama') {
-      const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/show`, {
+      const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/show`, {
         method: 'POST',
         headers: headers(model),
         signal: AbortSignal.timeout(3000),
@@ -1695,7 +1773,7 @@ export async function inspectModelContext(
     }
 
     const origin = new URL(model.baseUrl).origin
-    const response = await fetch(`${origin}/api/v1/models`, {
+    const response = await fetchModel(model, `${origin}/api/v1/models`, {
       headers: headers(model),
       signal: AbortSignal.timeout(3000)
     })
@@ -1727,7 +1805,7 @@ export async function inspectModelContext(
       }
     }
 
-    const propsResponse = await fetch(`${origin}/props`, {
+    const propsResponse = await fetchModel(model, `${origin}/props`, {
       signal: AbortSignal.timeout(1800)
     })
     if (propsResponse.ok) {
@@ -1871,7 +1949,7 @@ export async function streamChat(
     reasoningTagFilter.push(content)
   )
   if (model.provider === 'ollama') {
-    const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+    const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
       method: 'POST',
       headers: headers(model),
       signal,
@@ -1933,7 +2011,7 @@ export async function streamChat(
     )
   }
 
-  const response = await fetch(openAiEndpoint(model.baseUrl, '/chat/completions'), {
+  const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: headers(model),
     signal,
@@ -2049,7 +2127,7 @@ async function streamCompleteWithTools(
   const normalizedReasoning = createStreamingTextNormalizer(emitReasoning)
 
   if (model.provider === 'ollama') {
-    const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+    const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
       method: 'POST',
       headers: headers(model),
       signal,
@@ -2164,7 +2242,7 @@ async function streamCompleteWithTools(
     }
   }
 
-  const response = await fetch(openAiEndpoint(model.baseUrl, '/chat/completions'), {
+  const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: headers(model),
     signal,
@@ -2350,7 +2428,7 @@ export async function completeWithTools(
       0
     ) + estimateTextTokens(JSON.stringify(tools))
   if (model.provider === 'ollama') {
-    const response = await fetch(`${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
+    const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
       method: 'POST',
       headers: headers(model),
       signal,
@@ -2431,7 +2509,7 @@ export async function completeWithTools(
     }
   }
 
-  const response = await fetch(openAiEndpoint(model.baseUrl, '/chat/completions'), {
+  const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: headers(model),
     signal,
