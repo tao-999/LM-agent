@@ -1,57 +1,36 @@
-# 星伴 AI
+# 星伴 AI · StarMate AI
 
-个人电脑使用的本地模型智能体工作台，项目资源管理、聊天、智能体、编辑器与终端集成在同一界面，开箱即可使用。
+> 本地优先的 AI 聊天、智能体、代码编辑与图片生成工作台。  
+> A local-first workspace for AI chat, agents, code editing, and image generation.
 
-## 已完成功能
+[简体中文](./README.zh-CN.md) · [English](./README.en.md) · [文档 / Documentation](./docs/README.md)
 
-- Ollama 与兼容 OpenAI 接口格式的本地模型连接！
-- 流式聊天、富文本回复、虚拟滚动、会话索引、附件、截图与文件引用！
-- Chat 与 Agent 均支持原生网页搜索、三来源正文核验和直接网址引用！
-- 聊天历史支持搜索与虚拟滚动，记录再多也不会撑爆下拉框！
-- 图片附件显示轻量缩略图，避免整张原图写入会话缓存！
-- AI 代码块支持复制，JavaScript、Python、PowerShell、命令行与 Shell 支持直接运行！
-- 输入框支持 `@文件`，编辑器选区会自动携带文件名及精确行号！
-- 智能体具备完整文件工具、精确行替换、文本唯一替换与命令执行能力！
-- 智能体内置搜索、按行读取、制定步骤、精准修改、复查与验证流程！
-- 执行时间线、思考耗时、停止任务与失败重试！
-- 只读、修改需确认、自动修改、全自动四种权限模式！
-- 文件修改前差异预览，操作可允许或拒绝！
-- 智能体文件改动检查点、一键安全撤销与冲突保护！
-- 多项目工作区、当前工作目录切换与完整树型文件结构！
-- 文件树自动刷新，文件与目录支持选中及快捷键操作！
-- 右键支持新建文件、新建文件夹、重命名、复制副本、删除与系统定位！
-- 项目栏、聊天栏与终端支持拖动调整尺寸！
-- 多标签编辑、全文搜索、差异视图与 Markdown 预览！
-- 编辑标签支持右键关闭、关闭其他、关闭全部与复制路径！
-- 未保存文件关闭保护，智能体改动支持一键撤销！
-- 基于 xterm 的持续交互终端！
-- Agent 原生内置网页搜索、网页正文读取与完整本地文件工具！
-- 全局指令、可启停 Skills 与 `SKILL.md` 导入！
-- 上下文抽屉展示工作目录、选区、引用、附件、技能与预计文本规模！
-- 自动读取 LM Studio 与 Ollama 当前上下文窗口，达到 90% 后调用本地模型压缩旧历史！
-- 单次 Token 用量、每日 Token 月历与输入输出统计！
-- 编辑器内联行级 Diff，智能体每次精准修改都可单独接受或拒绝！
-- 文件标签支持拖拽排序！
-- 根目录右键支持移除项目，不删除本地文件！
-- 本地模型设置与界面状态保存！
+## 快速开始 / Quick Start
 
-## 启动
+建议使用 Node.js 22 或更高版本。Node.js 22 or newer is recommended.
 
 ```powershell
 npm install
 npm run dev
 ```
 
-## 构建
+## 构建 / Build
 
 ```powershell
+npm run typecheck
 npm run build
-```
-
-## 生成安装包
-
-```powershell
 npm run dist
 ```
 
-安装包输出到 `release` 目录，老铁直接开冲！
+Windows 安装包输出到 `release` 目录。  
+The Windows installer is generated in the `release` directory.
+
+## 本地服务 / Local Services
+
+- LM Studio or any OpenAI-compatible local API
+- Ollama
+- ComfyUI
+
+项目默认保持模型、会话和文件操作在本机完成；网页搜索仅在任务需要时启用。  
+Models, conversations, and file operations remain local by default; web search is used only when required by the task.
+
