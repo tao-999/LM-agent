@@ -1,6 +1,6 @@
 {
   "name": "local-agent-studio",
-  "version": "0.7.95",
+  "version": "0.7.96",
   "private": true,
   "description": "星伴 AI｜你的本地 AI 伙伴",
   "main": "out/main/index.js",

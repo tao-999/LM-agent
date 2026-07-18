@@ -1958,7 +1958,6 @@ export async function runAgent(
   const changes = new Map<string, AgentChange>()
   const tools = new Map<string, RegisteredTool>()
   let activeTasks: AgentTask[] = []
-  let tasksInitialized = false
   const workflow: { stage: 'understand' | 'tasks' | 'execute' } = { stage: 'understand' }
   let totalUsage: TokenUsage = {
     promptTokens: 0,
@@ -3244,7 +3243,7 @@ export async function runAgent(
       function: {
         name: 'update_tasks',
         description:
-          '创建或更新当前 Agent 任务的可见任务清单。必须先理解用户目标、约束和完成标准，再调用本工具制定清单；每次传入完整清单，最多一项为进行中。涉及文件修改时，清单必须分别包含定位读取、实际编辑、修改后复查三类可验证子任务。',
+          '创建或更新当前 Agent 任务的可见任务清单。先理解用户目标，再根据任务实际需要自主决定清单的内容、粒度、顺序与状态；每次传入当前完整清单。',
         parameters: {
           type: 'object',
           required: ['tasks'],
@@ -3290,38 +3289,6 @@ export async function runAgent(
           status: status as AgentTask['status']
         }
       })
-      if (tasks.filter((task) => task.status === 'in_progress').length > 1) {
-        throw new Error('最多只能有一项任务处于进行中')
-      }
-      if (!tasksInitialized && tasks.every((task) => task.status === 'completed')) {
-        throw new Error('首次创建任务清单时不能把全部任务直接标记为完成')
-      }
-      if (requiresWorkspaceEdit) {
-        const locateTask = tasks.find((task) =>
-          /(?:定位|检索|搜索|读取|查看|确认).*(?:文件|代码|正文|文档|选区|行号|上下文|目标)/i.test(
-            task.content
-          )
-        )
-        const editTask = tasks.find((task) =>
-          /(?:编辑|修改|替换|写入|更新|改写|润色|补写).*(?:文件|代码|正文|文档|选区|行|内容)|(?:文件|代码|正文|文档|选区|行).*(?:编辑|修改|替换|写入|更新|改写|润色|补写)/i.test(
-            task.content
-          )
-        )
-        const reviewTask = tasks.find((task) =>
-          /(?:复查|验证|检查|测试|构建|核对).*(?:修改|改动|结果|文件|代码|正文|上下文)|(?:修改|改动|结果).*(?:复查|验证|检查|测试|构建|核对)/i.test(
-            task.content
-          )
-        )
-        if (!locateTask || !editTask || !reviewTask) {
-          throw new Error(
-            '当前属于文件修改任务，tasks 必须分别包含：1）定位并读取目标上下文；2）实际编辑目标文件；3）修改后复查或验证。禁止用一个宽泛的“修复内容”任务代替真实编辑步骤。'
-          )
-        }
-        if (tasks.every((task) => task.status === 'completed') && changes.size === 0) {
-          throw new Error('尚未产生任何真实文件改动，禁止把编辑型 tasks 全部标记为完成')
-        }
-      }
-      tasksInitialized = true
       workflow.stage = 'execute'
       activeTasks = tasks
       send({
@@ -3375,8 +3342,7 @@ export async function runAgent(
       ? `会话历史规则：当前请求默认只直接携带本轮目标，不携带历史聊天原文；${request.historyArchive.length} 条历史记录在本机会话历史资料库中。若本轮目标可独立理解，禁止检索历史；若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段。禁止把旧任务拿出来重做。`
       : '',
     '先判断用户目标属于咨询解释、搜索定位、代码审查、运行验证、文件修改或综合任务，再选择最小必要动作。',
-    '任务清单最高优先级：Agent 模式必须先理解当前用户目标、已有上下文、约束和完成标准；理解完成后才调用 update_tasks 创建精简任务清单。禁止在尚未理解任务时抢先制定清单。完成首次清单创建前禁止调用其他执行工具或输出最终回复；简单任务可只创建一项。实际进度变化后继续更新完整清单。',
-    '任务清单规则：每次更新必须提交完整清单，最多一项为 in_progress；完成真实工作后才能标记 completed，禁止预先批量完成。',
+    '任务清单规则：Agent 模式必须在完成前建立可见 tasks；应先理解当前目标，再根据任务实际需要自主决定清单内容、粒度、顺序与状态。全部工具始终开放，tasks 只负责表达和同步执行判断，禁止用固定模板限制任务拆分。',
     '咨询解释任务：可直接回答；需要项目事实时只使用读取与搜索工具，禁止修改文件。',
     '搜索定位与代码审查任务：读取、搜索并给出结论；除非用户明确要求修复，否则禁止修改文件。',
     '运行验证任务：仅执行与目标直接相关的检查或测试，禁止顺手修改无关内容。',
@@ -3708,11 +3674,8 @@ export async function runAgent(
           ? [
               {
                 role: 'system' as const,
-                content: `当前建议依据已经形成的任务理解调用 update_tasks 制定精简、可执行、可验证的完整清单。全部工具仍然开放；若清单制定前确实需要补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks，禁止直接跳到最终回复。${
-                  requiresWorkspaceEdit
-                    ? '本轮属于文件修改任务，tasks 必须分别包含定位读取、实际编辑、修改后复查，禁止用一个宽泛的“修复内容”任务包办全部工作。'
-                    : ''
-                }`
+                content:
+                  '当前建议依据已经形成的任务理解调用 update_tasks 建立清单。清单内容、粒度、顺序与状态由你依据当前任务自主决定，不套用固定模板。全部工具仍然开放；若仍需补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks。'
               }
             ]
           : [])
