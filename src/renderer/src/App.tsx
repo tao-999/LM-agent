@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Info, X } from 'lucide-react'
 import type {
   AgentEvent,
   AgentExecutionBlock,
@@ -265,7 +266,15 @@ function updateAgentBlocks(message: ChatMessage, event: AgentEvent): AgentExecut
   }
 
   if (event.type === 'done') {
-    const completed = settleOpenBlocks(current)
+    const completed = settleOpenBlocks(current).map((block) =>
+      event.title === '任务完成' && block.type === 'tasks'
+        ? {
+            ...block,
+            items: block.items.map((item) => ({ ...item, status: 'completed' as const })),
+            updatedAt: now
+          }
+        : block
+    )
     if (completed.some((block) => block.type === 'response')) return completed
     return [
       ...completed,
@@ -437,6 +446,7 @@ export default function App(): React.JSX.Element {
   const workspaceRoot = useAppStore((state) => state.workspaceRoot)
   const workspaceRoots = useAppStore((state) => state.workspaceRoots)
   const settingsOpen = useAppStore((state) => state.settingsOpen)
+  const [aboutOpen, setAboutOpen] = useState(false)
   const [projectWidth, setProjectWidth] = useState(() =>
     Number(localStorage.getItem('layout-project-width') || 260)
   )
@@ -1049,6 +1059,14 @@ export default function App(): React.JSX.Element {
             {workspaceRoot ? `— ${workspaceRoot.split(/[\\/]/).pop()}` : '— 个人工作台'}
           </span>
         </div>
+        <button
+          className="titlebar-about"
+          type="button"
+          onClick={() => setAboutOpen(true)}
+          title="关于星伴 AI"
+        >
+          <Info size={13} /> About
+        </button>
       </header>
       <div
         className="app-content"
@@ -1095,6 +1113,33 @@ export default function App(): React.JSX.Element {
           }}
         >
           <SettingsPanel onClose={() => useAppStore.getState().setSettingsOpen(false)} />
+        </div>
+      )}
+      {aboutOpen && (
+        <div
+          className="about-modal-backdrop"
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) setAboutOpen(false)
+          }}
+        >
+          <section className="about-modal" role="dialog" aria-modal="true" aria-label="关于星伴 AI">
+            <button
+              className="about-close"
+              type="button"
+              onClick={() => setAboutOpen(false)}
+              title="关闭"
+            >
+              <X size={15} />
+            </button>
+            <span className="about-logo">SA</span>
+            <h2>星伴 AI</h2>
+            <p>你的本地 AI 工作伙伴</p>
+            <dl>
+              <div><dt>版本</dt><dd>0.7.95</dd></div>
+              <div><dt>运行方式</dt><dd>本地优先</dd></div>
+              <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
+            </dl>
+          </section>
         </div>
       )}
     </div>

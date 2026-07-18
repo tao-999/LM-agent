@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  BarChart3,
   Bot,
-  CalendarDays,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -132,6 +132,356 @@ function TokenCalendar({ records }: { records: TokenUsageRecord[] }): React.JSX.
   )
 }
 
+type TokenChartRange = 'all' | 'day' | '30d' | 'month' | 'custom'
+
+function localDateKey(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+}
+
+function dateBoundary(value: string, endOfDay = false): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return endOfDay ? Number.MAX_SAFE_INTEGER : 0
+  const [year, month, day] = value.split('-').map(Number)
+  return endOfDay
+    ? new Date(year, month - 1, day, 23, 59, 59, 999).getTime()
+    : new Date(year, month - 1, day).getTime()
+}
+
+function TokenModelChartModal({
+  records,
+  onClose
+}: {
+  records: TokenUsageRecord[]
+  onClose: () => void
+}): React.JSX.Element {
+  const [range, setRange] = useState<TokenChartRange>('all')
+  const today = new Date()
+  const todayKey = localDateKey(today)
+  const [selectedDay, setSelectedDay] = useState(todayKey)
+  const [rangeStart, setRangeStart] = useState(
+    localDateKey(new Date(today.getFullYear(), today.getMonth(), 1))
+  )
+  const [rangeEnd, setRangeEnd] = useState(todayKey)
+  const [selectedModelKey, setSelectedModelKey] = useState('')
+  const [detailPage, setDetailPage] = useState(1)
+  const summary = useMemo(() => {
+    const now = new Date()
+    let startAt = 0
+    let endAt = Number.MAX_SAFE_INTEGER
+    if (range === 'day') {
+      startAt = dateBoundary(selectedDay)
+      endAt = dateBoundary(selectedDay, true)
+    } else if (range === '30d') {
+      startAt = Date.now() - 30 * 24 * 60 * 60 * 1000
+    } else if (range === 'month') {
+      startAt = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+    } else if (range === 'custom') {
+      const first = dateBoundary(rangeStart)
+      const last = dateBoundary(rangeEnd, true)
+      startAt = Math.min(first, dateBoundary(rangeEnd))
+      endAt = Math.max(dateBoundary(rangeStart, true), last)
+    }
+    const groups = new Map<
+      string,
+      {
+        key: string
+        model: string
+        provider: string
+        promptTokens: number
+        cachedPromptTokens: number
+        completionTokens: number
+        totalTokens: number
+        calls: number
+        timedCompletionTokens: number
+        generationDurationMs: number
+        records: TokenUsageRecord[]
+      }
+    >()
+    records
+      .filter((record) => record.timestamp >= startAt && record.timestamp <= endAt)
+      .forEach((record) => {
+        const modelName = record.model?.trim() || '未命名模型'
+        const key = `${record.provider}:${modelName}`
+        const current = groups.get(key) ?? {
+          key,
+          model: modelName,
+          provider: record.provider,
+          promptTokens: 0,
+          cachedPromptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          calls: 0,
+          timedCompletionTokens: 0,
+          generationDurationMs: 0,
+          records: []
+        }
+        current.promptTokens += record.promptTokens
+        current.cachedPromptTokens += record.cachedPromptTokens ?? 0
+        current.completionTokens += record.completionTokens
+        current.totalTokens += record.totalTokens
+        current.calls += 1
+        current.records.push(record)
+        if ((record.generationDurationMs ?? 0) > 0) {
+          current.timedCompletionTokens += record.completionTokens
+          current.generationDurationMs += record.generationDurationMs ?? 0
+        }
+        groups.set(key, current)
+      })
+    const models = [...groups.values()].sort((left, right) => right.totalTokens - left.totalTokens)
+    models.forEach((item) => item.records.sort((left, right) => right.timestamp - left.timestamp))
+    return {
+      models,
+      promptTokens: models.reduce((sum, item) => sum + item.promptTokens, 0),
+      cachedPromptTokens: models.reduce((sum, item) => sum + item.cachedPromptTokens, 0),
+      completionTokens: models.reduce((sum, item) => sum + item.completionTokens, 0),
+      totalTokens: models.reduce((sum, item) => sum + item.totalTokens, 0),
+      calls: models.reduce((sum, item) => sum + item.calls, 0),
+      maxTokens: Math.max(1, ...models.map((item) => item.totalTokens))
+    }
+  }, [range, rangeEnd, rangeStart, records, selectedDay])
+  const selectedModel = summary.models.find((item) => item.key === selectedModelKey)
+  useEffect(() => {
+    setDetailPage(1)
+  }, [range, rangeEnd, rangeStart, selectedDay])
+  useEffect(() => {
+    if (selectedModelKey && !summary.models.some((item) => item.key === selectedModelKey)) {
+      setSelectedModelKey('')
+    }
+  }, [selectedModelKey, summary.models])
+  const detailPageSize = 30
+  const detailPageCount = selectedModel
+    ? Math.max(1, Math.ceil(selectedModel.records.length / detailPageSize))
+    : 1
+  const detailRecords = selectedModel
+    ? selectedModel.records.slice((detailPage - 1) * detailPageSize, detailPage * detailPageSize)
+    : []
+  const detailMaxTokens = Math.max(1, ...detailRecords.map((record) => record.totalTokens))
+
+  return (
+    <div className="token-chart-overlay" role="presentation" onMouseDown={onClose}>
+      <section
+        className="token-chart-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="模型 Token 统计"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="token-chart-header">
+          <div>
+            <span className="eyebrow">用量分析</span>
+            <h2>模型 Token 图表</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} title="关闭图表">
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="token-chart-content">
+          <div className="token-chart-toolbar">
+            <div className="token-chart-ranges" role="group" aria-label="统计时间范围">
+              {([
+                ['all', '全部'],
+                ['day', '指定日期'],
+                ['30d', '近 30 天'],
+                ['month', '本月'],
+                ['custom', '日期区间']
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={range === value ? 'active' : ''}
+                  onClick={() => setRange(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="token-chart-legend">
+              <span><i className="input" />输入</span>
+              <span><i className="output" />输出</span>
+            </div>
+          </div>
+
+          {range === 'day' && (
+            <div className="token-chart-date-filter">
+              <label>
+                统计日期
+                <input
+                  type="date"
+                  value={selectedDay}
+                  onChange={(event) => setSelectedDay(event.target.value || todayKey)}
+                />
+              </label>
+            </div>
+          )}
+
+          {range === 'custom' && (
+            <div className="token-chart-date-filter range">
+              <label>
+                开始日期
+                <input
+                  type="date"
+                  value={rangeStart}
+                  onChange={(event) => setRangeStart(event.target.value || todayKey)}
+                />
+              </label>
+              <span>至</span>
+              <label>
+                结束日期
+                <input
+                  type="date"
+                  value={rangeEnd}
+                  onChange={(event) => setRangeEnd(event.target.value || todayKey)}
+                />
+              </label>
+            </div>
+          )}
+
+          <div className="token-chart-summary">
+            <article><span>输入</span><strong>{formatTokens(summary.promptTokens)}</strong></article>
+            <article><span>缓存命中</span><strong>{formatTokens(summary.cachedPromptTokens)}</strong></article>
+            <article><span>输出</span><strong>{formatTokens(summary.completionTokens)}</strong></article>
+            <article><span>合计</span><strong>{formatTokens(summary.totalTokens)}</strong></article>
+            <article><span>调用</span><strong>{summary.calls.toLocaleString()}</strong></article>
+            <article>
+              <span>缓存命中率</span>
+              <strong>
+                {summary.promptTokens > 0
+                  ? `${((summary.cachedPromptTokens / summary.promptTokens) * 100).toFixed(1)}%`
+                  : '0%'}
+              </strong>
+            </article>
+          </div>
+
+          {summary.models.length === 0 ? (
+            <div className="token-chart-empty">
+              <BarChart3 size={28} />
+              <span>当前范围还没有 Token 记录</span>
+            </div>
+          ) : selectedModel ? (
+            <div className="token-call-detail">
+              <header className="token-call-detail-header">
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    setSelectedModelKey('')
+                    setDetailPage(1)
+                  }}
+                >
+                  <ChevronLeft size={13} /> 返回模型总览
+                </button>
+                <div>
+                  <strong>{selectedModel.model}</strong>
+                  <span>{selectedModel.records.length.toLocaleString()} 次调用</span>
+                </div>
+              </header>
+              <div className="token-call-list">
+                {detailRecords.map((record, index) => {
+                  const inputWidth = (record.promptTokens / detailMaxTokens) * 100
+                  const outputWidth = (record.completionTokens / detailMaxTokens) * 100
+                  const speed =
+                    record.tokensPerSecond ??
+                    ((record.generationDurationMs ?? 0) > 0
+                      ? record.completionTokens / ((record.generationDurationMs ?? 1) / 1000)
+                      : 0)
+                  return (
+                    <article className="token-call-row" key={record.id}>
+                      <div className="token-call-heading">
+                        <div>
+                          <b>#{(detailPage - 1) * detailPageSize + index + 1}</b>
+                          <strong>{new Date(record.timestamp).toLocaleString('zh-CN')}</strong>
+                          <span>{record.kind}</span>
+                        </div>
+                        <b>{formatTokens(record.totalTokens)} Token</b>
+                      </div>
+                      <div className="token-model-bar">
+                        <i className="input" style={{ width: `${inputWidth}%` }} />
+                        <i className="output" style={{ width: `${outputWidth}%` }} />
+                      </div>
+                      <div className="token-model-metrics">
+                        <span>输入 {formatTokens(record.promptTokens)}</span>
+                        <span>缓存 {formatTokens(record.cachedPromptTokens ?? 0)}</span>
+                        <span>输出 {formatTokens(record.completionTokens)}</span>
+                        <span>{speed > 0 ? `${speed.toFixed(2)} Tok/s` : '速度暂无'}</span>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+              {detailPageCount > 1 && (
+                <footer className="token-call-pagination">
+                  <button
+                    className="icon-button"
+                    disabled={detailPage <= 1}
+                    onClick={() => setDetailPage((value) => Math.max(1, value - 1))}
+                    title="上一页"
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span>{detailPage} / {detailPageCount}</span>
+                  <button
+                    className="icon-button"
+                    disabled={detailPage >= detailPageCount}
+                    onClick={() => setDetailPage((value) => Math.min(detailPageCount, value + 1))}
+                    title="下一页"
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </footer>
+              )}
+            </div>
+          ) : (
+            <div className="token-model-list">
+              {summary.models.map((item) => {
+                const inputWidth = (item.promptTokens / summary.maxTokens) * 100
+                const outputWidth = (item.completionTokens / summary.maxTokens) * 100
+                const speed =
+                  item.generationDurationMs > 0
+                    ? item.timedCompletionTokens / (item.generationDurationMs / 1000)
+                    : 0
+                return (
+                  <article className="token-model-row" key={`${item.provider}:${item.model}`}>
+                    <div className="token-model-heading">
+                      <div>
+                        <strong title={item.model}>{item.model}</strong>
+                        <span>{item.provider}</span>
+                      </div>
+                      <b>{formatTokens(item.totalTokens)} Token</b>
+                    </div>
+                    <div className="token-model-bar" aria-label={`${item.model} Token 分布`}>
+                      <i className="input" style={{ width: `${inputWidth}%` }} />
+                      <i className="output" style={{ width: `${outputWidth}%` }} />
+                    </div>
+                    <div className="token-model-metrics">
+                      <span>输入 {formatTokens(item.promptTokens)}</span>
+                      <span>缓存 {formatTokens(item.cachedPromptTokens)}</span>
+                      <span>输出 {formatTokens(item.completionTokens)}</span>
+                      <span>{item.calls.toLocaleString()} 次</span>
+                      <span>均次 {formatTokens(Math.round(item.totalTokens / item.calls))}</span>
+                      {speed > 0 ? (
+                        <span>{speed.toFixed(2)} Tok/s</span>
+                      ) : (
+                        <span title="历史记录未保存模型纯生成时长">速度暂无</span>
+                      )}
+                      <button
+                        className="token-model-drilldown"
+                        onClick={() => {
+                          setSelectedModelKey(item.key)
+                          setDetailPage(1)
+                        }}
+                      >
+                        查看逐次调用
+                      </button>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.Element {
   const model = useAppStore((state) => state.model)
   const setModel = useAppStore((state) => state.setModel)
@@ -163,6 +513,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
     apiKey: ''
   })
   const [editingSkill, setEditingSkill] = useState<SkillDefinition | null>(null)
+  const [tokenChartOpen, setTokenChartOpen] = useState(false)
 
   const discover = async (): Promise<void> => {
     setDiscovering(true)
@@ -216,6 +567,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
     }
     setKimiConnecting(true)
     setKimiResult('')
+    const isK3 = kimiModel === 'k3'
     const next: ModelConfig = {
       provider: 'openai',
       preset: 'kimi-code',
@@ -223,7 +575,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       model: kimiModel,
       apiKey,
       contextLength: 262144,
-      maxContextLength: 262144
+      maxContextLength: isK3 ? 1048576 : 262144
     }
     try {
       await window.localAgent.credentials.setKimiCodeApiKey(apiKey)
@@ -376,7 +728,13 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             <div>
               <h3>Token 用量</h3>
             </div>
-            <CalendarDays size={18} className="accent-icon" />
+            <button
+              className="secondary-button token-chart-open"
+              onClick={() => setTokenChartOpen(true)}
+              title="按模型查看 Token 图表"
+            >
+              <BarChart3 size={14} /> 模型图表
+            </button>
           </div>
           <TokenCalendar records={tokenUsageRecords} />
         </div>
@@ -532,17 +890,18 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
                 <span className="kimi-code-icon"><KeyRound size={17} /></span>
                 <div>
                   <strong>Kimi Code</strong>
-                  <small>会员 API Key · OpenAI 兼容协议 · 256K 上下文</small>
+                  <small>会员 API Key · OpenAI 兼容协议 · K3 / K2.7</small>
                 </div>
                 {model.preset === 'kimi-code' && model.apiKey && (
                   <span className="kimi-code-connected">当前使用</span>
                 )}
               </header>
               <label className="field-label">
-                速度档位
+                模型
                 <select value={kimiModel} onChange={(event) => setKimiModel(event.target.value)}>
-                  <option value="kimi-for-coding">普通版</option>
-                  <option value="kimi-for-coding-highspeed">高速版</option>
+                  <option value="k3">Kimi K3</option>
+                  <option value="kimi-for-coding">Kimi K2.7 Code</option>
+                  <option value="kimi-for-coding-highspeed">Kimi K2.7 Code 高速版</option>
                 </select>
               </label>
               <label className="field-label">
@@ -735,6 +1094,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             </div>
           </div>
         </div>
+      )}
+      {tokenChartOpen && (
+        <TokenModelChartModal records={tokenUsageRecords} onClose={() => setTokenChartOpen(false)} />
       )}
     </section>
   )

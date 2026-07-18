@@ -18,6 +18,8 @@ export type ModelProvider = 'ollama' | 'openai'
 
 export type ModelPreset = 'kimi-code'
 
+export type ThinkingMode = 'auto' | 'on' | 'off'
+
 export type ModelConfig = {
   provider: ModelProvider
   baseUrl: string
@@ -27,6 +29,7 @@ export type ModelConfig = {
   connectionId?: string
   contextLength?: number
   maxContextLength?: number
+  thinkingMode?: ThinkingMode
 }
 
 export type SkillDefinition = {
@@ -121,7 +124,10 @@ export type TokenUsage = {
   promptTokens: number
   completionTokens: number
   totalTokens: number
+  cachedPromptTokens?: number
   estimated?: boolean
+  generationDurationMs?: number
+  tokensPerSecond?: number
 }
 
 export type ContextWindowState = {
@@ -302,6 +308,7 @@ export type AgentStartRequest = {
   skills: SkillDefinition[]
   attachments: ChatAttachment[]
   permissionMode: AgentPermissionMode
+  confirmCreateDelete?: boolean
   contextMessages: ChatContextMessage[]
   historyArchive?: ChatContextMessage[]
   contextMemory?: string
@@ -402,6 +409,8 @@ export type PersistedConversation = {
   id: string
   title: string
   mode: ConversationMode
+  model?: ModelConfig
+  thinkingMode?: ThinkingMode
   messages: ChatMessage[]
   contextMemory?: {
     summary: string

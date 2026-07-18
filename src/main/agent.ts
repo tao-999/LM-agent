@@ -2,7 +2,7 @@ import { exec } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { session, type Session } from 'electron'
+import { BrowserWindow, session, type Session } from 'electron'
 import type {
   AgentApproval,
   AgentChange,
@@ -23,13 +23,14 @@ import {
   moveWorkspaceEntry,
   readTextFile,
   resolveInWorkspace,
+  resolveSecurelyInWorkspace,
   searchWorkspace,
   workspaceEntryInfo,
   writeTextFile
 } from './files'
 import {
+  addUsage,
   completeWithTools,
-  streamChat,
   type LlmMessage,
   type ToolDefinition
 } from './models'
@@ -131,6 +132,20 @@ function selectedCodeLineRanges(value: string): LineRange[] {
 function stringifyResult(value: unknown): string {
   const output = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
   return output.length > 24000 ? `${output.slice(0, 24000)}\n\n[结果已截断]` : output
+}
+
+function assertCommandWithinWorkspace(command: string): void {
+  const violations = [
+    /(?:^|[\s"'=])(?:[a-z]:[\\/]|\\\\)/i,
+    /(?:^|[\\/])\.\.(?:[\\/]|$)/,
+    /(?:^|[;&|]\s*)(?:cd|chdir|pushd|popd|set-location)\b/i,
+    /(?:^|[\s"'=])~[\\/]/,
+    /%(?:userprofile|home|appdata|localappdata|temp|tmp)%/i,
+    /\$(?:env:)?(?:userprofile|home|appdata|localappdata|temp|tmp)\b/i
+  ]
+  if (violations.some((pattern) => pattern.test(command))) {
+    throw new Error('命令包含可能越出当前 CWD 的路径或目录切换，已拒绝执行')
+  }
 }
 
 function stripHistoryTags(value: string): string {
@@ -559,7 +574,14 @@ async function fetchPublicPage(value: string, signal: AbortSignal): Promise<Resp
   throw new Error('网页重定向次数过多')
 }
 
-type WebSearchResult = { title: string; url: string; snippet: string }
+type WebSearchMode = 'auto' | 'general' | 'site' | 'encyclopedia' | 'community' | 'news'
+
+type WebSearchResult = {
+  title: string
+  url: string
+  snippet: string
+  sourceRank?: number
+}
 
 type WebSearchEndpoint = {
   label: string
@@ -597,6 +619,36 @@ type WebFetchProbe =
       error: string
     }
 
+const webSearchCache = new Map<string, { expiresAt: number; value: string }>()
+const webPageCache = new Map<string, { expiresAt: number; value: string }>()
+
+function cachedWebValue(
+  cache: Map<string, { expiresAt: number; value: string }>,
+  key: string
+): string | null {
+  const cached = cache.get(key)
+  if (!cached) return null
+  if (cached.expiresAt <= Date.now()) {
+    cache.delete(key)
+    return null
+  }
+  return cached.value
+}
+
+function storeWebValue(
+  cache: Map<string, { expiresAt: number; value: string }>,
+  key: string,
+  value: string,
+  ttlMs: number,
+  maxEntries: number
+): void {
+  cache.set(key, { expiresAt: Date.now() + ttlMs, value })
+  while (cache.size > maxEntries) {
+    const oldest = cache.keys().next().value
+    if (typeof oldest !== 'string') break
+    cache.delete(oldest)
+  }
+}
 function normalizeSearchUrl(rawValue: string): string {
   try {
     const url = new URL(decodeHtml(rawValue), 'https://www.bing.com')
@@ -699,91 +751,158 @@ function parseWikipediaSearchResults(
   }
 }
 
+function searchQueryTerms(query: string): string[] {
+  const normalized = query.toLocaleLowerCase()
+  const quoted = [...normalized.matchAll(/["“”']([^"“”']{2,})["“”']/g)].map((match) =>
+    match[1].trim()
+  )
+  const words = normalized
+    .replace(/\b(?:site|filetype):[^\s]+/gi, ' ')
+    .split(/[\s,，。、“”"'：:；;！？!?（）()【】[\]<>|]+/)
+    .map((term) => term.trim())
+    .filter(
+      (term) =>
+        term.length >= 2 &&
+        !/^(?:搜索|查询|查找|资料|网页|最新|新闻|内容|信息|结果|site|or|and|http|https|www|com|cn|org|net)$/.test(
+          term
+        )
+    )
+  return [...new Set([...quoted, ...words])].slice(0, 16)
+}
+
+function canonicalWebUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    url.hash = ''
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:utm_|spm$|from$|ref$|source$|share_|campaign$)/i.test(key)) {
+        url.searchParams.delete(key)
+      }
+    }
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '')
+    return url.toString()
+  } catch {
+    return value.replace(/#.*$/, '')
+  }
+}
+
+function sourceModeScore(urlValue: string, mode: WebSearchMode): number {
+  const kind = webSourceKind(urlValue)
+  if (mode === 'encyclopedia') return kind === '百科' ? 16 : -4
+  if (mode === 'community') return kind === '社区讨论' ? 16 : -4
+  if (mode === 'news') {
+    try {
+      const hostname = new URL(urlValue).hostname.toLocaleLowerCase()
+      return /(?:news|reuters|apnews|bbc|cnn|xinhuanet|people|cctv)/.test(hostname) ? 10 : 0
+    } catch {
+      return 0
+    }
+  }
+  return kind === '机构来源' ? 6 : kind === '百科' ? 3 : 0
+}
+
 function rankSearchResults(
   query: string,
   results: WebSearchResult[],
-  limit: number
+  limit: number,
+  mode: WebSearchMode = 'general'
 ): WebSearchResult[] {
-  const baseTerms = query
-    .toLocaleLowerCase()
-    .split(/[\s,，。、“”"'：:；;！？!?（）()【】[\]]+/)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 2)
-  const chinesePairs = baseTerms.flatMap((term) =>
-    /^[\u3400-\u9fff]{4,}$/.test(term)
-      ? Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2))
-      : []
-  )
-  const terms = [...new Set([...baseTerms, ...chinesePairs])]
-  const scored = results
-    .map((result) => {
-      const normalizedUrl = result.url.replace(/#.*$/, '')
-      const haystack = `${result.title}\n${result.snippet}`.toLocaleLowerCase()
-      const score = terms.reduce(
-        (sum, term) =>
-          sum +
-          (result.title.toLocaleLowerCase().includes(term) ? 4 : 0) +
-          (haystack.includes(term) ? 1 : 0),
-        0
-      )
-      return { ...result, url: normalizedUrl, score }
-    })
-  const scoredPool = scored.filter((result) => result.score > 0)
-  const pool = scoredPool.length ? scoredPool : scored
-  const seen = new Set<string>()
+  const terms = searchQueryTerms(query)
+  const scored = results.flatMap((result, index) => {
+    const normalizedUrl = canonicalWebUrl(result.url)
+    if (!/^https?:\/\//i.test(normalizedUrl)) return []
+    let hostname = ''
+    try {
+      hostname = new URL(normalizedUrl).hostname.toLocaleLowerCase()
+    } catch {
+      return []
+    }
+    if (
+      hostname.endsWith('bing.com') ||
+      hostname.endsWith('duckduckgo.com') ||
+      hostname.endsWith('google.com')
+    ) {
+      return []
+    }
+    const title = result.title.toLocaleLowerCase()
+    const snippet = result.snippet.toLocaleLowerCase()
+    const matchedTerms = terms.filter((term) => title.includes(term) || snippet.includes(term))
+    const coverage = terms.length ? matchedTerms.length / terms.length : 1
+    const exactTitle = terms.reduce((sum, term) => sum + (title.includes(term) ? 8 : 0), 0)
+    const snippetScore = terms.reduce((sum, term) => sum + (snippet.includes(term) ? 3 : 0), 0)
+    const exactQueryScore = title.includes(query.toLocaleLowerCase().trim()) ? 18 : 0
+    const rankBonus = Math.max(0, 6 - (result.sourceRank ?? index) * 0.35)
+    const spamPenalty = /(?:免费下载|破解版|无限金币|点击进入|全网最全|合集下载)/.test(
+      `${title}\n${snippet}`
+    )
+      ? 12
+      : 0
+    const score =
+      exactTitle +
+      snippetScore +
+      exactQueryScore +
+      coverage * 24 +
+      rankBonus +
+      sourceModeScore(normalizedUrl, mode) -
+      spamPenalty
+    if (terms.length >= 3 && coverage < 0.25 && exactTitle === 0) return []
+    return [{ ...result, url: normalizedUrl, score }]
+  })
+  const seenUrls = new Set<string>()
+  const seenTitles = new Set<string>()
   const domainCounts = new Map<string, number>()
-  return pool
+  return scored
+    .sort((left, right) => right.score - left.score)
     .filter((result) => {
-      if (!/^https?:\/\//i.test(result.url) || seen.has(result.url)) return false
-      let hostname = ''
-      try {
-        hostname = new URL(result.url).hostname.toLocaleLowerCase()
-      } catch {
-        return false
-      }
-      if (
-        hostname.endsWith('bing.com') ||
-        hostname.endsWith('duckduckgo.com') ||
-        hostname.endsWith('google.com')
-      ) {
-        return false
-      }
+      const titleKey = result.title.toLocaleLowerCase().replace(/\s+/g, '').slice(0, 120)
+      if (seenUrls.has(result.url) || (titleKey && seenTitles.has(titleKey))) return false
+      const hostname = new URL(result.url).hostname.toLocaleLowerCase()
       const count = domainCounts.get(hostname) ?? 0
       if (count >= 2) return false
+      seenUrls.add(result.url)
+      if (titleKey) seenTitles.add(titleKey)
       domainCounts.set(hostname, count + 1)
-      seen.add(result.url)
       return true
     })
-    .sort((left, right) => right.score - left.score)
     .slice(0, limit)
     .map(({ score: _score, ...result }) => result)
 }
 
 function webContentMatchesQuery(query: string, content: string): boolean {
-  const baseTerms = query
-    .toLocaleLowerCase()
-    .split(/[\s,，。、“”"'：:；;！？!?（）()【】[\]]+/)
-    .map((term) => term.trim())
-    .filter(
-      (term) =>
-        term.length >= 2 &&
-        !/^(?:搜索|查询|查找|资料|网页|最新|新闻|演员|是谁|什么|site|or|and|http|https|www|com|cn|org|net)$/.test(term) &&
-        !/^(?:site:|https?:\/\/)/i.test(term)
-    )
-  const terms = [
-    ...new Set([
-      ...baseTerms,
-      ...baseTerms.flatMap((term) =>
-        /^[\u3400-\u9fff]{4,}$/.test(term)
-          ? Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2))
-          : []
-      )
-    ])
-  ]
+  const terms = searchQueryTerms(query)
   if (!terms.length) return true
   const haystack = content.toLocaleLowerCase()
   const matched = terms.filter((term) => haystack.includes(term)).length
-  return matched >= Math.min(2, terms.length)
+  const required = terms.length <= 2 ? 1 : Math.max(2, Math.ceil(terms.length * 0.3))
+  return matched >= required
+}
+
+function selectRelevantWebContent(content: string, query: string, maxChars = 5200): string {
+  const marker = '\n\n正文：\n'
+  const markerIndex = content.indexOf(marker)
+  if (markerIndex < 0 || content.length <= maxChars) return content.slice(0, maxChars)
+  const header = content.slice(0, markerIndex)
+  const body = content.slice(markerIndex + marker.length)
+  const terms = searchQueryTerms(query)
+  const paragraphs = body
+    .split(/\n{2,}/)
+    .map((value, index) => ({ value: value.trim(), index }))
+    .filter((item) => item.value.length >= 40)
+  const scored = paragraphs
+    .map((item) => {
+      const normalized = item.value.toLocaleLowerCase()
+      const matched = terms.filter((term) => normalized.includes(term)).length
+      const headingBonus = /^(?:#{1,6}\s|第.{1,16}[章节]|\d+[.、])/u.test(item.value) ? 2 : 0
+      return { ...item, score: matched * 8 + headingBonus }
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 8)
+    .sort((left, right) => left.index - right.index)
+  const selected = scored.length ? scored.map((item) => item.value) : paragraphs.slice(0, 5).map((item) => item.value)
+  const bodyLimit = Math.max(1000, maxChars - header.length - marker.length)
+  const focused = selected.join('\n\n').slice(0, bodyLimit)
+  return `${header}${marker}${focused}${focused.length >= bodyLimit ? '\n\n[相关段落已截断]' : ''}`
 }
 
 function webSourceKind(value: string): string {
@@ -991,6 +1110,31 @@ function formatWebSearchDiagnostics(
     .join('\n')
 }
 
+function formatWebSearchEmptyResult(
+  query: string,
+  mode: WebSearchMode,
+  probes: WebSearchProbe[],
+  eligibleResults: WebSearchResult[]
+): string {
+  const succeeded = probes.filter((probe) => probe.ok)
+  const failed = probes.filter((probe) => !probe.ok)
+  return [
+    `<web_search_empty query="${query.replace(/"/g, '&quot;')}" mode="${mode}">`,
+    '搜索入口已经正常返回候选，但本地相关性排序未发现可作为证据的页面。此结果不属于网络故障或工具执行失败。',
+    `入口状态：成功 ${succeeded.length}/${probes.length}，失败 ${failed.length}/${probes.length}，候选 ${eligibleResults.length}。`,
+    '可能原因：查询同时混入互不相属的人物、作品或限定词；请拆成单一实体与单一事实重新搜索，禁止原样重复查询。',
+    eligibleResults.length
+      ? `被过滤候选预览：\n${eligibleResults
+          .slice(0, 5)
+          .map((item, index) => `${index + 1}. ${item.title}\n   ${item.url}`)
+          .join('\n')}`
+      : '',
+    '</web_search_empty>'
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 function formatWebFetchDiagnostics(query: string, probes: WebFetchProbe[]): string {
   const failed = probes.filter((probe) => !probe.ok)
   return [
@@ -1050,13 +1194,18 @@ async function runSearchEndpoint(
 
 async function runFetchResult(
   item: WebSearchResult,
+  query: string,
   signal: AbortSignal
 ): Promise<WebFetchProbe> {
   try {
+    const content = await fetchPublicWebpage(item.url, 16000, signal)
+    if (!webContentMatchesQuery(query, `${item.title}\n${item.snippet}\n${content}`)) {
+      throw new Error('网页正文与查询核心词相关度不足')
+    }
     return {
       ok: true,
       item,
-      content: await fetchPublicWebpage(item.url, 12000, signal)
+      content: selectRelevantWebContent(content, query)
     }
   } catch (error) {
     return {
@@ -1067,109 +1216,160 @@ async function runFetchResult(
   }
 }
 
+function normalizeSearchMode(
+  value: unknown,
+  query: string,
+  allowedHosts: string[]
+): WebSearchMode {
+  if (allowedHosts.length) return 'site'
+  const requested = text(value).trim().toLocaleLowerCase()
+  if (requested === 'site') return 'general'
+  if (['general', 'site', 'encyclopedia', 'community', 'news'].includes(requested)) {
+    return requested as WebSearchMode
+  }
+  if (/(?:百科|词条|wikipedia|wiki)/i.test(query)) return 'encyclopedia'
+  if (/(?:reddit|知乎|论坛|社区|讨论帖|用户评价)/i.test(query)) return 'community'
+  if (/(?:最新|新闻|今日|今天|刚刚|近期|本周|本月|动态|进展)/i.test(query)) return 'news'
+  return 'general'
+}
+
+function buildSearchEndpoints(
+  query: string,
+  mode: WebSearchMode,
+  allowedHosts: string[],
+  fallback = false
+): WebSearchEndpoint[] {
+  const siteScope = allowedHosts.map((host) => `site:${host}`).join(' OR ')
+  const scopedQuery = siteScope
+    ? `${query} (${siteScope})`
+    : mode === 'community'
+      ? `${query} (site:reddit.com OR site:zhihu.com)`
+      : mode === 'news'
+        ? `${query} 新闻`
+        : query
+  if (fallback) {
+    return [
+      {
+        label: mode === 'site' ? 'Bing HTML 限定来源兜底' : 'Bing HTML 搜索兜底',
+        url: `https://www.bing.com/search?q=${encodeURIComponent(scopedQuery)}&setlang=zh-hans`,
+        parse: parseBingResults
+      }
+    ]
+  }
+  if (mode === 'encyclopedia') {
+    const encyclopediaQuery = `${query} (site:baike.baidu.com OR site:wikipedia.org)`
+    return [
+      {
+        label: '中文维基 API',
+        url: `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`,
+        parse: (value: string, max: number) =>
+          parseWikipediaSearchResults(value, max, 'https://zh.wikipedia.org')
+      },
+      {
+        label: '英文维基 API',
+        url: `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`,
+        parse: (value: string, max: number) =>
+          parseWikipediaSearchResults(value, max, 'https://en.wikipedia.org')
+      },
+      {
+        label: 'Bing RSS 百科搜索',
+        url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(encyclopediaQuery)}`,
+        parse: parseBingRssResults
+      }
+    ]
+  }
+  if (mode === 'community') {
+    const communityQuery = `${query} (site:reddit.com OR site:zhihu.com)`
+    return [
+      {
+        label: 'Bing RSS 社区搜索',
+        url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(communityQuery)}`,
+        parse: parseBingRssResults
+      },
+      {
+        label: 'DuckDuckGo HTML 社区搜索',
+        url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(communityQuery)}&kl=cn-zh`,
+        parse: parseDuckResults
+      }
+    ]
+  }
+  if (mode === 'news') {
+    return [
+      {
+        label: 'Bing News RSS',
+        url: `https://www.bing.com/news/search?format=rss&q=${encodeURIComponent(query)}`,
+        parse: parseBingRssResults
+      },
+      {
+        label: 'DuckDuckGo HTML 最新信息搜索',
+        url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=cn-zh`,
+        parse: parseDuckResults
+      }
+    ]
+  }
+  return [
+    {
+      label: mode === 'site' ? 'Bing RSS 限定来源' : 'Bing RSS 常规搜索',
+      url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(scopedQuery)}`,
+      parse: parseBingRssResults
+    },
+    {
+      label: mode === 'site' ? 'DuckDuckGo HTML 限定来源' : 'DuckDuckGo HTML 常规搜索',
+      url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(scopedQuery)}&kl=cn-zh`,
+      parse: parseDuckResults
+    }
+  ]
+}
+
 export async function searchPublicWeb(
   queryValue: string,
   maxResults: number,
   signal: AbortSignal,
-  allowedHostsValue: string[] = []
+  allowedHostsValue: string[] = [],
+  modeValue: unknown = 'auto'
 ): Promise<string> {
   const query = queryValue.trim()
   if (!query) throw new Error('搜索关键词不能为空')
   const allowedHosts = normalizeWebHosts(allowedHostsValue)
-  const scopedQuery = allowedHosts.length
-    ? `${query} (${allowedHosts.map((host) => `site:${host}`).join(' OR ')})`
-    : query
-  const limit = Math.max(3, Math.min(12, maxResults || 8))
-  const encyclopediaQuery = `${query} (site:baike.baidu.com OR site:wikipedia.org)`
-  const communityQuery = `${query} (site:reddit.com OR site:zhihu.com)`
-  const endpoints: WebSearchEndpoint[] = allowedHosts.length
-    ? [
-        {
-          label: 'Bing RSS 限定来源',
-          url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(scopedQuery)}`,
-          parse: parseBingRssResults
-        },
-        {
-          label: 'DuckDuckGo HTML 限定来源',
-          url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(scopedQuery)}&kl=cn-zh`,
-          parse: parseDuckResults
-        },
-        {
-          label: 'Bing HTML 限定来源',
-          url: `https://www.bing.com/search?q=${encodeURIComponent(scopedQuery)}&setlang=zh-hans`,
-          parse: parseBingResults
-        }
-      ]
-    : [
-        {
-          label: 'Bing RSS 常规搜索',
-          url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}`,
-          parse: parseBingRssResults
-        },
-        {
-          label: 'Bing RSS 百科搜索',
-          url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(encyclopediaQuery)}`,
-          parse: parseBingRssResults
-        },
-        {
-          label: 'Bing RSS 社区搜索',
-          url: `https://www.bing.com/search?format=rss&q=${encodeURIComponent(communityQuery)}`,
-          parse: parseBingRssResults
-        },
-        {
-          label: '中文维基 API',
-          url: `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`,
-          parse: (value: string, max: number) =>
-            parseWikipediaSearchResults(value, max, 'https://zh.wikipedia.org')
-        },
-        {
-          label: '英文维基 API',
-          url: `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`,
-          parse: (value: string, max: number) =>
-            parseWikipediaSearchResults(value, max, 'https://en.wikipedia.org')
-        },
-        {
-          label: 'DuckDuckGo HTML 常规搜索',
-          url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=cn-zh`,
-          parse: parseDuckResults
-        },
-        {
-          label: 'DuckDuckGo HTML 百科搜索',
-          url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(encyclopediaQuery)}&kl=cn-zh`,
-          parse: parseDuckResults
-        },
-        {
-          label: 'DuckDuckGo HTML 社区搜索',
-          url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(communityQuery)}&kl=cn-zh`,
-          parse: parseDuckResults
-        },
-        {
-          label: 'Bing HTML 常规搜索',
-          url: `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-hans`,
-          parse: parseBingResults
-        }
-      ]
-  const searched = await Promise.all(
+  const mode = normalizeSearchMode(modeValue, query, allowedHosts)
+  const limit = Math.max(3, Math.min(8, maxResults || 6))
+  const cacheKey = JSON.stringify({ query: query.toLocaleLowerCase(), allowedHosts, mode, limit })
+  const cached = cachedWebValue(webSearchCache, cacheKey)
+  if (cached) return cached
+  const endpoints = buildSearchEndpoints(query, mode, allowedHosts)
+  const searched: WebSearchProbe[] = await Promise.all(
     endpoints.map((endpoint) => runSearchEndpoint(endpoint, limit, signal))
   )
-  const collected = searched.flatMap((result) => (result.ok ? result.results : []))
+  let collected = searched.flatMap((result) => (result.ok ? result.results : []))
+  if (collected.length < Math.min(3, limit) && mode !== 'encyclopedia') {
+    const fallback = await Promise.all(
+      buildSearchEndpoints(query, mode, allowedHosts, true).map((endpoint) =>
+        runSearchEndpoint(endpoint, limit, signal)
+      )
+    )
+    searched.push(...fallback)
+    collected = searched.flatMap((result) => (result.ok ? result.results : []))
+  }
+  collected = collected.map((item, index) => ({ ...item, sourceRank: index }))
   const eligibleResults = allowedHosts.length
     ? collected.filter((item) => webHostAllowed(item.url, allowedHosts))
     : collected
-  const results = rankSearchResults(query, eligibleResults, Math.max(limit, 8))
+  const results = rankSearchResults(query, eligibleResults, limit, mode)
   if (!results.length) {
-    throw new Error(
-      formatWebSearchDiagnostics(
-        query,
-        allowedHosts,
-        searched,
-        collected.length,
-        eligibleResults.length
-      )
+    const emptyResult = formatWebSearchEmptyResult(
+      query,
+      mode,
+      searched,
+      eligibleResults
     )
+    storeWebValue(webSearchCache, cacheKey, emptyResult, 2 * 60 * 1000, 160)
+    return emptyResult
   }
+  const fetchLimit = mode === 'site' ? 2 : mode === 'general' ? 3 : 4
   const fetched = await Promise.all(
-    results.slice(0, Math.min(8, results.length)).map((item) => runFetchResult(item, signal))
+    results
+      .slice(0, Math.min(fetchLimit, results.length))
+      .map((item) => runFetchResult(item, query, signal))
   )
   const readable = fetched.filter((result): result is Extract<WebFetchProbe, { ok: true }> =>
     Boolean(result.ok)
@@ -1184,11 +1384,11 @@ export async function searchPublicWeb(
     timeZone: 'Asia/Shanghai',
     hour12: false
   })
-  return [
+  const output = [
     `<live_web_evidence fetched_at="${fetchedAt}" source="runtime_http" authoritative="true">`,
     allowedHosts.length
-      ? `程序已在 ${fetchedAt} 严格限定 ${allowedHosts.join('、')}，并发读取 ${readable.length} 个页面。以下内容来自实时 HTTP 响应，不受模型训练截止日期限制。`
-      : `程序已在 ${fetchedAt} 并发搜索并读取 ${readable.length} 个公开来源。以下内容来自实时 HTTP 响应，不受模型训练截止日期限制。`,
+      ? `程序已在 ${fetchedAt} 严格限定 ${allowedHosts.join('、')}，按 ${mode} 模式并发读取 ${readable.length} 个页面。以下内容来自实时 HTTP 响应，不受模型训练截止日期限制。`
+      : `程序已在 ${fetchedAt} 按 ${mode} 模式搜索并读取 ${readable.length} 个高相关来源。以下内容来自实时 HTTP 响应，不受模型训练截止日期限制。`,
     ...readable.map(
       ({ item, content }, index) =>
         `\n===== 来源 ${index + 1} · ${webSourceKind(item.url)} =====\n搜索标题：${item.title}\n${content}`
@@ -1205,6 +1405,8 @@ export async function searchPublicWeb(
   ]
     .filter(Boolean)
     .join('\n\n')
+  storeWebValue(webSearchCache, cacheKey, output, 10 * 60 * 1000, 120)
+  return output
 }
 
 async function parsePublicWebpageResponse(
@@ -1256,28 +1458,89 @@ async function parsePublicWebpageResponse(
   }`
 }
 
+async function renderPublicWebpageLocally(
+  url: string,
+  maxCharsValue: number,
+  signal: AbortSignal
+): Promise<string> {
+  const renderer = new BrowserWindow({
+    show: false,
+    width: 1024,
+    height: 768,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+  renderer.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  let abortListener: (() => void) | null = null
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    abortListener = (): void => reject(new Error('请求已取消'))
+    if (signal.aborted) abortListener()
+    else signal.addEventListener('abort', abortListener, { once: true })
+  })
+  try {
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('本地渲染网页超时')), 20000)
+    })
+    await Promise.race([
+      renderer.loadURL(url, {
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36'
+      }),
+      timeoutPromise,
+      abortPromise
+    ])
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    const finalUrl = renderer.webContents.getURL() || url
+    assertPublicWebUrl(finalUrl)
+    const html = await renderer.webContents.executeJavaScript(
+      'document.documentElement ? document.documentElement.outerHTML : ""',
+      true
+    )
+    const title = renderer.webContents.getTitle()
+    const content = htmlDocumentToText(String(html))
+    if (content.length < 60) throw new Error('本地渲染完成，但正文仍然过短')
+    const maxChars = Math.max(2000, Math.min(30000, maxCharsValue || 18000))
+    return `标题：${title || '未提供标题'}\n地址：${finalUrl}\n来源类型：${webSourceKind(finalUrl)}\n解析字符数：${content.length}\n\n正文：\n${content.slice(0, maxChars)}${
+      content.length > maxChars ? '\n\n[正文已截断]' : ''
+    }`
+  } finally {
+    if (timeout) clearTimeout(timeout)
+    if (abortListener) signal.removeEventListener('abort', abortListener)
+    if (!renderer.isDestroyed()) renderer.destroy()
+  }
+}
+
 export async function fetchPublicWebpage(
   urlValue: string,
   maxCharsValue: number,
   signal: AbortSignal
 ): Promise<string> {
   const url = assertPublicWebUrl(urlValue.trim()).toString()
+  const cacheKey = `${url}\n${Math.max(2000, Math.min(30000, maxCharsValue || 18000))}`
+  const cached = cachedWebValue(webPageCache, cacheKey)
+  if (cached) return cached
   let directError: Error | null = null
   try {
     const response = await fetchPublicPage(url, signal)
-    return await parsePublicWebpageResponse(response, url, maxCharsValue)
+    const content = await parsePublicWebpageResponse(response, url, maxCharsValue)
+    storeWebValue(webPageCache, cacheKey, content, 30 * 60 * 1000, 240)
+    return content
   } catch (error) {
     if (signal.aborted) throw error
     directError = error instanceof Error ? error : new Error(String(error))
   }
-  const readerUrl = `https://r.jina.ai/${url}`
   try {
-    const response = await fetchPublicPage(readerUrl, signal)
-    return await parsePublicWebpageResponse(response, url, maxCharsValue, url)
+    const content = await renderPublicWebpageLocally(url, maxCharsValue, signal)
+    storeWebValue(webPageCache, cacheKey, content, 30 * 60 * 1000, 240)
+    return content
   } catch (error) {
     if (signal.aborted) throw error
     const fallbackError = error instanceof Error ? error.message : String(error)
-    throw new Error(`${directError.message}；备用解析失败：${fallbackError}`)
+    throw new Error(`${directError.message}；本地渲染解析失败：${fallbackError}`)
   }
 }
 
@@ -1287,6 +1550,10 @@ function isWebTool(name: string): boolean {
 
 function webToolFailed(result: string): boolean {
   return /^(?:网页工具执行失败|工具执行失败|网页相关性校验失败)/.test(result.trim())
+}
+
+function webSearchReturnedNoEvidence(result: string): boolean {
+  return result.trimStart().startsWith('<web_search_empty ')
 }
 
 function webInfrastructureFailed(result: string): boolean {
@@ -1437,7 +1704,7 @@ export async function runWebChat(
       content:
         `你处于具备真实网页工具的普通 Chat 模式。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。先完整阅读用户本轮问题与历史上下文，自主判断是否真的需要联网；问题可凭现有上下文可靠回答时直接回复，严禁仅因消息较长、出现普通关键词或为了展示能力而调用网页工具。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法从上下文可靠确定，就必须直接调用 search_web；严禁声称自己无法联网、无法搜索、无法调用工具，也禁止因自我怀疑放弃调用。${restrictedWebInstruction}${
           forceWebSearch ? '用户本轮已明确开启强制联网核验，必须调用网页工具。' : ''
-        } 当前请求默认只直接携带本轮用户消息，不携带历史聊天原文；历史记录已放入本机会话历史资料库。若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段；任务可独立理解时禁止检索历史。禁止重新分析已完成任务。最终回答须依据实际读取内容，并列出来源标题和直接网址。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
+        } 当前请求默认只直接携带本轮用户消息，不携带历史聊天原文；历史记录已放入本机会话历史资料库。若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段；任务可独立理解时禁止检索历史。禁止重新分析已完成任务。网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。最终回答须依据实际读取内容，并列出来源标题和直接网址。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
     },
     ...runtimeMessages
   ]
@@ -1484,12 +1751,7 @@ export async function runWebChat(
       onEvent({ type: 'context', contextMemory: completion.contextMemory })
     }
     forceTool = false
-    totalUsage = {
-      promptTokens: totalUsage.promptTokens + completion.usage.promptTokens,
-      completionTokens: totalUsage.completionTokens + completion.usage.completionTokens,
-      totalTokens: totalUsage.totalTokens + completion.usage.totalTokens,
-      estimated: Boolean(totalUsage.estimated || completion.usage.estimated)
-    }
+    totalUsage = addUsage(totalUsage, completion.usage)
     onEvent({
       type: 'context',
       usage: totalUsage,
@@ -1668,40 +1930,6 @@ export async function runWebChat(
       content: toolResultPreview(result),
       toolName: call.name
     })
-    if (call.name === 'search_web' && !webToolFailed(result)) {
-      const userQuestion =
-        [...messages].reverse().find((message) => message.role === 'user')?.content ?? lastQuery
-      const presentationUsage = await streamChat(
-        model,
-        [
-          {
-            role: 'system',
-            content:
-              `你是实时网页查询结果整理器。系统时间为 ${currentTime}（Asia/Shanghai）。下方 <live_web_results> 是程序刚刚从互联网并发读取的真实网页正文，不是模型生成内容，也不受训练数据截止日期限制。${restrictedWebInstruction}你的唯一任务是依据查询结果直接整理用户需要的具体名单、日期、球队、事件和来源网址。禁止判断这些结果是否像幻觉、是否超出训练时间、是否属于未来信息；禁止使用训练记忆覆盖网页正文；禁止输出能力说明、反思、补救推理或搜索计划。直接给出查询结果。`
-          },
-          {
-            role: 'user',
-            content: `<question>\n${userQuestion}\n</question>\n\n<live_web_results fetched_at="${currentTime}">\n${result}\n</live_web_results>\n\n只整理并输出以上实时查询结果。`
-          }
-        ],
-        onChunk,
-        signal,
-        (content) =>
-          onEvent({
-            type: 'reasoning',
-            title: '思考',
-            content
-          })
-      )
-      const completedUsage = {
-        promptTokens: totalUsage.promptTokens + presentationUsage.promptTokens,
-        completionTokens: totalUsage.completionTokens + presentationUsage.completionTokens,
-        totalTokens: totalUsage.totalTokens + presentationUsage.totalTokens,
-        estimated: Boolean(totalUsage.estimated || presentationUsage.estimated)
-      }
-      onEvent({ type: 'context', usage: completedUsage })
-      return completedUsage
-    }
     forceTool =
       webSearchUsed &&
       restrictedWebHosts.length === 0 &&
@@ -1730,6 +1958,8 @@ export async function runAgent(
   const changes = new Map<string, AgentChange>()
   const tools = new Map<string, RegisteredTool>()
   let activeTasks: AgentTask[] = []
+  let tasksInitialized = false
+  const workflow: { stage: 'understand' | 'tasks' | 'execute' } = { stage: 'understand' }
   let totalUsage: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,
@@ -1737,6 +1967,11 @@ export async function runAgent(
   }
   const restrictedWebHosts = requestedWebHosts(request.objective)
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
+  const requiresWorkspaceEdit =
+    request.permissionMode !== 'read-only' &&
+    /(?:修改|修复|改写|润色|替换|编辑|写入|更新|补写|补充|删除|添加|新增|实现)/i.test(
+      currentTaskText
+    )
   const hasWritingFileContext =
     /<(?:selected_code|current_file|file)\b[^>]*\bpath=["'][^"']*(?:正文|小说|大纲|章节|人物|角色|设定|剧情)[^"']*["']/i.test(
       request.objective
@@ -2063,42 +2298,96 @@ export async function runAgent(
     })
   }
 
+  const changedLineWindow = (
+    before: string,
+    after: string,
+    contextLines = 50
+  ): { changedStart: number; changedEnd: number; start: number; end: number; total: number } => {
+    const beforeLines = before.split(/\r?\n/)
+    const afterLines = after.split(/\r?\n/)
+    let prefix = 0
+    while (
+      prefix < beforeLines.length &&
+      prefix < afterLines.length &&
+      beforeLines[prefix] === afterLines[prefix]
+    ) {
+      prefix += 1
+    }
+    let suffix = 0
+    while (
+      suffix < beforeLines.length - prefix &&
+      suffix < afterLines.length - prefix &&
+      beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+    ) {
+      suffix += 1
+    }
+    const total = Math.max(1, afterLines.length)
+    const changedStart = Math.min(total, prefix + 1)
+    const changedEnd = Math.max(changedStart, Math.min(total, afterLines.length - suffix))
+    return {
+      changedStart,
+      changedEnd,
+      start: Math.max(1, changedStart - contextLines),
+      end: Math.min(total, changedEnd + contextLines),
+      total
+    }
+  }
+
   const appendPostEditReview = async (preview?: AgentChange[]): Promise<void> => {
     const reviewTargets = (preview ?? []).filter((change) => change.afterExists !== false)
     if (!reviewTargets.length) return
     const blocks: string[] = []
     for (const change of reviewTargets.slice(0, 6)) {
+      const relative = path.relative(request.workspaceRoot, change.path) || change.path
+      const window = changedLineWindow(change.before, change.after)
       send({
         requestId: request.requestId,
         type: 'tool',
-        title: `read_file · ${change.path}`,
-        content: 'edit 后自动读取最新文件内容用于复查',
+        title: `read_file · ${relative}:${window.start}-${window.end}`,
+        content: `edit 后自动复查修改行 ${window.changedStart}-${window.changedEnd}，读取附近上下文 ${window.start}-${window.end}`,
         toolName: 'read_file',
-        toolArgs: { path: change.path }
+        toolArgs: {
+          path: relative,
+          start_line: window.start,
+          end_line: window.end
+        }
       })
       try {
         const content = await readTextFile(request.workspaceRoot, change.path)
+        const lines = content.split(/\r?\n/)
+        const start = Math.min(lines.length, window.start)
+        const end = Math.min(lines.length, window.end)
         const visibleContent =
-          content.length > 24000 ? `${content.slice(0, 24000)}\n\n[复查内容已截断]` : content
+          lines
+            .slice(start - 1, end)
+            .map((line, index) => `${start + index} | ${line}`)
+            .join('\n')
+        markFileRead(relative, { startLine: start, endLine: end, totalLines: lines.length }, content)
         blocks.push(
-          `<post_edit_file path="${change.path}">\n${visibleContent}\n</post_edit_file>`
+          `<post_edit_file path="${relative}" changed_lines="${window.changedStart}-${window.changedEnd}" read_lines="${start}-${end}">\n${visibleContent}\n</post_edit_file>`
         )
         send({
           requestId: request.requestId,
           type: 'tool',
-          title: `read_file · ${change.path} 已返回`,
-          content: visibleContent.slice(0, 6000),
-          toolName: 'read_file'
+          title: `read_file · ${relative}:${start}-${end} 已返回`,
+          content: visibleContent,
+          toolName: 'read_file',
+          toolArgs: { path: relative, start_line: start, end_line: end }
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        blocks.push(`<post_edit_file path="${change.path}" error="${message}" />`)
+        blocks.push(`<post_edit_file path="${relative}" error="${message}" />`)
         send({
           requestId: request.requestId,
           type: 'tool',
-          title: `read_file · ${change.path} 失败`,
+          title: `read_file · ${relative}:${window.start}-${window.end} 失败`,
           content: message,
-          toolName: 'read_file'
+          toolName: 'read_file',
+          toolArgs: {
+            path: relative,
+            start_line: window.start,
+            end_line: window.end
+          }
         })
       }
     }
@@ -2107,7 +2396,7 @@ export async function runAgent(
       role: 'user',
       content: [
         '<post_edit_review>',
-        '程序已在写入后自动读取最新文件内容。必须基于以下最新上下文检查刚刚的 edit 是否符合用户要求，再给出结论；如发现问题，继续调用精准编辑工具修复。',
+        '程序已在写入后自动读取修改区间附近的最新上下文。必须只依据以下带行号区间检查刚刚的 edit 与前后逻辑是否符合用户要求；如发现问题，继续调用精准编辑工具修复。未展示的文件区域不属于本次复查范围。',
         ...blocks,
         '</post_edit_review>'
       ].join('\n\n')
@@ -2300,7 +2589,7 @@ export async function runAgent(
     },
     execute: async (args) => {
       const relative = text(args.path, '.')
-      const target = resolveInWorkspace(request.workspaceRoot, relative)
+      const target = await resolveSecurelyInWorkspace(request.workspaceRoot, relative)
       const tree = await buildFileTree(target, 3)
       const simplify = (nodes: typeof tree): unknown =>
         nodes.map((node) => ({
@@ -2444,33 +2733,31 @@ export async function runAgent(
     }
   })
 
-  if (request.historyArchive?.length) {
-    tools.set('search_conversation_history', {
-      risk: 'read',
-      definition: {
-        type: 'function',
-        function: {
-          name: 'search_conversation_history',
-          description:
-            '按关键词查询本机会话历史资料库。当前请求默认不携带历史聊天原文；需要上文、人物设定、旧结论、用户偏好或未完成事项时必须按需检索，禁止凭印象补全。',
-          parameters: {
-            type: 'object',
-            required: ['query'],
-            properties: {
-              query: { type: 'string', description: '要在历史资料库中查询的关键词' },
-              max_results: { type: 'number', description: '返回条数，默认 6，最多 12' }
-            }
+  tools.set('search_conversation_history', {
+    risk: 'read',
+    definition: {
+      type: 'function',
+      function: {
+        name: 'search_conversation_history',
+        description:
+          '按关键词查询本机会话历史资料库。当前请求默认不携带历史聊天原文；需要上文、人物设定、旧结论、用户偏好或未完成事项时按需检索。历史资料库为空时返回空结果，工具始终可用。',
+        parameters: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', description: '要在历史资料库中查询的关键词' },
+            max_results: { type: 'number', description: '返回条数，默认 6，最多 12' }
           }
         }
-      },
-      execute: async (args) =>
-        searchConversationHistoryArchive(
-          request.historyArchive,
-          text(args.query),
-          Number(args.max_results) || 6
-        )
-    })
-  }
+      }
+    },
+    execute: async (args) =>
+      searchConversationHistoryArchive(
+        request.historyArchive ?? [],
+        text(args.query),
+        Number(args.max_results) || 6
+      )
+  })
 
   tools.set('search_web', {
     risk: 'read',
@@ -2480,14 +2767,20 @@ export async function runAgent(
         name: 'search_web',
         description:
           restrictedWebHosts.length
-            ? `只在用户指定的 ${restrictedWebHosts.join('、')} 内并发搜索并读取正文，禁止返回其他网站。`
-            : '并发搜索多个入口并同时读取多个不同网站正文，返回可直接交叉分析的多来源资料。',
+            ? `只在用户指定的 ${restrictedWebHosts.join('、')} 内搜索并读取高相关正文，禁止返回其他网站。`
+            : '按查询意图选择少量搜索入口，本地排序并读取高相关正文。禁止为了凑来源固定扩散到百科、社区或无关网站。',
         parameters: {
           type: 'object',
           required: ['query'],
           properties: {
             query: { type: 'string', description: '搜索关键词，建议包含技术名词或时间范围' },
-            max_results: { type: 'number', description: '结果数量，默认 6，最多 10' }
+            mode: {
+              type: 'string',
+              enum: ['auto', 'general', 'site', 'encyclopedia', 'community', 'news'],
+              description:
+                '搜索意图，默认 auto；指定网站用 site，百科用 encyclopedia，社区讨论用 community，时效信息用 news'
+            },
+            max_results: { type: 'number', description: '候选数量，默认 6，最多 8' }
           }
         }
       }
@@ -2495,9 +2788,10 @@ export async function runAgent(
     execute: async (args) =>
       searchPublicWeb(
         text(args.query),
-        Number(args.max_results) || 8,
+        Number(args.max_results) || 6,
         signal,
-        restrictedWebHosts
+        restrictedWebHosts,
+        args.mode
       )
   })
 
@@ -2579,7 +2873,7 @@ export async function runAgent(
       const relative = text(args.path)
       const parent = path.dirname(relative)
       const name = path.basename(relative)
-      await createWorkspaceEntry(request.workspaceRoot, parent, name, 'directory')
+      await createWorkspaceEntry(request.workspaceRoot, parent, name, 'directory', true)
       return `已创建文件夹 ${relative}`
     }
   })
@@ -2932,6 +3226,7 @@ export async function runAgent(
     },
     execute: async (args) => {
       const command = text(args.command)
+      assertCommandWithinWorkspace(command)
       const { stdout, stderr } = await execAsync(command, {
         cwd: request.workspaceRoot,
         timeout: 120000,
@@ -2949,7 +3244,7 @@ export async function runAgent(
       function: {
         name: 'update_tasks',
         description:
-          '创建或更新当前复杂任务的可见任务清单。简单问答禁止使用；每次传入完整清单，最多一项为进行中。',
+          '创建或更新当前 Agent 任务的可见任务清单。必须先理解用户目标、约束和完成标准，再调用本工具制定清单；每次传入完整清单，最多一项为进行中。涉及文件修改时，清单必须分别包含定位读取、实际编辑、修改后复查三类可验证子任务。',
         parameters: {
           type: 'object',
           required: ['tasks'],
@@ -2975,6 +3270,7 @@ export async function runAgent(
     },
     execute: async (args) => {
       if (!Array.isArray(args.tasks)) throw new Error('tasks 必须是数组')
+      if (args.tasks.length === 0) throw new Error('Agent 任务清单至少需要一项任务')
       const seen = new Set<string>()
       const tasks: AgentTask[] = args.tasks.map((value, index) => {
         if (!value || typeof value !== 'object') throw new Error(`第 ${index + 1} 项任务格式无效`)
@@ -2997,6 +3293,36 @@ export async function runAgent(
       if (tasks.filter((task) => task.status === 'in_progress').length > 1) {
         throw new Error('最多只能有一项任务处于进行中')
       }
+      if (!tasksInitialized && tasks.every((task) => task.status === 'completed')) {
+        throw new Error('首次创建任务清单时不能把全部任务直接标记为完成')
+      }
+      if (requiresWorkspaceEdit) {
+        const locateTask = tasks.find((task) =>
+          /(?:定位|检索|搜索|读取|查看|确认).*(?:文件|代码|正文|文档|选区|行号|上下文|目标)/i.test(
+            task.content
+          )
+        )
+        const editTask = tasks.find((task) =>
+          /(?:编辑|修改|替换|写入|更新|改写|润色|补写).*(?:文件|代码|正文|文档|选区|行|内容)|(?:文件|代码|正文|文档|选区|行).*(?:编辑|修改|替换|写入|更新|改写|润色|补写)/i.test(
+            task.content
+          )
+        )
+        const reviewTask = tasks.find((task) =>
+          /(?:复查|验证|检查|测试|构建|核对).*(?:修改|改动|结果|文件|代码|正文|上下文)|(?:修改|改动|结果).*(?:复查|验证|检查|测试|构建|核对)/i.test(
+            task.content
+          )
+        )
+        if (!locateTask || !editTask || !reviewTask) {
+          throw new Error(
+            '当前属于文件修改任务，tasks 必须分别包含：1）定位并读取目标上下文；2）实际编辑目标文件；3）修改后复查或验证。禁止用一个宽泛的“修复内容”任务代替真实编辑步骤。'
+          )
+        }
+        if (tasks.every((task) => task.status === 'completed') && changes.size === 0) {
+          throw new Error('尚未产生任何真实文件改动，禁止把编辑型 tasks 全部标记为完成')
+        }
+      }
+      tasksInitialized = true
+      workflow.stage = 'execute'
       activeTasks = tasks
       send({
         requestId: request.requestId,
@@ -3032,8 +3358,9 @@ export async function runAgent(
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 search_files 检索本地项目资料；命中后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
       : '',
     '未知知识检索规则：该规则同样适用于代码与普通问答。遇到模型训练资料中可能不存在、版本可能变化、记忆不确定、项目专有、第三方库或 API 行为不明确的事实，严禁凭印象猜测。先调用 search_files 检索本地项目文档、源码与配置；本地资料缺失或不足时必须调用 search_web。只有现有上下文已经给出可靠依据时才可跳过检索。',
-    '创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。create_file、create_directory、copy_path 与 delete_path 是否执行只由当前权限模式和聊天内审批决定；即使处于读写自动模式，这些工具也必须逐次显示独立确认模块并等待用户允许。',
+    `创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。create_file、create_directory、copy_path 与 delete_path 是否逐次审批由输入框“创建/删除确认”开关决定；当前开关为${request.confirmCreateDelete === false ? '关闭，允许按当前读写权限直接执行' : '开启，必须显示独立确认模块并等待用户允许'}。`,
     '专用工具规则：创建文件使用 create_file，创建目录使用 create_directory，复制使用 copy_path，删除使用 delete_path。严禁调用 run_command、Python、PowerShell、Shell、重定向或临时脚本绕过创建与删除确认模块。',
+    'CWD 硬边界规则：全部文件工具只允许读取或操作当前工作区内部路径；绝对外部路径、父级穿越和借助符号链接越界都会由工具层拒绝。run_command 禁止切换出当前工作区，也禁止引用外部绝对路径、父级路径或用户目录变量。',
     '中文引号修复最高优先级：用户要求把英文双引号或英文单引号改成中文引号、修复小说引号、统一中文标点时，必须先 read_file 读取目标文件，再调用 normalize_chinese_quotes，禁止手动逐行替换或重写全文。',
     request.instructions,
     '你是运行在个人电脑中的星伴 AI。',
@@ -3048,7 +3375,7 @@ export async function runAgent(
       ? `会话历史规则：当前请求默认只直接携带本轮目标，不携带历史聊天原文；${request.historyArchive.length} 条历史记录在本机会话历史资料库中。若本轮目标可独立理解，禁止检索历史；若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段。禁止把旧任务拿出来重做。`
       : '',
     '先判断用户目标属于咨询解释、搜索定位、代码审查、运行验证、文件修改或综合任务，再选择最小必要动作。',
-    '任务清单规则：涉及多个文件或至少三个可验证阶段的复杂任务，先调用 update_tasks 创建精简任务清单，并在实际进度变化后更新；简单问答、单次读取、单次搜索或单点修改禁止创建任务清单。',
+    '任务清单最高优先级：Agent 模式必须先理解当前用户目标、已有上下文、约束和完成标准；理解完成后才调用 update_tasks 创建精简任务清单。禁止在尚未理解任务时抢先制定清单。完成首次清单创建前禁止调用其他执行工具或输出最终回复；简单任务可只创建一项。实际进度变化后继续更新完整清单。',
     '任务清单规则：每次更新必须提交完整清单，最多一项为 in_progress；完成真实工作后才能标记 completed，禁止预先批量完成。',
     '咨询解释任务：可直接回答；需要项目事实时只使用读取与搜索工具，禁止修改文件。',
     '搜索定位与代码审查任务：读取、搜索并给出结论；除非用户明确要求修复，否则禁止修改文件。',
@@ -3065,7 +3392,7 @@ export async function runAgent(
     `网页来源规则：${restrictedWebInstruction}`,
     restrictedWebHosts.length
       ? '网页事实核验规则：用户指定的网站是唯一允许来源；可读取该站多个页面，但不得引用站外搜索结果、百科、社区或媒体内容。'
-      : '网页事实核验规则：search_web 会并发搜索并读取多个不同网站正文，返回后应一次性交叉分析全部来源；只有资料缺口明确时才追加 fetch_webpage，禁止机械逐页串行读取。',
+      : '网页事实核验规则：search_web 会根据查询意图选择少量入口、本地排序并读取高相关正文。简单事实可使用一个可靠来源，时效或争议信息再交叉核对多个独立来源；只有资料缺口明确时才追加 fetch_webpage，禁止为了凑数量机械扩散网站。',
     restrictedWebHosts.length
       ? ''
       : '网页事实核验规则：回答人物、作品、日期、新闻、数据或其他可核实事实前，至少需要三个不同域名且与问题直接相关的来源正文。',
@@ -3076,7 +3403,7 @@ export async function runAgent(
     '网页事实核验规则：最终回答必须列出实际读取过的来源标题与直接网址，禁止引用必应或 DuckDuckGo 跳转链接。',
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
-    `当前权限模式：${request.permissionMode || 'read-write-manual'}。只读模式禁止全部写入、创建、删除与命令；读写手动模式要求普通写入与命令逐次确认；读写自动模式允许普通写入自动执行。创建、复制、删除与命令始终逐次确认，严禁绕过审批。`,
+    `当前权限模式：${request.permissionMode || 'read-write-manual'}。只读模式禁止全部写入、创建、删除与命令；读写手动模式要求普通写入与命令逐次确认；读写自动模式允许普通写入自动执行。命令始终逐次确认；创建、复制与删除当前${request.confirmCreateDelete === false ? '允许自动执行' : '必须逐次确认'}。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
     '文件工具中的路径必须使用工作区相对路径。'
   ]
@@ -3166,6 +3493,21 @@ export async function runAgent(
     return queued.length > 0
   }
 
+  const isToolContextProtocolError = (modelError: string): boolean => {
+    const normalized = modelError.replace(/\s+/g, ' ').toLowerCase()
+    return [
+      /assistant message with ['"]?tool_calls['"]? must be followed by tool messages/,
+      /tool_call_ids?.{0,120}(?:did not have|missing).{0,40}(?:response|tool) messages?/,
+      /tool messages?.{0,120}(?:missing|required|invalid|unexpected|must follow|must be followed)/,
+      /(?:invalid|unsupported).{0,80}(?:tool role|role ['"]?tool|tool messages?)/,
+      /messages?.{0,80}role.{0,30}tool.{0,80}(?:invalid|unsupported|unexpected)/,
+      /tool_calls?.{0,120}(?:incompatible|must be followed|missing response)/,
+      /no tool output found for function call/,
+      /thinking enabled.{0,100}reasoning_content is missing/,
+      /reasoning_content is missing.{0,100}tool/
+    ].some((pattern) => pattern.test(normalized))
+  }
+
   const collapseLatestToolExchangeForRetry = (modelError: string): boolean => {
     let cursor = messages.length - 1
     while (
@@ -3194,7 +3536,7 @@ export async function runAgent(
       .join('、')
     const collapsed = [
       '<tool_runtime_observation recovered_from_tool_role="true">',
-      '本地模型服务拒绝继续读取上一轮结构化 tool 消息，程序已把工具结果转换为普通运行时观察继续任务。',
+      '模型服务拒绝继续读取上一轮结构化 tool 消息，程序已把工具结果转换为普通运行时观察继续任务。',
       callNames ? `上一轮工具：${callNames}` : '',
       `模型服务错误：${modelError.slice(0, 1200)}`,
       assistantMessage.content.trim()
@@ -3218,14 +3560,15 @@ export async function runAgent(
   let invalidToolCallRetries = 0
   let invalidToolCorrection = ''
   let modelRequestFailures = 0
+  let completionGuardRetries = 0
   let webSearchUsed = false
   let lastWebQuery = ''
   const verifiedWebHosts = new Set<string>()
   const verifiedReferenceHosts = new Set<string>()
-  let webVerificationRetries = 0
   let webVerificationExhausted = false
   let webFailureStreak = 0
   let webFailureTotal = 0
+  let webEmptyResultStreak = 0
   let blockedWebToolCalls = 0
   type KnowledgeResearchStage =
     | 'anchor-read'
@@ -3239,7 +3582,7 @@ export async function runAgent(
     : requiresWritingLoreResearch
       ? 'local-search'
       : 'complete'
-  let forceToolNext = knowledgeResearchStage !== 'complete'
+  let forceToolNext = false
   let consecutiveToolFailures = 0
   const recentToolFailures: string[] = []
   type ReplaceRecovery = {
@@ -3268,23 +3611,6 @@ export async function runAgent(
     ['search_conversation_history', 7],
     ['create_file', 90]
   ])
-  const existingFileEditTools = new Set([
-    'replace_in_file',
-    'replace_lines',
-    'insert_lines',
-    'normalize_chinese_quotes'
-  ])
-  const allowedKnowledgeTools = (): string[] => {
-    if (knowledgeResearchStage === 'anchor-read') return ['search_files', 'read_file']
-    if (knowledgeResearchStage === 'local-search') return ['search_files']
-    if (knowledgeResearchStage === 'local-read') return ['search_files', 'read_file']
-    if (knowledgeResearchStage === 'web-search') return ['search_files', 'search_web']
-    return []
-  }
-  const requiredKnowledgeToolLabel = (): string => {
-    const allowed = allowedKnowledgeTools()
-    return allowed.length ? allowed.join(' 或 ') : '必要工具'
-  }
   const pendingAnchorDescription = (): string =>
     [...selectedLineRanges.values()]
       .filter((range) => {
@@ -3297,33 +3623,24 @@ export async function runAgent(
       .map((range) => `${range.path} 第 ${range.startLine}-${range.endLine} 行`)
       .join('、')
   const buildModelToolDefinitions = (): ToolDefinition[] => {
-    const restrictedTools =
-      replaceRecovery
-        ? ['read_file']
-        : replaceLinesFallbackPath
-          ? ['replace_lines']
-          : allowedKnowledgeTools()
-    const allowedTools = new Set<string>(restrictedTools)
-    if (allowedTools.size > 0) allowedTools.add('search_files')
     return [...tools.entries()]
-      .filter(([name]) => allowedTools.size === 0 || allowedTools.has(name))
-      .filter(([name]) => readFilePaths.size > 0 || !existingFileEditTools.has(name))
       .sort(
         ([leftName], [rightName]) =>
           (toolPriority.get(leftName) ?? 20) - (toolPriority.get(rightName) ?? 20)
       )
       .map(([, tool]) => tool.definition)
   }
-  for (let step = 1; step <= 40; step += 1) {
+  let step = 0
+  while (!signal.aborted) {
+    step += 1
     if (signal.aborted) throw new Error('任务已停止')
-    if (appendQueuedGuidance()) forceToolNext = knowledgeResearchStage !== 'complete'
-    if (knowledgeResearchStage !== 'complete') forceToolNext = true
-    if (replaceRecovery) forceToolNext = true
-    if (replaceLinesFallbackPath) forceToolNext = true
+    appendQueuedGuidance()
+    if (workflow.stage === 'understand') forceToolNext = false
+    if (workflow.stage === 'tasks') forceToolNext = true
 
-    const toolChoice = forceToolNext ? 'required' : 'auto'
+    const toolChoice = workflow.stage === 'understand' ? 'auto' : forceToolNext ? 'required' : 'auto'
     forceToolNext = false
-    const editToolsLocked = readFilePaths.size === 0
+    const editToolsNeedRead = readFilePaths.size === 0
     const runtimeSystemMessages: LlmMessage[] = [
       ...(activeTasks.length
         ? [
@@ -3335,12 +3652,12 @@ export async function runAgent(
             }
           ]
         : []),
-      ...(editToolsLocked
+      ...(editToolsNeedRead
         ? [
             {
               role: 'system' as const,
               content:
-                '编辑工具状态：尚未通过 read_file 读取任何目标文件，replace_in_file、replace_lines、insert_lines、normalize_chinese_quotes 暂不开放。search_files 始终可用且检索优先级高于 read_file；先用 search_files 像 grep 一样定位关键词与行号，再用 read_file 读取目标区间上下文。已知用户选区时可直接读取选区上下文，但不得把选区理解为禁止继续检索。'
+                '编辑工具前置条件：完整工具集已经开放，但修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。search_files 始终可用且检索优先级高于 read_file；优先像 grep 一样定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件或网页资料。'
             }
           ]
         : []),
@@ -3351,14 +3668,14 @@ export async function runAgent(
         ? [
             {
               role: 'system' as const,
-                content: `replace_in_file 恢复状态：刚才对 ${replaceRecovery.path} 的精确匹配失败。search_files 始终可用；优先检索目标文本取得最新行号，再用 read_file 读取同一文件的最新目标区间，禁止输出正文，禁止再次提交旧的替换文本。失败原因：${replaceRecovery.failure}`
+                content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。完整工具集仍然可用；建议先用 search_files 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
             }
           ]
         : replaceLinesFallbackPath
           ? [
               {
                 role: 'system' as const,
-                content: `replace_in_file 重复参数已被拦截。当前只开放 replace_lines；必须依据刚刚 read_file 返回的真实行号修改 ${replaceLinesFallbackPath}，禁止再次调用 replace_in_file。`
+                content: `replace_in_file 重复参数已被拦截。完整工具集仍然可用；若最新行号已经明确，优先用 replace_lines 修改 ${replaceLinesFallbackPath}，也可重新检索或读取后构造新的精准参数。`
               }
             ]
           : replaceFailureGuidance
@@ -3370,15 +3687,35 @@ export async function runAgent(
               role: 'system' as const,
               content:
                 knowledgeResearchStage === 'anchor-read'
-                  ? `当前选区锚点阶段：用户选区只负责定位当前问题，不代表资料完整。search_files 始终可用且优先级高于 read_file；需要定位关键词、同义表达或跨文件资料时优先检索。已知目标区间时调用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文；若未显式提供范围，程序会自动扩展选区前后各约 50 行。读取完成后必须重新判断信息缺口，可继续检索当前文件、其他文件或项目资料。严禁把存在选区理解成禁止检索。`
+                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。完整工具集始终可用；需要定位关键词、同义表达或跨文件资料时优先 search_files，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具，严禁声称工具不可用。`
                   : knowledgeResearchStage === 'local-search'
-                  ? '当前强制任务：从用户本轮内容提取人物名、服装形象、关系、武学、门派、情节或其他关键设定词，只调用 search_files 检索本地项目资料。此阶段 search_web 不可用；禁止输出正文、禁止编辑、禁止调用其他工具。'
+                  ? '当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 search_files 检索本地项目资料。完整工具集始终可用，请根据当前子任务自主选择；严禁声称编辑或其他工具不可用。'
                   : knowledgeResearchStage === 'local-read'
-                    ? '当前本地检索阶段：优先调用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；若现有命中不够精准，可继续调用 search_files 更换关键词、增加同义词或使用 OR 条件细化查询。此阶段 search_web 与写入工具不可用，取得足够本地上下文后再继续任务。'
-                    : '本地资料未命中。当前强制任务：调用 search_web 查询用户涉及的人物、武学或既有设定，查询词必须包含准确名称与作品名。search_files 仍保持可用，可在发现新的本地关键词后继续补充检索；此时禁止输出正文与编辑。'
+                    ? '当前资料建议：优先用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 search_files，也可根据当前子任务调用其他工具。完整工具集始终可用。'
+                    : '本地资料未命中。若任务仍依赖外部人物、武学或既有设定，建议调用 search_web 并带上准确名称与作品名；完整工具集始终可用，请根据当前子任务自主选择。'
             }
           ]
-        : [])
+        : []),
+      ...(workflow.stage === 'understand'
+        ? [
+            {
+              role: 'system' as const,
+              content:
+                '当前建议先理解任务：完整阅读本轮 current_task、用户选区、附件与可用上下文，用简体中文明确目标、关键约束、已知信息与可验证完成标准。全部工具从首轮起均已开放；若理解任务确实需要检索、读取或核验，可自主调用合适工具。尚未形成可靠理解前不要制定 tasks，也不要输出最终回复。'
+            }
+          ]
+        : workflow.stage === 'tasks'
+          ? [
+              {
+                role: 'system' as const,
+                content: `当前建议依据已经形成的任务理解调用 update_tasks 制定精简、可执行、可验证的完整清单。全部工具仍然开放；若清单制定前确实需要补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks，禁止直接跳到最终回复。${
+                  requiresWorkspaceEdit
+                    ? '本轮属于文件修改任务，tasks 必须分别包含定位读取、实际编辑、修改后复查，禁止用一个宽泛的“修复内容”任务包办全部工作。'
+                    : ''
+                }`
+              }
+            ]
+          : [])
     ]
     const requestMessages: LlmMessage[] = [
       messages[0],
@@ -3401,17 +3738,26 @@ export async function runAgent(
           send({
             requestId: request.requestId,
             type: 'reasoning',
-            title: '思考',
+            title: workflow.stage === 'understand' ? '理解任务' : '思考',
             content
           })
         },
         (content) => {
           streamedContent = true
-          send({
-            requestId: request.requestId,
-            type: 'chunk',
-            content
-          })
+          if (workflow.stage !== 'execute') {
+            send({
+              requestId: request.requestId,
+              type: 'reasoning',
+              title: workflow.stage === 'understand' ? '理解任务' : '制定任务',
+              content
+            })
+          } else {
+            send({
+              requestId: request.requestId,
+              type: 'chunk',
+              content
+            })
+          }
         }
       )
       modelRequestFailures = 0
@@ -3419,13 +3765,16 @@ export async function runAgent(
       if (signal.aborted) throw error
       const message = error instanceof Error ? error.message : String(error)
       modelRequestFailures += 1
-      if (modelRequestFailures <= 2 && collapseLatestToolExchangeForRetry(message)) {
+      if (
+        modelRequestFailures <= 2 &&
+        isToolContextProtocolError(message) &&
+        collapseLatestToolExchangeForRetry(message)
+      ) {
         send({
           requestId: request.requestId,
           type: 'status',
           title: `模型服务拒绝工具上下文，转换后重试 ${modelRequestFailures}/2`,
-          content:
-            '程序已把上一轮工具结果转换为普通运行时观察，避免本地模型服务因 tool 消息格式直接中断'
+          content: `检测到明确的工具协议兼容错误，已把上一轮工具结果转换为普通运行时观察后重试。\n\n原始错误：${message.slice(0, 1600)}`
         })
         forceToolNext = false
         continue
@@ -3466,12 +3815,7 @@ export async function runAgent(
         contextMemory: completion.contextMemory
       })
     }
-    totalUsage = {
-      promptTokens: totalUsage.promptTokens + completion.usage.promptTokens,
-      completionTokens: totalUsage.completionTokens + completion.usage.completionTokens,
-      totalTokens: totalUsage.totalTokens + completion.usage.totalTokens,
-      estimated: Boolean(totalUsage.estimated || completion.usage.estimated)
-    }
+    totalUsage = addUsage(totalUsage, completion.usage)
     send({
       requestId: request.requestId,
       type: 'context',
@@ -3488,14 +3832,16 @@ export async function runAgent(
       send({
         requestId: request.requestId,
         type: 'reasoning',
-        title: '思考',
+        title: workflow.stage === 'understand' ? '理解任务' : '思考',
         content: completion.reasoning
       })
     }
     const missingStructuredToolCall =
       completion.finishReason === 'tool_calls' && completion.toolCalls.length === 0
     const emptyCompletion =
-      completion.toolCalls.length === 0 && completion.content.trim().length === 0
+      completion.toolCalls.length === 0 &&
+      completion.content.trim().length === 0 &&
+      (completion.reasoning?.trim().length ?? 0) === 0
     if (missingStructuredToolCall || emptyCompletion) {
       invalidToolCallRetries += 1
       const finishReason = completion.finishReason || '未提供'
@@ -3529,11 +3875,34 @@ export async function runAgent(
       continue
     }
     if (appendQueuedGuidance()) {
-      forceToolNext = knowledgeResearchStage !== 'complete'
+      forceToolNext = false
       continue
     }
     invalidToolCallRetries = 0
     invalidToolCorrection = ''
+    if (workflow.stage === 'understand' && completion.toolCalls.length === 0) {
+      const understanding = completion.content.trim() || completion.reasoning?.trim() || ''
+      if (!understanding) {
+        messages.push({
+          role: 'user',
+          content:
+            '<runtime_workflow_stage>任务理解内容为空。请重新阅读当前任务，只输出目标、约束、已知信息和完成标准；禁止调用工具或制定 tasks。</runtime_workflow_stage>'
+        })
+        continue
+      }
+      messages.push({
+        role: 'assistant',
+        content: `【任务理解】\n${understanding}`
+      })
+      messages.push({
+        role: 'user',
+        content:
+          '<runtime_workflow_stage>任务理解已完成。现在依据上一条任务理解优先调用 update_tasks 制定精简任务清单；全部工具仍然开放，确需补充事实时可自主调用。</runtime_workflow_stage>'
+      })
+      workflow.stage = 'tasks'
+      forceToolNext = true
+      continue
+    }
     const toolArgumentNotes = new Map<string, string>()
     const toolPresentationArguments = new Map<string, Record<string, unknown>>()
     for (const call of completion.toolCalls) {
@@ -3552,11 +3921,11 @@ export async function runAgent(
     messages.push(completion.rawMessage)
 
     if (completion.toolCalls.length === 0) {
-      if (knowledgeResearchStage !== 'complete') {
-        const requiredTool = requiredKnowledgeToolLabel()
+      if (workflow.stage === 'tasks') {
         messages.push({
           role: 'user',
-          content: `<runtime_research_gate>设定检索尚未完成。下一步必须调用 ${requiredTool}，完成前禁止输出正文、修改文件或自行补造资料。</runtime_research_gate>`
+          content:
+            '<runtime_workflow_stage>当前仍处于任务清单阶段。禁止输出正文，必须立即调用 update_tasks，并提交完整任务数组。</runtime_workflow_stage>'
         })
         forceToolNext = true
         continue
@@ -3575,34 +3944,47 @@ export async function runAgent(
         forceToolNext = true
         continue
       }
-      if (
-        webSearchUsed &&
-        restrictedWebHosts.length === 0 &&
-        (verifiedWebHosts.size < 3 || verifiedReferenceHosts.size < 2) &&
-        !webVerificationExhausted
-      ) {
-        webVerificationRetries += 1
-        send({
-          requestId: request.requestId,
-          type: 'status',
-          title: `网页证据不足，继续核验 ${webVerificationRetries}/3`,
-          content: `目前读取 ${verifiedWebHosts.size} 个独立来源，其中 ${verifiedReferenceHosts.size} 个非社区来源；要求至少三个独立来源且至少两个非社区来源`
-        })
-        if (webVerificationRetries >= 3) {
-          webVerificationExhausted = true
-          messages[0] = {
-            ...messages[0],
-            content: `${messages[0].content}\n\n网页核验已连续三次未达到三个独立来源。禁止继续猜测或输出未经核实的事实，只能明确回答“当前公开来源不足，无法确认”，并列出已经实际读取的来源与缺失证据。`
-          }
+      const incompleteTasks = activeTasks.filter((task) => task.status !== 'completed')
+      const missingEditEvidence = requiresWorkspaceEdit && changes.size === 0
+      if (incompleteTasks.length > 0 || missingEditEvidence) {
+        completionGuardRetries += 1
+        if (completionGuardRetries <= 3) {
+          messages.push({
+            role: 'user',
+            content: [
+              '<runtime_completion_guard>',
+              missingEditEvidence
+                ? '用户要求修改文件，但当前尚未产生任何真实文件改动。禁止结束任务，必须继续调用读取与精准编辑工具完成实际修改。'
+                : '',
+              incompleteTasks.length
+                ? `任务清单仍有 ${incompleteTasks.length} 项未完成：${incompleteTasks
+                    .map((task) => `${task.id}:${task.content}`)
+                    .join('；')}。完成真实工作后必须调用 update_tasks 同步状态，禁止由程序伪造完成。`
+                : '',
+              '</runtime_completion_guard>'
+            ]
+              .filter(Boolean)
+              .join('\n')
+          })
+          forceToolNext = true
           continue
         }
-        messages[0] = {
-          ...messages[0],
-          content: `${messages[0].content}\n\n当前网页核验未完成：已读取 ${verifiedWebHosts.size} 个独立来源，其中只有 ${verifiedReferenceHosts.size} 个非社区来源。禁止输出事实结论，必须重新 search_web 优化关键词，并使用 fetch_webpage 读取至少三个不同域名的相关正文，其中至少两个来自百科、官方、机构或专业资料站。`
-        }
-        forceToolNext = true
-        continue
+        send({
+          requestId: request.requestId,
+          type: 'message',
+          content:
+            'Agent 连续尝试结束任务，但真实文件改动或任务状态仍未满足完成条件；程序已保留真实进度，并停止伪造完成。'
+        })
+        send({
+          requestId: request.requestId,
+          type: 'done',
+          title: '任务未完成',
+          changes: [...changes.values()],
+          usage: totalUsage
+        })
+        return
       }
+      completionGuardRetries = 0
       if (completion.content.trim() && !streamedContent) {
         send({
           requestId: request.requestId,
@@ -3620,7 +4002,7 @@ export async function runAgent(
       return
     }
 
-    if (completion.content.trim() && !streamedContent) {
+    if (workflow.stage === 'execute' && completion.content.trim() && !streamedContent) {
       send({
         requestId: request.requestId,
         type: 'message',
@@ -3656,15 +4038,6 @@ export async function runAgent(
       let duplicateReplaceBlocked = false
       try {
         if (argumentError) throw new Error(argumentError)
-        if (replaceRecovery) {
-          const recoveryPath = normalizedWorkspacePath(replaceRecovery.path)
-          const callPath = normalizedWorkspacePath(text(call.arguments.path).trim())
-          if (call.name !== 'read_file' || callPath !== recoveryPath) {
-            throw new Error(
-              `replace_in_file 匹配失败后的恢复步骤错误：当前必须先调用 read_file 重新读取 ${replaceRecovery.path}，实际收到 ${call.name || '空工具名'}。旧 search 已失效，严禁继续编辑或原样重试。`
-            )
-          }
-        }
         if (
           call.name === 'replace_in_file' &&
           failedReplaceSignatures.has(replaceSignature(call.arguments))
@@ -3672,29 +4045,6 @@ export async function runAgent(
           duplicateReplaceBlocked = true
           throw new Error(
             `replace_in_file 已拦截完全相同的失败参数：${text(call.arguments.path)}。必须重新读取最新原文并修改 search；若行号明确，请改用 replace_lines。`
-          )
-        }
-        if (replaceLinesFallbackPath) {
-          const fallbackPath = normalizedWorkspacePath(replaceLinesFallbackPath)
-          const callPath = normalizedWorkspacePath(text(call.arguments.path).trim())
-          if (call.name !== 'replace_lines' || callPath !== fallbackPath) {
-            throw new Error(
-              `replace_in_file 重复参数被拦截后，只允许调用 replace_lines 修改 ${replaceLinesFallbackPath}，实际收到 ${call.name || '空工具名'}。`
-            )
-          }
-        }
-        if (knowledgeResearchStage === 'anchor-read') {
-          const normalizedPath = normalizedWorkspacePath(text(call.arguments.path).trim())
-          if (call.name !== 'read_file' || !pendingAnchorPaths.has(normalizedPath)) {
-            throw new Error(
-              `当前必须先读取用户选区上下文：${pendingAnchorDescription()}，实际收到 ${call.name || '空工具名'}。选区读取完成后仍可继续检索其他文件或网页资料。`
-            )
-          }
-        }
-        const allowedTools = allowedKnowledgeTools()
-        if (allowedTools.length > 0 && !allowedTools.includes(call.name)) {
-          throw new Error(
-            `当前检索阶段允许调用 ${allowedTools.join('、')}，实际收到 ${call.name || '空工具名'}`
           )
         }
         if (webVerificationExhausted && isWebTool(call.name)) {
@@ -3710,8 +4060,8 @@ export async function runAgent(
         } else {
           const needsApproval =
             (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
-            tool.risk === 'create' ||
-            tool.risk === 'delete' ||
+            ((tool.risk === 'create' || tool.risk === 'delete') &&
+              request.confirmCreateDelete !== false) ||
             tool.risk === 'command'
           preview = tool.preview ? await tool.preview(call.arguments) : undefined
           if (needsApproval) {
@@ -3753,6 +4103,8 @@ export async function runAgent(
       } catch (error) {
         result = `工具执行失败：${error instanceof Error ? error.message : String(error)}`
       }
+      const searchReturnedNoEvidence =
+        call.name === 'search_web' && webSearchReturnedNoEvidence(result)
       if (result.startsWith('工具执行失败：')) {
         consecutiveToolFailures += 1
         recentToolFailures.push(`${call.name}：${result.slice('工具执行失败：'.length)}`)
@@ -3828,6 +4180,11 @@ export async function runAgent(
       if (toolSucceeded && call.name === 'search_web') {
         webSearchUsed = true
         lastWebQuery = text(call.arguments.query)
+        if (searchReturnedNoEvidence) {
+          webEmptyResultStreak += 1
+        } else {
+          webEmptyResultStreak = 0
+        }
         for (const match of result.matchAll(/^地址：(.+)$/gm)) {
           try {
             const url = match[1].trim()
@@ -3878,7 +4235,7 @@ export async function runAgent(
         } else if (toolSucceeded) {
           webFailureStreak = 0
         }
-        if (!webVerificationExhausted && (webFailureStreak >= 3 || webFailureTotal >= 5)) {
+        if (!webVerificationExhausted && (webFailureStreak >= 2 || webFailureTotal >= 3)) {
           webVerificationExhausted = true
           send({
             requestId: request.requestId,
@@ -3985,15 +4342,35 @@ export async function runAgent(
       } else if (
         toolSucceeded &&
         knowledgeResearchStage === 'web-search' &&
-        call.name === 'search_web'
+        call.name === 'search_web' &&
+        !searchReturnedNoEvidence
       ) {
         knowledgeResearchStage = 'complete'
       }
       if (toolSucceeded && call.name === 'search_web') {
-        messages.push({
-          role: 'user',
-          content: `<runtime_web_status fetched_at="${currentTime}">search_web 已由程序真实执行成功。上一条 tool 消息包含实时网页正文。请直接依据查询结果继续完成目标；禁止用训练截止日期质疑、否定或覆盖工具结果，禁止输出“可能是幻觉”之类的判断。</runtime_web_status>`
-        })
+        if (searchReturnedNoEvidence) {
+          if (webEmptyResultStreak < 2) {
+            forceToolNext = true
+            messages.push({
+              role: 'user',
+              content:
+                '<runtime_web_status evidence="empty">网络入口正常，但查询把互不相属的实体或限定词混在一起，未获得可用证据。请根据用户原始目标拆分人物、作品与事实，用明显不同且更准确的关键词重试一次，禁止原样重复。</runtime_web_status>'
+            })
+          } else {
+            knowledgeResearchStage = 'complete'
+            webVerificationExhausted = true
+            messages.push({
+              role: 'user',
+              content:
+                '<runtime_web_status evidence="empty" exhausted="true">两次不同查询均未获得相关证据。停止继续扩散网页搜索；请回到本地资料与用户给定上下文完成可确认部分，并明确说明外部证据缺口，禁止把零结果伪装成网络故障。</runtime_web_status>'
+            })
+          }
+        } else {
+          messages.push({
+            role: 'user',
+            content: `<runtime_web_status fetched_at="${currentTime}">search_web 已由程序真实执行成功。上一条 tool 消息包含实时网页正文。请直接依据查询结果继续完成目标；禁止用训练截止日期质疑、否定或覆盖工具结果，禁止输出“可能是幻觉”之类的判断。</runtime_web_status>`
+          })
+        }
       }
       if (toolSucceeded && (tool?.risk === 'write' || tool?.risk === 'create')) {
         await appendPostEditReview(preview)
@@ -4048,5 +4425,5 @@ export async function runAgent(
     if (restartAfterReplaceRecovery) continue
   }
 
-  throw new Error('任务已达到 40 步安全上限，请缩小目标后继续')
+  throw new Error('任务已停止')
 }

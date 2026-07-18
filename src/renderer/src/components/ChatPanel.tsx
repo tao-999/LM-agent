@@ -12,6 +12,7 @@ import {
 import {
   AtSign,
   Bot,
+  BrainCircuit,
   Check,
   ChevronDown,
   Clock3,
@@ -60,8 +61,13 @@ import type {
   ComfyWorkflowInspection,
   ConversationMode,
   FileNode,
-  ModelOption
+  ModelOption,
+  ThinkingMode
 } from '../../../shared/types'
+import {
+  inferThinkingCapability,
+  thinkingModelKey
+} from '../../../shared/thinking'
 import { markdownKatexOptions, normalizeMarkdownMath } from '../markdown'
 import { useAppStore } from '../store'
 
@@ -73,6 +79,16 @@ const USER_MESSAGE_COLLAPSE_HEIGHT = 280
 const LONG_PASTE_ATTACHMENT_THRESHOLD = 4_000
 const MAX_MESSAGE_ATTACHMENTS = 12
 const KIMI_CODE_MODELS: ModelOption[] = [
+  {
+    id: 'kimi-code:k3',
+    name: 'k3',
+    provider: 'openai',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    source: 'Kimi Code',
+    preset: 'kimi-code',
+    contextLength: 262144,
+    maxContextLength: 1048576
+  },
   {
     id: 'kimi-code:standard',
     name: 'kimi-for-coding',
@@ -255,20 +271,41 @@ function splitContextHistory(
 }
 
 function ResponseTimer({ message }: { message: ChatMessage }): React.JSX.Element | null {
-  const [now, setNow] = useState(Date.now())
+  const [elapsedMilliseconds, setElapsedMilliseconds] = useState(() =>
+    message.startedAt
+      ? Math.max(0, (message.completedAt ?? Date.now()) - message.startedAt)
+      : 0
+  )
   useEffect(() => {
-    if (message.status !== 'streaming') return
-    const timer = window.setInterval(() => setNow(Date.now()), 200)
+    if (!message.startedAt) {
+      setElapsedMilliseconds(0)
+      return
+    }
+    if (message.status !== 'streaming') {
+      setElapsedMilliseconds(Math.max(0, (message.completedAt ?? Date.now()) - message.startedAt))
+      return
+    }
+
+    const elapsedBeforeMount = Math.max(0, Date.now() - message.startedAt)
+    const monotonicStartedAt = performance.now()
+    const syncElapsed = (): void => {
+      setElapsedMilliseconds(
+        Math.max(0, elapsedBeforeMount + performance.now() - monotonicStartedAt)
+      )
+    }
+    syncElapsed()
+    const timer = window.setInterval(syncElapsed, 1000)
     return () => window.clearInterval(timer)
-  }, [message.status])
+  }, [message.completedAt, message.startedAt, message.status])
   if (!message.startedAt) return null
-  const end = message.completedAt ?? now
-  const duration = Math.max(0, end - message.startedAt)
   return (
-    <span className={`response-timer ${message.status === 'streaming' ? 'running' : ''}`}>
+    <span
+      className={`response-timer ${message.status === 'streaming' ? 'running' : ''}`}
+      title="从发送消息开始计算整轮任务耗时，包含模型装载、排队、上下文处理、工具执行与生成输出"
+    >
       <Clock3 size={11} />
-      {message.status === 'streaming' ? '思考中 ' : '用时 '}
-      {formatDuration(duration)}
+      {message.status === 'streaming' ? '已处理 ' : '用时 '}
+      {formatDuration(elapsedMilliseconds)}
     </span>
   )
 }
@@ -906,9 +943,9 @@ function AssistantMessageMetaActions({
       {message.usage && !message.usage.estimated && (
         <span
           className="token-usage"
-          title={`输入 ${message.usage.promptTokens.toLocaleString()} Token，输出 ${message.usage.completionTokens.toLocaleString()} Token，合计 ${message.usage.totalTokens.toLocaleString()} Token`}
+          title={`输入 ${message.usage.promptTokens.toLocaleString()} Token，缓存命中 ${(message.usage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${message.usage.completionTokens.toLocaleString()} Token，合计 ${message.usage.totalTokens.toLocaleString()} Token${!message.usage.estimated && message.usage.tokensPerSecond ? `，生成速度 ${message.usage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         >
-          {`输入 ${message.usage.promptTokens.toLocaleString()} · 输出 ${message.usage.completionTokens.toLocaleString()} · 合计 ${message.usage.totalTokens.toLocaleString()} Token`}
+          {`输入 ${message.usage.promptTokens.toLocaleString()} · 缓存命中 ${(message.usage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${message.usage.completionTokens.toLocaleString()} · 合计 ${message.usage.totalTokens.toLocaleString()} Token${!message.usage.estimated && message.usage.tokensPerSecond ? ` · ${message.usage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         </span>
       )}
       <ResponseTimer message={message} />
@@ -1114,7 +1151,6 @@ const MessageCard = memo(function MessageCard({
           <AgentExecutionStream
             blocks={executionBlocks}
             messageStatus={message.status}
-            responseFooterExtra={assistantMetaActions}
             onPreviewImage={onPreviewImage}
             onImageContextMenu={onImageContextMenu}
           />
@@ -1153,7 +1189,6 @@ const MessageCard = memo(function MessageCard({
             <AssistantResponseBlock
               content={message.content}
               streaming={message.status === 'streaming'}
-              footerExtra={assistantMetaActions}
             />
           )
         ) : !hasExecutionBlocks && message.status === 'streaming' ? (
@@ -1173,8 +1208,8 @@ const MessageCard = memo(function MessageCard({
           </button>
         ) : null}
         {message.status === 'error' && <div className="inline-error">请求失败</div>}
-        {!isUser && !message.content && !hasResponseBlocks && (
-          <div className="message-result-actions">
+        {!isUser && (
+          <div className="message-result-actions assistant-message-footer">
             {assistantMetaActions}
           </div>
         )}
@@ -1420,10 +1455,13 @@ export function ChatPanel(): React.JSX.Element {
   const model = useAppStore((state) => state.model)
   const setModel = useAppStore((state) => state.setModel)
   const customModels = useAppStore((state) => state.customModels)
+  const modelThinkingModes = useAppStore((state) => state.modelThinkingModes)
   const globalInstructions = useAppStore((state) => state.globalInstructions)
   const skills = useAppStore((state) => state.skills)
   const agentPermissionMode = useAppStore((state) => state.agentPermissionMode)
   const setAgentPermissionMode = useAppStore((state) => state.setAgentPermissionMode)
+  const confirmCreateDelete = useAppStore((state) => state.confirmCreateDelete)
+  const setConfirmCreateDelete = useAppStore((state) => state.setConfirmCreateDelete)
   const agentApproval = useAppStore((state) => state.agentApproval)
   const setAgentApproval = useAppStore((state) => state.setAgentApproval)
   const workspaceRoot = useAppStore((state) => state.workspaceRoot)
@@ -1446,6 +1484,9 @@ export function ChatPanel(): React.JSX.Element {
   const updateComfyWorkflow = useAppStore((state) => state.updateComfyWorkflow)
   const createConversation = useAppStore((state) => state.createConversation)
   const setConversationMode = useAppStore((state) => state.setConversationMode)
+  const setConversationThinkingMode = useAppStore(
+    (state) => state.setConversationThinkingMode
+  )
   const setActiveConversation = useAppStore((state) => state.setActiveConversation)
   const deleteConversation = useAppStore((state) => state.deleteConversation)
   const addMessage = useAppStore((state) => state.addMessage)
@@ -1490,6 +1531,9 @@ export function ChatPanel(): React.JSX.Element {
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
   const messages = conversation?.messages ?? []
   const mode = conversation?.mode ?? 'chat'
+  const thinkingMode = conversation?.thinkingMode ?? 'auto'
+  const thinkingCapability = inferThinkingCapability(model)
+  const requestModel = { ...model, thinkingMode }
   const floatingTaskState = useMemo(() => {
     const latestAssistant = [...messages].reverse().find((message) => message.role === 'assistant')
     if (!latestAssistant) return null
@@ -1500,7 +1544,14 @@ export function ChatPanel(): React.JSX.Element {
     ) {
       const block = latestAssistant.agentBlocks?.[blockIndex]
       if (block?.type === 'tasks' && block.items.length) {
-        return { block, messageStatus: latestAssistant.status }
+        const completedBlock =
+          latestAssistant.status === 'done' && latestAssistant.meta === '任务完成'
+            ? {
+                ...block,
+                items: block.items.map((item) => ({ ...item, status: 'completed' as const }))
+              }
+            : block
+        return { block: completedBlock, messageStatus: latestAssistant.status }
       }
     }
     return null
@@ -1687,6 +1738,30 @@ export function ChatPanel(): React.JSX.Element {
   useEffect(() => {
     void discoverModels()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const hydrateCredential = async (): Promise<void> => {
+      if (model.apiKey || (!model.preset && !model.connectionId)) return
+      const apiKey = model.preset === 'kimi-code'
+        ? await window.localAgent.credentials.getKimiCodeApiKey()
+        : model.connectionId
+          ? await window.localAgent.credentials.getModelApiKey(model.connectionId)
+          : ''
+      if (cancelled || !apiKey) return
+      const latest = useAppStore.getState()
+      const sameModel =
+        latest.model.preset === model.preset &&
+        latest.model.connectionId === model.connectionId &&
+        latest.model.model === model.model &&
+        latest.model.baseUrl === model.baseUrl
+      if (sameModel && !latest.model.apiKey) latest.setModel({ ...latest.model, apiKey })
+    }
+    void hydrateCredential()
+    return () => {
+      cancelled = true
+    }
+  }, [model.preset, model.connectionId, model.model, model.baseUrl, model.apiKey])
 
   useEffect(() => {
     if (!showSessions) return
@@ -2061,15 +2136,15 @@ export function ChatPanel(): React.JSX.Element {
         conversationId: conversation.id,
         assistantId: assistantMessage.id,
         kind: 'image',
-        model: model.model,
-        provider: model.provider
+        model: requestModel.model,
+        provider: requestModel.provider
       })
       setInput('')
       setAttachments([])
       try {
         await window.localAgent.image.start({
           requestId,
-          model,
+          model: requestModel,
           baseUrl: comfyBaseUrl,
           workflow: selectedComfyWorkflow,
           prompt: visibleText,
@@ -2176,8 +2251,8 @@ export function ChatPanel(): React.JSX.Element {
       conversationId: conversation.id,
       assistantId: assistantMessage.id,
       kind: mode,
-      model: model.model,
-      provider: model.provider
+      model: requestModel.model,
+      provider: requestModel.provider
     })
     setInput('')
     setAttachments([])
@@ -2200,20 +2275,21 @@ export function ChatPanel(): React.JSX.Element {
     if (mode === 'agent') {
       await window.localAgent.agent.start({
         requestId,
-        model,
+        model: requestModel,
         objective: modelText,
         workspaceRoot,
         instructions: globalInstructions,
         skills,
         attachments: requestAttachments,
         permissionMode: agentPermissionMode,
+        confirmCreateDelete,
         contextMessages: contextHistory.recent,
         historyArchive: contextHistory.archive
       })
     } else {
       await window.localAgent.chat.start({
         requestId,
-        model,
+        model: requestModel,
         instructions: globalInstructions,
         attachments: requestAttachments,
         webSearch: webToolsAvailable,
@@ -2849,12 +2925,73 @@ export function ChatPanel(): React.JSX.Element {
                   }
                 >
                   <option value="read-only">只读</option>
-                  <option value="read-write-manual">读写（手动）</option>
-                  <option value="read-write-auto">读写（自动）</option>
+                  <option value="read-write-manual">手动</option>
+                  <option value="read-write-auto">自动</option>
                 </select>
               </label>
+              <button
+                className={`creation-confirm-toggle ${confirmCreateDelete ? 'active' : ''}`}
+                type="button"
+                role="switch"
+                aria-checked={confirmCreateDelete}
+                onClick={() => setConfirmCreateDelete(!confirmCreateDelete)}
+                title={confirmCreateDelete ? '创建与删除将逐次确认' : '创建与删除将自动执行'}
+              >
+                <span className="toggle-track"><i /></span>
+                创建/删除
+              </button>
             </>
           )}
+          <label
+            className={`thinking-picker capability-${thinkingCapability}`}
+            title={
+              thinkingCapability === 'unsupported'
+                ? '当前模型明确不支持 Thinking'
+                : thinkingCapability === 'always'
+                  ? '当前模型始终启用 Thinking'
+                  : thinkingCapability === 'unknown'
+                    ? '模型能力未知；手动开启后会尝试使用服务对应的 Thinking 参数'
+                    : '控制当前会话的 Thinking 模式'
+            }
+          >
+            <BrainCircuit size={13} />
+            <select
+              value={
+                thinkingCapability === 'unsupported'
+                  ? 'unsupported'
+                  : thinkingCapability === 'always'
+                    ? 'always'
+                    : thinkingMode
+              }
+              disabled={
+                !model.model ||
+                thinkingCapability === 'unsupported' ||
+                thinkingCapability === 'always'
+              }
+              onChange={(event) => {
+                if (!conversation) return
+                setConversationThinkingMode(
+                  conversation.id,
+                  thinkingModelKey(model),
+                  event.target.value as ThinkingMode
+                )
+              }}
+            >
+              {thinkingCapability === 'unsupported' && (
+                <option value="unsupported">不支持</option>
+              )}
+              {thinkingCapability === 'always' && (
+                <option value="always">常开</option>
+              )}
+              {thinkingCapability !== 'unsupported' && thinkingCapability !== 'always' && (
+                <>
+                  <option value="auto">自动</option>
+                  <option value="on">开启</option>
+                  <option value="off">关闭</option>
+                </>
+              )}
+            </select>
+          </label>
           <div className="model-picker">
             <span
               className={`status-dot ${
@@ -2868,7 +3005,7 @@ export function ChatPanel(): React.JSX.Element {
               onChange={(event) => {
                 const selected = displayedModels.find((item) => item.id === event.target.value)
                 if (!selected) {
-                  setModel({
+                  const clearedModel = {
                     ...model,
                     model: '',
                     baseUrl: '',
@@ -2876,8 +3013,13 @@ export function ChatPanel(): React.JSX.Element {
                     preset: undefined,
                     connectionId: undefined,
                     contextLength: undefined,
-                    maxContextLength: undefined
-                  })
+                    maxContextLength: undefined,
+                    thinkingMode: undefined
+                  }
+                  setModel(clearedModel)
+                  if (conversation) {
+                    setConversationThinkingMode(conversation.id, '', 'auto')
+                  }
                   return
                 }
                 void (async () => {
@@ -2891,7 +3033,7 @@ export function ChatPanel(): React.JSX.Element {
                   } else {
                     setActionNotice('')
                   }
-                  setModel({
+                  const nextModel = {
                     provider: selected.provider,
                     baseUrl: selected.baseUrl,
                     model: selected.name,
@@ -2900,7 +3042,16 @@ export function ChatPanel(): React.JSX.Element {
                     connectionId: selected.connectionId,
                     contextLength: selected.contextLength,
                     maxContextLength: selected.maxContextLength
-                  })
+                  }
+                  setModel(nextModel)
+                  if (conversation) {
+                    const nextKey = thinkingModelKey(nextModel)
+                    setConversationThinkingMode(
+                      conversation.id,
+                      nextKey,
+                      modelThinkingModes[nextKey] ?? 'auto'
+                    )
+                  }
                 })()
               }}
             >
@@ -2916,7 +3067,7 @@ export function ChatPanel(): React.JSX.Element {
                   <optgroup key={source} label={source}>
                     {options.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.name}
+                        {item.id === 'kimi-code:k3' ? 'Kimi K3' : item.name}
                         {item.contextLength
                           ? ` · ${Math.round(item.contextLength / 1024)}K`
                           : ''}

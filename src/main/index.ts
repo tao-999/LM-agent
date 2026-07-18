@@ -33,6 +33,7 @@ import {
   runComfyWorkflow
 } from './comfy'
 import {
+  addUsage,
   discoverLocalModels,
   inspectModelContext,
   sameModel,
@@ -338,6 +339,10 @@ async function processImageQueue(): Promise<void> {
             content: '正在调用本地语言模型整理英文 Prompt'
           })
           await prepareSingleModelRuntime(request.model)
+          const promptModel = {
+            ...request.model,
+            thinkingMode: request.model.thinkingMode === 'on' ? ('on' as const) : ('off' as const)
+          }
           let promptOutput = ''
           const promptMessages: LlmMessage[] = [
             {
@@ -393,7 +398,7 @@ async function processImageQueue(): Promise<void> {
             for (let step = 0; step < 3; step += 1) {
               promptOutput = ''
               const completion = await completeWithTools(
-                request.model,
+                promptModel,
                 promptMessages,
                 historyTools,
                 controller.signal,
@@ -401,12 +406,7 @@ async function processImageQueue(): Promise<void> {
                 onPromptReasoning,
                 onPromptChunk
               )
-              usage = {
-                promptTokens: usage.promptTokens + completion.usage.promptTokens,
-                completionTokens: usage.completionTokens + completion.usage.completionTokens,
-                totalTokens: usage.totalTokens + completion.usage.totalTokens,
-                estimated: Boolean(usage.estimated || completion.usage.estimated)
-              }
+              usage = addUsage(usage, completion.usage)
               if (!completion.toolCalls.length) {
                 if (!promptOutput.trim()) promptOutput = completion.content
                 break
@@ -430,7 +430,7 @@ async function processImageQueue(): Promise<void> {
             }
           } else {
             usage = await streamChat(
-              request.model,
+              promptModel,
               promptMessages,
               onPromptChunk,
               controller.signal,

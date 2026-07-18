@@ -24,6 +24,44 @@ export function resolveInWorkspace(root: string, inputPath: string): string {
   return absolute
 }
 
+function assertContainedPath(root: string, candidate: string): void {
+  const relative = path.relative(root, candidate)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('工具路径越出当前 CWD，已拒绝执行')
+  }
+}
+
+export async function resolveSecurelyInWorkspace(
+  root: string,
+  inputPath: string,
+  allowMissing = false
+): Promise<string> {
+  const candidate = resolveInWorkspace(root, inputPath)
+  const realRoot = await fs.realpath(path.resolve(root))
+  let probe = candidate
+  while (true) {
+    let exists = false
+    try {
+      await fs.lstat(probe)
+      exists = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (exists) {
+      const realProbe = await fs.realpath(probe)
+      assertContainedPath(realRoot, realProbe)
+      return candidate
+    }
+    if (!allowMissing) {
+      await fs.realpath(candidate)
+      return candidate
+    }
+    const parent = path.dirname(probe)
+    if (parent === probe) throw new Error('无法确认工具目标位于当前 CWD')
+    probe = parent
+  }
+}
+
 export async function buildFileTree(root: string, maxDepth = 7): Promise<FileNode[]> {
   let visited = 0
 
@@ -59,14 +97,14 @@ export async function buildFileTree(root: string, maxDepth = 7): Promise<FileNod
 }
 
 export async function readTextFile(root: string, filePath: string): Promise<string> {
-  const absolute = resolveInWorkspace(root, filePath)
+  const absolute = await resolveSecurelyInWorkspace(root, filePath)
   const stat = await fs.stat(absolute)
   if (stat.size > 8 * 1024 * 1024) throw new Error('文件超过 8MB，请使用外部程序打开')
   return fs.readFile(absolute, 'utf8')
 }
 
 export async function writeTextFile(root: string, filePath: string, content: string): Promise<void> {
-  const absolute = resolveInWorkspace(root, filePath)
+  const absolute = await resolveSecurelyInWorkspace(root, filePath, true)
   await fs.mkdir(path.dirname(absolute), { recursive: true })
   const temporary = `${absolute}.local-agent-${Date.now()}.tmp`
   await fs.writeFile(temporary, content, 'utf8')
@@ -82,8 +120,12 @@ export async function renameWorkspaceEntry(
   if (!cleanName || cleanName.includes('/') || cleanName.includes('\\')) {
     throw new Error('文件名无效')
   }
-  const source = resolveInWorkspace(root, sourcePath)
-  const target = resolveInWorkspace(root, path.join(path.dirname(source), cleanName))
+  const source = await resolveSecurelyInWorkspace(root, sourcePath)
+  const target = await resolveSecurelyInWorkspace(
+    root,
+    path.join(path.dirname(source), cleanName),
+    true
+  )
   await fs.rename(source, target)
   return target
 }
@@ -109,7 +151,7 @@ export async function renameWorkspaceRoot(root: string, nextName: string): Promi
 }
 
 export async function deleteWorkspaceEntry(root: string, targetPath: string): Promise<void> {
-  const target = resolveInWorkspace(root, targetPath)
+  const target = await resolveSecurelyInWorkspace(root, targetPath)
   if (path.resolve(target) === path.resolve(root)) throw new Error('不能删除工作区根目录')
   await fs.rm(target, { recursive: true, force: false })
 }
@@ -118,27 +160,32 @@ export async function createWorkspaceEntry(
   root: string,
   parentPath: string,
   name: string,
-  kind: 'file' | 'directory'
+  kind: 'file' | 'directory',
+  recursive = false
 ): Promise<string> {
   const cleanName = name.trim()
   if (!cleanName || cleanName.includes('/') || cleanName.includes('\\')) {
     throw new Error('名称无效')
   }
   const parent = resolveInWorkspace(root, parentPath)
-  const target = resolveInWorkspace(root, path.join(parent, cleanName))
-  if (kind === 'directory') await fs.mkdir(target)
+  const target = await resolveSecurelyInWorkspace(root, path.join(parent, cleanName), true)
+  if (kind === 'directory') await fs.mkdir(target, { recursive })
   else await fs.writeFile(target, '', { encoding: 'utf8', flag: 'wx' })
   return target
 }
 
 export async function duplicateWorkspaceEntry(root: string, sourcePath: string): Promise<string> {
-  const source = resolveInWorkspace(root, sourcePath)
+  const source = await resolveSecurelyInWorkspace(root, sourcePath)
   const parsed = path.parse(source)
   let index = 1
   let target = ''
   while (true) {
     const suffix = index === 1 ? ' - 副本' : ` - 副本 ${index}`
-    target = resolveInWorkspace(root, path.join(parsed.dir, `${parsed.name}${suffix}${parsed.ext}`))
+    target = await resolveSecurelyInWorkspace(
+      root,
+      path.join(parsed.dir, `${parsed.name}${suffix}${parsed.ext}`),
+      true
+    )
     try {
       await fs.access(target)
       index += 1
@@ -155,8 +202,8 @@ export async function copyWorkspaceEntry(
   sourcePath: string,
   targetPath: string
 ): Promise<string> {
-  const source = resolveInWorkspace(root, sourcePath)
-  const target = resolveInWorkspace(root, targetPath)
+  const source = await resolveSecurelyInWorkspace(root, sourcePath)
+  const target = await resolveSecurelyInWorkspace(root, targetPath, true)
   await fs.mkdir(path.dirname(target), { recursive: true })
   await fs.cp(source, target, { recursive: true, errorOnExist: true })
   return target
@@ -167,8 +214,8 @@ export async function moveWorkspaceEntry(
   sourcePath: string,
   targetPath: string
 ): Promise<string> {
-  const source = resolveInWorkspace(root, sourcePath)
-  const target = resolveInWorkspace(root, targetPath)
+  const source = await resolveSecurelyInWorkspace(root, sourcePath)
+  const target = await resolveSecurelyInWorkspace(root, targetPath, true)
   await fs.mkdir(path.dirname(target), { recursive: true })
   await fs.rename(source, target)
   return target
@@ -178,7 +225,7 @@ export async function workspaceEntryInfo(
   root: string,
   targetPath: string
 ): Promise<Record<string, unknown>> {
-  const target = resolveInWorkspace(root, targetPath)
+  const target = await resolveSecurelyInWorkspace(root, targetPath)
   const stat = await fs.stat(target)
   return {
     path: target,
@@ -258,7 +305,9 @@ export async function searchWorkspace(
     }
   }
 
-  const target = scopePath.trim() ? resolveInWorkspace(root, scopePath.trim()) : path.resolve(root)
+  const target = scopePath.trim()
+    ? await resolveSecurelyInWorkspace(root, scopePath.trim())
+    : await resolveSecurelyInWorkspace(root, '.')
   const targetStat = await fs.stat(target)
   if (targetStat.isFile()) await searchFile(target)
   else if (targetStat.isDirectory()) await walk(target)

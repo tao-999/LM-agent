@@ -4,6 +4,7 @@ import type {
   ModelOption,
   TokenUsage
 } from '../shared/types'
+import { resolveThinkingEnabled } from '../shared/thinking'
 import { session, type Session } from 'electron'
 
 export type LlmMessage = {
@@ -46,21 +47,77 @@ export type CompletionResult = {
 function createUsage(
   promptTokens: number,
   completionTokens: number,
-  estimated = false
+  estimated = false,
+  generationDurationMs?: number,
+  cachedPromptTokens = 0
 ): TokenUsage {
+  const safePromptTokens = Math.max(0, Math.round(promptTokens))
+  const safeCompletionTokens = Math.max(0, Math.round(completionTokens))
+  const safeDuration =
+    typeof generationDurationMs === 'number' && generationDurationMs > 0
+      ? generationDurationMs
+      : undefined
   return {
-    promptTokens: Math.max(0, Math.round(promptTokens)),
-    completionTokens: Math.max(0, Math.round(completionTokens)),
-    totalTokens: Math.max(0, Math.round(promptTokens + completionTokens)),
-    estimated
+    promptTokens: safePromptTokens,
+    completionTokens: safeCompletionTokens,
+    totalTokens: safePromptTokens + safeCompletionTokens,
+    ...(cachedPromptTokens > 0
+      ? {
+          cachedPromptTokens: Math.min(
+            safePromptTokens,
+            Math.max(0, Math.round(cachedPromptTokens))
+          )
+        }
+      : {}),
+    estimated,
+    ...(safeDuration
+      ? {
+          generationDurationMs: safeDuration,
+          tokensPerSecond: safeCompletionTokens / (safeDuration / 1000)
+        }
+      : {})
   }
 }
 
-function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
+function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: number): TokenUsage {
+  return createUsage(
+    usage.promptTokens,
+    usage.completionTokens,
+    Boolean(usage.estimated),
+    generationDurationMs,
+    usage.cachedPromptTokens ?? 0
+  )
+}
+
+export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
   return createUsage(
     left.promptTokens + right.promptTokens,
     left.completionTokens + right.completionTokens,
-    Boolean(left.estimated || right.estimated)
+    Boolean(left.estimated || right.estimated),
+    (left.generationDurationMs ?? 0) + (right.generationDurationMs ?? 0) || undefined,
+    (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0)
+  )
+}
+
+type OpenAiUsagePayload = {
+  prompt_tokens?: number
+  completion_tokens?: number
+  cached_tokens?: number
+  prompt_cache_hit_tokens?: number
+  cache_read_input_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
+  input_tokens_details?: { cached_tokens?: number }
+}
+
+function cachedPromptTokensFromUsage(usage: OpenAiUsagePayload): number {
+  return Math.max(
+    0,
+    usage.prompt_tokens_details?.cached_tokens ??
+      usage.input_tokens_details?.cached_tokens ??
+      usage.prompt_cache_hit_tokens ??
+      usage.cache_read_input_tokens ??
+      usage.cached_tokens ??
+      0
   )
 }
 
@@ -724,25 +781,44 @@ function textField(value: unknown): string {
   return typeof value === 'string' ? sanitizeUnicodeString(value) : ''
 }
 
-function isQwen36Model(model: ModelConfig): boolean {
-  return /(?:^|[^a-z0-9])qwen\s*3[._-]?6(?:[^a-z0-9]|$)/i.test(model.model)
+function isLmStudioEndpoint(model: ModelConfig): boolean {
+  return /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost):1234(?:\/|$)/i.test(model.baseUrl)
 }
 
-function qwen36ChatTemplateOptions(
+function isQwenModel(model: ModelConfig): boolean {
+  return /(?:^|[^a-z0-9])qwen(?:[^a-z0-9]|$)/i.test(model.model)
+}
+
+function openAiThinkingOptions(
   model: ModelConfig,
-  enableThinking: boolean
+  overrideEnabled?: boolean
 ): Record<string, unknown> {
-  if (!isQwen36Model(model)) return {}
-  const lmStudioOpenAiEndpoint = /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost):1234(?:\/|$)/i.test(
-    model.baseUrl
-  )
+  if (model.preset === 'kimi-code') {
+    return model.model === 'k3' ? { reasoning_effort: 'max' } : {}
+  }
+  const enableThinking =
+    typeof overrideEnabled === 'boolean' ? overrideEnabled : resolveThinkingEnabled(model)
+  if (typeof enableThinking !== 'boolean') return {}
+  if (/dashscope\.aliyuncs\.com|dashscope-intl\.aliyuncs\.com/i.test(model.baseUrl)) {
+    return isQwenModel(model) ? { enable_thinking: enableThinking } : {}
+  }
+  const lmStudioOpenAiEndpoint = isLmStudioEndpoint(model)
+  if (!lmStudioOpenAiEndpoint && !isQwenModel(model)) return {}
   return {
-    ...(lmStudioOpenAiEndpoint && !enableThinking ? { reasoning_effort: 'none' } : {}),
+    ...(lmStudioOpenAiEndpoint
+      ? { reasoning_effort: enableThinking ? 'medium' : 'none' }
+      : {}),
     chat_template_kwargs: {
       enable_thinking: enableThinking,
       preserve_thinking: enableThinking
     }
   }
+}
+
+function ollamaThinkingOptions(model: ModelConfig, overrideEnabled?: boolean): Record<string, unknown> {
+  const enabled =
+    typeof overrideEnabled === 'boolean' ? overrideEnabled : resolveThinkingEnabled(model)
+  return typeof enabled === 'boolean' ? { think: enabled } : {}
 }
 
 function compatibleToolRequest(
@@ -827,6 +903,15 @@ export function serializeHostMarkupForModel(value: string): string {
       tag: 'skill',
       title: '已启用技能',
       detail: (attributes) => [`名称：${hostAttribute(attributes, 'name')}`]
+    },
+    {
+      tag: 'post_edit_file',
+      title: '编辑后复查区间',
+      detail: (attributes) => [
+        `文件：${hostAttribute(attributes, 'path')}`,
+        `修改行：${hostAttribute(attributes, 'changed_lines')}`,
+        `读取行：${hostAttribute(attributes, 'read_lines')}`
+      ]
     }
   ]
   for (const block of contextualBlocks) {
@@ -848,9 +933,12 @@ export function serializeHostMarkupForModel(value: string): string {
     ['user_guidance', '用户补充'],
     ['user_guidance_history', '历史补充'],
     ['runtime_model_error', '模型运行错误'],
+    ['task_understanding', '任务理解'],
+    ['runtime_workflow_stage', '工作流阶段'],
     ['runtime_research_gate', '资料检索约束'],
     ['runtime_web_status', '网页检索状态'],
-    ['tool_runtime_observation', '工具运行观察']
+    ['tool_runtime_observation', '工具运行观察'],
+    ['post_edit_review', '编辑后复查']
   ]
   for (const [tag, title] of simpleBlocks) {
     const pattern = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}\\s*>`, 'gi')
@@ -1118,9 +1206,7 @@ function providerMessages(model: ModelConfig, messages: LlmMessage[]): unknown[]
   const serialized = normalizeToolMessageSequence(messages).map((message) => ({
     ...message,
     content:
-      message.role === 'system' || message.role === 'user'
-        ? serializeHostMarkupForModel(message.content)
-        : message.content
+      message.role === 'tool' ? message.content : serializeHostMarkupForModel(message.content)
   }))
   if (model.provider === 'ollama') {
     return serialized.map((message) => ({
@@ -1391,6 +1477,7 @@ async function generateSemanticSummary(
           model: model.model,
           messages: providerMessages(model, compressionMessages),
           stream: true,
+          ...ollamaThinkingOptions(model, false),
           options: { num_predict: summaryMaxTokens }
         })
       })
@@ -1444,7 +1531,7 @@ async function generateSemanticSummary(
           messages: providerMessages(model, compressionMessages),
           stream: true,
           stream_options: { include_usage: true },
-          ...qwen36ChatTemplateOptions(model, false),
+          ...openAiThinkingOptions(model, false),
           max_tokens: summaryMaxTokens
         })
       })
@@ -1473,7 +1560,7 @@ async function generateSemanticSummary(
                 thinking?: string
               }
             }>
-            usage?: { prompt_tokens?: number; completion_tokens?: number }
+            usage?: OpenAiUsagePayload
           }
           const delta = data.choices?.[0]?.delta
           const reasoning =
@@ -1485,7 +1572,10 @@ async function generateSemanticSummary(
           if (data.usage) {
             usage = createUsage(
               data.usage.prompt_tokens ?? 0,
-              data.usage.completion_tokens ?? 0
+              data.usage.completion_tokens ?? 0,
+              false,
+              undefined,
+              cachedPromptTokensFromUsage(data.usage)
             )
           }
         }
@@ -1507,6 +1597,7 @@ async function generateSemanticSummary(
         model: model.model,
         messages: providerMessages(model, compressionMessages),
         stream: false,
+        ...ollamaThinkingOptions(model, false),
         options: { num_predict: summaryMaxTokens }
       })
     })
@@ -1530,19 +1621,25 @@ async function generateSemanticSummary(
         model: model.model,
         messages: providerMessages(model, compressionMessages),
         stream: false,
-        ...qwen36ChatTemplateOptions(model, false),
+        ...openAiThinkingOptions(model, false),
         max_tokens: summaryMaxTokens
       })
     })
     if (!response.ok) throw new Error(`上下文压缩失败：${response.status}`)
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>
-      usage?: { prompt_tokens?: number; completion_tokens?: number }
+      usage?: OpenAiUsagePayload
     }
     summary = data.choices?.[0]?.message?.content?.trim() ?? ''
     usage =
       data.usage
-        ? createUsage(data.usage.prompt_tokens ?? 0, data.usage.completion_tokens ?? 0)
+        ? createUsage(
+            data.usage.prompt_tokens ?? 0,
+            data.usage.completion_tokens ?? 0,
+            false,
+            undefined,
+            cachedPromptTokensFromUsage(data.usage)
+          )
         : createUsage(usage.promptTokens, estimateTextTokens(summary), true)
   }
   if (summary) {
@@ -1684,11 +1781,13 @@ export async function testModelConnection(
       if (!response.ok) throw new Error(await responseError(response))
       return {
         ok: true,
-        models: ['kimi-for-coding', 'kimi-for-coding-highspeed'],
+        models: ['k3', 'kimi-for-coding', 'kimi-for-coding-highspeed'],
         message:
-          model.model === 'kimi-for-coding-highspeed'
-            ? 'Kimi Code 高速版连接成功'
-            : 'Kimi Code 普通版连接成功'
+          model.model === 'k3'
+            ? 'Kimi K3 连接成功'
+            : model.model === 'kimi-for-coding-highspeed'
+              ? 'Kimi K2.7 Code 高速版连接成功'
+              : 'Kimi K2.7 Code 连接成功'
       }
     }
     const url =
@@ -2041,7 +2140,7 @@ export async function streamChat(
         model: model.model,
         messages: providerMessages(model, prepared.messages),
         stream: true,
-        ...(options.disableThinking ? { think: false } : {}),
+        ...ollamaThinkingOptions(model, options.disableThinking ? false : undefined),
         ...(options.maxOutputTokens
           ? { options: { num_predict: options.maxOutputTokens } }
           : {})
@@ -2054,6 +2153,8 @@ export async function streamChat(
     const decoder = new TextDecoder()
     let buffer = ''
     let providerUsage: TokenUsage | null = null
+    let firstOutputAt = 0
+    let providerGenerationDurationMs: number | undefined
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
@@ -2067,18 +2168,31 @@ export async function streamChat(
           error?: string
           prompt_eval_count?: number
           eval_count?: number
+          eval_duration?: number
         }
         if (data.error) throw new Error(data.error)
         const reasoning = textField(data.message?.thinking) || textField(data.message?.reasoning_content)
-        if (reasoning) normalizedReasoning.push(reasoning)
+        if (reasoning) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          normalizedReasoning.push(reasoning)
+        }
         if (data.message?.content) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
           normalizedContent.push(data.message.content)
         }
         if (
           typeof data.prompt_eval_count === 'number' ||
           typeof data.eval_count === 'number'
         ) {
-          providerUsage = createUsage(data.prompt_eval_count ?? 0, data.eval_count ?? 0)
+          if (typeof data.eval_duration === 'number' && data.eval_duration > 0) {
+            providerGenerationDurationMs = data.eval_duration / 1_000_000
+          }
+          providerUsage = createUsage(
+            data.prompt_eval_count ?? 0,
+            data.eval_count ?? 0,
+            false,
+            providerGenerationDurationMs
+          )
         }
       }
     }
@@ -2091,7 +2205,12 @@ export async function streamChat(
     visibleReasoning.flush()
     return addUsage(
       prepared.compressionUsage,
-      providerUsage ?? createUsage(estimatedPrompt, estimateTextTokens(output), true)
+      providerUsage
+        ? attachGenerationDuration(
+            providerUsage,
+            providerGenerationDurationMs ?? (firstOutputAt ? Date.now() - firstOutputAt : undefined)
+          )
+        : createUsage(estimatedPrompt, estimateTextTokens(output), true)
     )
   }
 
@@ -2104,7 +2223,7 @@ export async function streamChat(
       messages: providerMessages(model, prepared.messages),
       stream: true,
       stream_options: { include_usage: true },
-      ...qwen36ChatTemplateOptions(model, !options.disableThinking),
+      ...openAiThinkingOptions(model, options.disableThinking ? false : undefined),
       ...(options.maxOutputTokens ? { max_tokens: options.maxOutputTokens } : {})
     })
   })
@@ -2115,6 +2234,7 @@ export async function streamChat(
   const decoder = new TextDecoder()
   let buffer = ''
   let providerUsage: TokenUsage | null = null
+  let firstOutputAt = 0
   while (true) {
     const { value, done } = await reader.read()
     if (done) break
@@ -2137,20 +2257,27 @@ export async function streamChat(
             thinking?: string
           }
         }>
-        usage?: { prompt_tokens?: number; completion_tokens?: number }
+        usage?: OpenAiUsagePayload
       }
       const delta = data.choices?.[0]?.delta
       const reasoning =
         textField(delta?.reasoning_content) || textField(delta?.reasoning) || textField(delta?.thinking)
-      if (reasoning) normalizedReasoning.push(reasoning)
+      if (reasoning) {
+        if (!firstOutputAt) firstOutputAt = Date.now()
+        normalizedReasoning.push(reasoning)
+      }
       const content = delta?.content
       if (content) {
+        if (!firstOutputAt) firstOutputAt = Date.now()
         normalizedContent.push(content)
       }
       if (data.usage) {
         providerUsage = createUsage(
           data.usage.prompt_tokens ?? 0,
-          data.usage.completion_tokens ?? 0
+          data.usage.completion_tokens ?? 0,
+          false,
+          undefined,
+          cachedPromptTokensFromUsage(data.usage)
         )
       }
     }
@@ -2164,7 +2291,12 @@ export async function streamChat(
   visibleReasoning.flush()
   return addUsage(
     prepared.compressionUsage,
-    providerUsage ?? createUsage(estimatedPrompt, estimateTextTokens(output), true)
+    providerUsage
+      ? attachGenerationDuration(
+          providerUsage,
+          firstOutputAt ? Date.now() - firstOutputAt : undefined
+        )
+      : createUsage(estimatedPrompt, estimateTextTokens(output), true)
   )
 }
 
@@ -2219,8 +2351,9 @@ async function streamCompleteWithTools(
       body: safeJsonBody({
         model: model.model,
         messages: providerMessages(model, prepared.messages),
-        tools,
-        stream: true
+        ...(tools.length > 0 ? { tools } : {}),
+        stream: true,
+        ...ollamaThinkingOptions(model)
       })
     })
     if (!response.ok || !response.body) {
@@ -2230,6 +2363,8 @@ async function streamCompleteWithTools(
     const decoder = new TextDecoder()
     let buffer = ''
     let providerUsage: TokenUsage | null = null
+    let firstOutputAt = 0
+    let providerGenerationDurationMs: number | undefined
     let finishReason: string | undefined
     let rawToolCalls: Array<{
       id?: string
@@ -2257,6 +2392,7 @@ async function streamCompleteWithTools(
           error?: string
           prompt_eval_count?: number
           eval_count?: number
+          eval_duration?: number
           done_reason?: string
         }
         if (data.error) throw new Error(data.error)
@@ -2264,14 +2400,31 @@ async function streamCompleteWithTools(
           textField(data.message?.thinking) ||
           textField(data.message?.reasoning_content) ||
           textField(data.message?.reasoning)
-        if (thought) normalizedReasoning.push(thought)
-        if (data.message?.content) normalizedContent.push(data.message.content)
-        if (data.message?.tool_calls?.length) rawToolCalls = data.message.tool_calls
+        if (thought) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          normalizedReasoning.push(thought)
+        }
+        if (data.message?.content) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          normalizedContent.push(data.message.content)
+        }
+        if (data.message?.tool_calls?.length) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          rawToolCalls = data.message.tool_calls
+        }
         if (
           typeof data.prompt_eval_count === 'number' ||
           typeof data.eval_count === 'number'
         ) {
-          providerUsage = createUsage(data.prompt_eval_count ?? 0, data.eval_count ?? 0)
+          if (typeof data.eval_duration === 'number' && data.eval_duration > 0) {
+            providerGenerationDurationMs = data.eval_duration / 1_000_000
+          }
+          providerUsage = createUsage(
+            data.prompt_eval_count ?? 0,
+            data.eval_count ?? 0,
+            false,
+            providerGenerationDurationMs
+          )
         }
         if (data.done_reason) finishReason = data.done_reason
       }
@@ -2302,8 +2455,12 @@ async function streamCompleteWithTools(
             type: 'function',
             function: { name: call.name, arguments: JSON.stringify(call.arguments) }
           }))
-    const providerFinalUsage =
-      providerUsage ??
+    const providerFinalUsage = providerUsage
+      ? attachGenerationDuration(
+          providerUsage,
+          providerGenerationDurationMs ?? (firstOutputAt ? Date.now() - firstOutputAt : undefined)
+        )
+      :
       createUsage(
         estimatedPrompt,
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
@@ -2331,14 +2488,15 @@ async function streamCompleteWithTools(
     method: 'POST',
     headers: headers(model),
     signal,
-    body: safeJsonBody({
-      model: model.model,
-      messages: providerMessages(model, compatible.messages),
-      tools,
-      tool_choice: compatible.toolChoice,
-      stream: true,
+      body: safeJsonBody({
+        model: model.model,
+        messages: providerMessages(model, compatible.messages),
+        ...(tools.length > 0
+          ? { tools, tool_choice: compatible.toolChoice }
+          : {}),
+        stream: true,
       stream_options: { include_usage: true },
-      ...qwen36ChatTemplateOptions(model, true)
+      ...openAiThinkingOptions(model)
     })
   })
   if (!response.ok || !response.body) {
@@ -2348,6 +2506,7 @@ async function streamCompleteWithTools(
   const decoder = new TextDecoder()
   let buffer = ''
   let providerUsage: TokenUsage | null = null
+  let firstOutputAt = 0
   let finishReason: string | undefined
   const pendingToolCalls = new Map<
     number,
@@ -2381,7 +2540,7 @@ async function streamCompleteWithTools(
             }>
           }
         }>
-        usage?: { prompt_tokens?: number; completion_tokens?: number }
+        usage?: OpenAiUsagePayload
       }
       if (data.error) {
         const detail =
@@ -2398,9 +2557,16 @@ async function streamCompleteWithTools(
         textField(delta?.reasoning_content) ||
         textField(delta?.reasoning) ||
         textField(delta?.thinking)
-      if (thought) normalizedReasoning.push(thought)
-      if (delta?.content) normalizedContent.push(delta.content)
+      if (thought) {
+        if (!firstOutputAt) firstOutputAt = Date.now()
+        normalizedReasoning.push(thought)
+      }
+      if (delta?.content) {
+        if (!firstOutputAt) firstOutputAt = Date.now()
+        normalizedContent.push(delta.content)
+      }
       for (const toolDelta of delta?.tool_calls ?? []) {
+        if (!firstOutputAt) firstOutputAt = Date.now()
         const index = toolDelta.index ?? 0
         const current = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
         if (toolDelta.id) current.id = toolDelta.id
@@ -2419,7 +2585,10 @@ async function streamCompleteWithTools(
       if (data.usage) {
         providerUsage = createUsage(
           data.usage.prompt_tokens ?? 0,
-          data.usage.completion_tokens ?? 0
+          data.usage.completion_tokens ?? 0,
+          false,
+          undefined,
+          cachedPromptTokensFromUsage(data.usage)
         )
       }
     }
@@ -2460,8 +2629,12 @@ async function streamCompleteWithTools(
           type: 'function',
           function: { name: call.name, arguments: JSON.stringify(call.arguments) }
         }))
-  const providerFinalUsage =
-    providerUsage ??
+  const providerFinalUsage = providerUsage
+    ? attachGenerationDuration(
+        providerUsage,
+        firstOutputAt ? Date.now() - firstOutputAt : undefined
+      )
+    :
     createUsage(
       estimatedPrompt,
       estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
@@ -2521,8 +2694,9 @@ export async function completeWithTools(
       body: safeJsonBody({
         model: model.model,
         messages: providerMessages(model, prepared.messages),
-        tools,
-        stream: false
+        ...(tools.length > 0 ? { tools } : {}),
+        stream: false,
+        ...ollamaThinkingOptions(model)
       })
     })
     if (!response.ok) throw new Error(`模型请求失败：${response.status} ${await response.text()}`)
@@ -2602,10 +2776,11 @@ export async function completeWithTools(
     body: safeJsonBody({
       model: model.model,
       messages: providerMessages(model, compatible.messages),
-      tools,
-      tool_choice: compatible.toolChoice,
+      ...(tools.length > 0
+        ? { tools, tool_choice: compatible.toolChoice }
+        : {}),
       stream: false,
-      ...qwen36ChatTemplateOptions(model, true)
+      ...openAiThinkingOptions(model)
     })
   })
   if (!response.ok) throw new Error(`模型请求失败：${response.status} ${await response.text()}`)
@@ -2623,7 +2798,7 @@ export async function completeWithTools(
         }>
       }
     }>
-    usage?: { prompt_tokens?: number; completion_tokens?: number }
+    usage?: OpenAiUsagePayload
   }
   const message = data.choices?.[0]?.message ?? {}
   const structuredToolCalls = (message.tool_calls ?? []).map((call, index) =>
@@ -2656,7 +2831,13 @@ export async function completeWithTools(
     tool_calls: finalRawToolCalls
   }
   const providerUsage = data.usage
-    ? createUsage(data.usage.prompt_tokens ?? 0, data.usage.completion_tokens ?? 0)
+    ? createUsage(
+        data.usage.prompt_tokens ?? 0,
+        data.usage.completion_tokens ?? 0,
+        false,
+        undefined,
+        cachedPromptTokensFromUsage(data.usage)
+      )
     : createUsage(
         estimatedPrompt,
         estimateTextTokens(message.content ?? '') +

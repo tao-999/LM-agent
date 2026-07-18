@@ -14,6 +14,7 @@ import type {
   ModelConfig,
   PersistedConversation,
   SkillDefinition,
+  ThinkingMode,
   TokenUsageRecord
 } from '../../shared/types'
 import type { EditorTheme } from './editorThemes'
@@ -100,9 +101,11 @@ type AppStore = {
   editorTheme: EditorTheme
   model: ModelConfig
   customModels: ModelConfig[]
+  modelThinkingModes: Record<string, ThinkingMode>
   globalInstructions: string
   skills: SkillDefinition[]
   agentPermissionMode: AgentPermissionMode
+  confirmCreateDelete: boolean
   agentApproval: AgentApproval | null
   agentCheckpoints: AgentCheckpoint[]
   reviewCheckpointId: string
@@ -141,6 +144,7 @@ type AppStore = {
   setGlobalInstructions: (value: string) => void
   setSkills: (skills: SkillDefinition[]) => void
   setAgentPermissionMode: (mode: AgentPermissionMode) => void
+  setConfirmCreateDelete: (enabled: boolean) => void
   setAgentApproval: (approval: AgentApproval | null) => void
   addAgentCheckpoint: (checkpoint: AgentCheckpoint) => void
   setReviewCheckpointId: (id: string) => void
@@ -151,6 +155,7 @@ type AppStore = {
   updateComfyWorkflow: (id: string, patch: Partial<ComfyWorkflow>) => void
   createConversation: () => string
   setConversationMode: (id: string, mode: ConversationMode) => void
+  setConversationThinkingMode: (id: string, modelKey: string, mode: ThinkingMode) => void
   setConversationContextMemory: (id: string, memory: ContextCompressionMemory) => void
   setActiveConversation: (id: string) => void
   deleteConversation: (id: string) => void
@@ -171,6 +176,7 @@ const initialConversation: PersistedConversation = {
   id: uid(),
   title: '新会话',
   mode: 'chat',
+  thinkingMode: 'auto',
   messages: [],
   createdAt: now,
   updatedAt: now
@@ -180,6 +186,27 @@ const defaultModel: ModelConfig = {
   provider: 'ollama',
   baseUrl: '',
   model: ''
+}
+
+function persistedModel(model: ModelConfig): ModelConfig {
+  return {
+    ...model,
+    apiKey: undefined,
+    thinkingMode: undefined
+  }
+}
+
+function restoreConversationModel(
+  conversation: PersistedConversation | undefined,
+  current: ModelConfig
+): ModelConfig {
+  const saved = conversation?.model ?? defaultModel
+  const sameCredential =
+    saved.preset === current.preset && saved.connectionId === current.connectionId
+  return {
+    ...saved,
+    apiKey: sameCredential ? current.apiKey : undefined
+  }
 }
 
 function blockTime(block: AgentExecutionBlock): number {
@@ -351,9 +378,11 @@ export const useAppStore = create<AppStore>()(
       editorTheme: 'one-dark-pro',
       model: defaultModel,
       customModels: [],
+      modelThinkingModes: {},
       globalInstructions: '',
       skills: [],
       agentPermissionMode: 'read-write-manual',
+      confirmCreateDelete: true,
       agentApproval: null,
       agentCheckpoints: [],
       reviewCheckpointId: '',
@@ -475,7 +504,7 @@ export const useAppStore = create<AppStore>()(
           const nextFiles = state.openFiles.filter((file) => file.path !== filePath)
           const nextActive =
             state.activeFilePath === filePath
-              ? nextFiles[Math.max(0, index - 1)]?.path ?? ''
+              ? nextFiles[index]?.path ?? nextFiles[index - 1]?.path ?? ''
               : state.activeFilePath
           return { openFiles: nextFiles, activeFilePath: nextActive }
         }),
@@ -592,7 +621,15 @@ export const useAppStore = create<AppStore>()(
               : next.at(-1)?.path ?? ''
           }
         }),
-      setModel: (model) => set({ model }),
+      setModel: (model) =>
+        set((state) => ({
+          model,
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === state.activeConversationId
+              ? { ...conversation, model: persistedModel(model), updatedAt: Date.now() }
+              : conversation
+          )
+        })),
       saveCustomModel: (model) =>
         set((state) => ({
           customModels: [
@@ -613,6 +650,7 @@ export const useAppStore = create<AppStore>()(
       setGlobalInstructions: (globalInstructions) => set({ globalInstructions }),
       setSkills: (skills) => set({ skills }),
       setAgentPermissionMode: (agentPermissionMode) => set({ agentPermissionMode }),
+      setConfirmCreateDelete: (confirmCreateDelete) => set({ confirmCreateDelete }),
       setAgentApproval: (agentApproval) => set({ agentApproval }),
       addAgentCheckpoint: (checkpoint) =>
         set((state) => ({
@@ -648,10 +686,13 @@ export const useAppStore = create<AppStore>()(
         })),
       createConversation: () => {
         const id = uid()
+        const currentModel = get().model
         const conversation: PersistedConversation = {
           id,
           title: '新会话',
           mode: 'chat',
+          model: persistedModel(currentModel),
+          thinkingMode: 'auto',
           messages: [],
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -667,6 +708,17 @@ export const useAppStore = create<AppStore>()(
           conversations: state.conversations.map((conversation) =>
             conversation.id === id
               ? { ...conversation, mode, updatedAt: Date.now() }
+              : conversation
+          )
+        })),
+      setConversationThinkingMode: (id, modelKey, thinkingMode) =>
+        set((state) => ({
+          modelThinkingModes: modelKey
+            ? { ...state.modelThinkingModes, [modelKey]: thinkingMode }
+            : state.modelThinkingModes,
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id
+              ? { ...conversation, thinkingMode, updatedAt: Date.now() }
               : conversation
           )
         })),
@@ -698,7 +750,17 @@ export const useAppStore = create<AppStore>()(
             }
           })
         })),
-      setActiveConversation: (activeConversationId) => set({ activeConversationId }),
+      setActiveConversation: (activeConversationId) =>
+        set((state) => {
+          const conversation = state.conversations.find(
+            (item) => item.id === activeConversationId
+          )
+          if (!conversation) return state
+          return {
+            activeConversationId,
+            model: restoreConversationModel(conversation, state.model)
+          }
+        }),
       deleteConversation: (id) => {
         const state = get()
         let remaining = state.conversations.filter((item) => item.id !== id)
@@ -708,10 +770,15 @@ export const useAppStore = create<AppStore>()(
           set({ activeConversationId: newId })
           return
         }
+        const nextActiveConversationId =
+          state.activeConversationId === id ? remaining[0].id : state.activeConversationId
+        const nextConversation = remaining.find(
+          (conversation) => conversation.id === nextActiveConversationId
+        )
         set({
           conversations: remaining,
-          activeConversationId:
-            state.activeConversationId === id ? remaining[0].id : state.activeConversationId
+          activeConversationId: nextActiveConversationId,
+          model: restoreConversationModel(nextConversation, state.model)
         })
       },
       addMessage: (conversationId, message) =>
@@ -761,7 +828,7 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 14,
+      version: 17,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -781,13 +848,25 @@ export const useAppStore = create<AppStore>()(
                 ? 'read-write-auto'
                 : 'read-write-manual'
         if (!state.editorTheme) state.editorTheme = 'one-dark-pro'
+        if (typeof state.confirmCreateDelete !== 'boolean') state.confirmCreateDelete = true
         if (!state.customModels) state.customModels = []
+        if (!state.modelThinkingModes) state.modelThinkingModes = {}
         if (!state.tokenUsageRecords) state.tokenUsageRecords = []
         if (!state.comfyBaseUrl) state.comfyBaseUrl = 'http://127.0.0.1:8188'
         if (!state.comfyWorkflows) state.comfyWorkflows = []
         if (!state.selectedComfyWorkflowId) state.selectedComfyWorkflowId = ''
         state.workspaceTrees = {}
-        state.conversations = settleInterruptedConversations(state.conversations)
+        state.conversations = settleInterruptedConversations(state.conversations).map(
+          (conversation) => ({
+            ...conversation,
+            model: conversation.model ?? persistedModel(state.model ?? defaultModel),
+            thinkingMode: conversation.thinkingMode ?? 'auto'
+          })
+        )
+        const activeConversation = state.conversations.find(
+          (conversation) => conversation.id === state.activeConversationId
+        )
+        state.model = restoreConversationModel(activeConversation, state.model ?? defaultModel)
         return state as AppStore
       },
       partialize: (state) => ({
@@ -796,14 +875,19 @@ export const useAppStore = create<AppStore>()(
         editorTheme: state.editorTheme,
         model: { ...state.model, apiKey: undefined },
         customModels: state.customModels.map((item) => ({ ...item, apiKey: undefined })),
+        modelThinkingModes: state.modelThinkingModes,
         globalInstructions: state.globalInstructions,
         skills: state.skills,
         agentPermissionMode: state.agentPermissionMode,
+        confirmCreateDelete: state.confirmCreateDelete,
         tokenUsageRecords: state.tokenUsageRecords,
         comfyBaseUrl: state.comfyBaseUrl,
         comfyWorkflows: state.comfyWorkflows,
         selectedComfyWorkflowId: state.selectedComfyWorkflowId,
-        conversations: state.conversations,
+        conversations: state.conversations.map((conversation) => ({
+          ...conversation,
+          model: conversation.model ? persistedModel(conversation.model) : undefined
+        })),
         activeConversationId: state.activeConversationId
       })
     }
