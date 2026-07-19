@@ -312,11 +312,21 @@ function stripToolCallMarkup(value: string): string {
     .replace(/<\|python_tag\|>[\s\S]*$/gi, '')
     .replace(/\[tool_calls\][\s\S]*$/gi, '')
     .replace(
+      /<\|tool_calls_section_begin\|>[\s\S]*?<\|tool_calls_section_end\|>/gi,
+      ''
+    )
+    .replace(/<\|tool_calls_section_begin\|>[\s\S]*$/gi, '')
+    .replace(
+      /<\|tool_call_begin\|>[\s\S]*?<\|tool_call_end\|>/gi,
+      ''
+    )
+    .replace(/<\|tool_call_begin\|>[\s\S]*$/gi, '')
+    .replace(
       /(?:^|[\r\n]|<\|tool_calls_section_end\|>)\s*[A-Za-z_][\w.-]*\s*:\s*\d+\s*<\|tool_call_argument_begin\|>[\s\S]*?<\|tool_call_end\|>\s*(?:<\|tool_calls_section_end\|>)?/gi,
       '\n'
     )
     .replace(
-      /<\|(?:tool_call_argument_begin|tool_call_end|tool_calls_section_end)\|>/gi,
+      /<\|(?:tool_calls_section_begin|tool_call_begin|tool_call_argument_begin|tool_call_end|tool_calls_section_end)\|>/gi,
       ''
     )
     .replace(/```tool_code[\s\S]*?```/gi, '')
@@ -370,6 +380,20 @@ function inferToolNameFromArguments(
     })
     .map((tool) => tool.function.name)
   return candidates.length === 1 ? { name: candidates[0], candidates } : { candidates }
+}
+
+function kimiLinearToolNameFromId(
+  callId: string,
+  allowed: Set<string>
+): string {
+  const cleaned = callId.trim().replace(/^functions?\./i, '')
+  if (allowed.has(cleaned)) return cleaned
+  const beforeIndex = cleaned.replace(/:\d+$/, '')
+  if (allowed.has(beforeIndex)) return beforeIndex
+  const matchingName = [...allowed]
+    .sort((left, right) => right.length - left.length)
+    .find((name) => cleaned === name || cleaned.startsWith(`${name}:`))
+  return matchingName ?? ''
 }
 
 type ToolProtocol =
@@ -427,7 +451,12 @@ export function parseTextToolCalls(
   let consumedBareContent = false
   let consumedBareReasoning = false
   let toolCallParseError = ''
-  const addCall = (nameValue: unknown, argsValue: unknown, inferMissingName = false): void => {
+  const addCall = (
+    nameValue: unknown,
+    argsValue: unknown,
+    inferMissingName = false,
+    idValue?: unknown
+  ): void => {
     let name = typeof nameValue === 'string' ? nameValue.trim() : ''
     const argumentsValue = parseArguments(argsValue)
     if (!name && inferMissingName) {
@@ -442,7 +471,10 @@ export function parseTextToolCalls(
     if (seen.has(signature)) return
     seen.add(signature)
     calls.push({
-      id: `text-tool-${Date.now()}-${calls.length}`,
+      id:
+        typeof idValue === 'string' && idValue.trim()
+          ? idValue.trim()
+          : `text-tool-${Date.now()}-${calls.length}`,
       name,
       arguments: argumentsValue
     })
@@ -615,11 +647,17 @@ export function parseTextToolCalls(
       }
     },
     () => {
-      const kimiLinearPattern =
-        /(?:^|[\r\n]|<\|tool_calls_section_end\|>)\s*([A-Za-z_][\w.-]*)\s*:\s*\d+\s*<\|tool_call_argument_begin\|>\s*([\s\S]*?)<\|tool_call_end\|>/gi
-      for (const match of source.matchAll(kimiLinearPattern)) {
-        addCall(match[1], match[2])
+      const addKimiLinearMatch = (match: RegExpMatchArray): void => {
+        const callId = match[1].trim()
+        const toolName = kimiLinearToolNameFromId(callId, allowed)
+        addCall(toolName, match[2], !toolName, callId)
       }
+      const officialPattern =
+        /<\|tool_call_begin\|>\s*([^<\r\n]+?)\s*<\|tool_call_argument_begin\|>\s*([\s\S]*?)<\|tool_call_end\|>/gi
+      for (const match of source.matchAll(officialPattern)) addKimiLinearMatch(match)
+      const compactPattern =
+        /(?:^|[\r\n]|<\|tool_calls_section_begin\|>|<\|tool_calls_section_end\|>)\s*([^<\r\n]+?)\s*<\|tool_call_argument_begin\|>\s*([\s\S]*?)<\|tool_call_end\|>/gi
+      for (const match of source.matchAll(compactPattern)) addKimiLinearMatch(match)
     }
   ]
   const priority: Record<ToolProtocol, number[]> = {
@@ -694,6 +732,8 @@ function createToolMarkupFilter(
     { open: '<|tool_calls_begin|>', close: '<|tool_calls_end|>' },
     { open: '<|python_tag|>', close: null },
     { open: '[tool_calls]', close: null },
+    { open: '<|tool_calls_section_begin|>', close: '<|tool_calls_section_end|>' },
+    { open: '<|tool_call_begin|>', close: '<|tool_call_end|>' },
     { open: '<|tool_call_argument_begin|>', close: '<|tool_call_end|>' },
     { open: '<|tool_call_end|>', close: '' },
     { open: '<|tool_calls_section_end|>', close: '' },
