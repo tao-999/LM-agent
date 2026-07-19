@@ -289,12 +289,58 @@ function parseXmlParameter(value: string): unknown {
   }
 }
 
+const PRIVATE_HOST_BLOCK_TAGS = [
+  'current_task',
+  'turn_boundary',
+  'completed_history_input',
+  'completed_history_result',
+  'compressed_context',
+  'compressed_history_summary',
+  'user_guidance',
+  'user_guidance_history',
+  'message_attachments',
+  'task_state',
+  'interaction_event',
+  'selected_code',
+  'current_file',
+  'file_reference',
+  'file',
+  'attachment',
+  'skill',
+  'task_understanding',
+  'post_edit_file',
+  'post_edit_review',
+  'host_runtime_context',
+  'live_web_evidence',
+  'conversation_history_results',
+  'web_search_empty',
+  'runtime_model_error',
+  'runtime_workflow_stage',
+  'runtime_research_gate',
+  'runtime_web_status',
+  'runtime_history_status',
+  'runtime_completion_guard',
+  'runtime_replace_recovery',
+  'runtime_anchor_context',
+  'tool_runtime_observation'
+] as const
+
+const privateHostBlockPattern = (): RegExp =>
+  new RegExp(
+    `<(${PRIVATE_HOST_BLOCK_TAGS.join('|')}|(?:runtime|host_runtime)_[a-z0-9_]+)\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`,
+    'gi'
+  )
+
+const privateHostTagPattern = (): RegExp =>
+  new RegExp(
+    `<\\/?(?:${PRIVATE_HOST_BLOCK_TAGS.join('|')}|(?:runtime|host_runtime)_[a-z0-9_]+)\\b[^>]*>`,
+    'gi'
+  )
+
 function stripToolCallMarkup(value: string): string {
   return value
-    .replace(
-      /<(current_task|turn_boundary|completed_history_input|completed_history_result|user_guidance|user_guidance_history|selected_code|current_file|file_reference|runtime_model_error|runtime_research_gate|runtime_web_status|runtime_history_status|tool_runtime_observation)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
-      ''
-    )
+    .replace(privateHostBlockPattern(), '')
+    .replace(privateHostTagPattern(), '')
     .replace(
       /<\|channel\|>\s*(?:thought|analysis|reasoning|commentary|final)\s*(?:<\|channel\|>|<\|message\|>)?/gi,
       ''
@@ -706,20 +752,7 @@ function createToolMarkupFilter(
   let activeCloseTag: string | null | undefined
   let deferredJson = false
   const markers = [
-    { open: '<current_task', close: '</current_task>' },
-    { open: '<turn_boundary', close: '</turn_boundary>' },
-    { open: '<completed_history_input', close: '</completed_history_input>' },
-    { open: '<completed_history_result', close: '</completed_history_result>' },
-    { open: '<user_guidance', close: '</user_guidance>' },
-    { open: '<user_guidance_history', close: '</user_guidance_history>' },
-    { open: '<selected_code', close: '</selected_code>' },
-    { open: '<current_file', close: '</current_file>' },
-    { open: '<file_reference', close: '</file_reference>' },
-    { open: '<runtime_model_error', close: '</runtime_model_error>' },
-    { open: '<runtime_research_gate', close: '</runtime_research_gate>' },
-    { open: '<runtime_web_status', close: '</runtime_web_status>' },
-    { open: '<runtime_history_status', close: '</runtime_history_status>' },
-    { open: '<tool_runtime_observation', close: '</tool_runtime_observation>' },
+    ...PRIVATE_HOST_BLOCK_TAGS.map((tag) => ({ open: `<${tag}`, close: `</${tag}>` })),
     { open: '<tool_call', close: '</tool_call>' },
     { open: '<function_call', close: '</function_call>' },
     { open: '<function=', close: '</function>' },
@@ -751,6 +784,8 @@ function createToolMarkupFilter(
       /(?:^|[\r\n])([A-Za-z_][\w.-]*\s*:\s*\d+\s*(?:<\|tool_call_argument_begin\|>)?)$/i
     )
     if (toolHeader?.[1]) keep = Math.max(keep, toolHeader[1].length)
+    const genericRuntimeTag = value.match(/<(?:(?:runtime|host_runtime)_[a-z0-9_]*)$/i)
+    if (genericRuntimeTag?.[0]) keep = Math.max(keep, genericRuntimeTag[0].length)
     return keep
   }
   return {
@@ -774,10 +809,20 @@ function createToolMarkupFilter(
           buffer = buffer.slice(-keep)
           break
         }
-        const found = markers
+        const candidates = markers
           .map((marker) => ({ marker, index: lower.indexOf(marker.open) }))
           .filter((item) => item.index >= 0)
-          .sort((left, right) => left.index - right.index)[0]
+        const genericRuntimeBlock = lower.match(/<((?:runtime|host_runtime)_[a-z0-9_]+)\b/i)
+        if (genericRuntimeBlock?.index !== undefined) {
+          candidates.push({
+            marker: {
+              open: genericRuntimeBlock[0],
+              close: `</${genericRuntimeBlock[1]}>`
+            },
+            index: genericRuntimeBlock.index
+          })
+        }
+        const found = candidates.sort((left, right) => left.index - right.index)[0]
         if (found) {
           let visibleEnd = found.index
           if (found.marker.open === '<|tool_call_argument_begin|>') {
@@ -1063,6 +1108,10 @@ export function serializeHostMarkupForModel(value: string): string {
     output = output.replace(pattern, (_match, attributes: string, body: string) =>
       hostSection(block.title, body, block.detail?.(attributes) ?? [])
     )
+    const selfClosingPattern = new RegExp(`<${block.tag}\\b([^>]*)\\/\\s*>`, 'gi')
+    output = output.replace(selfClosingPattern, (_match, attributes: string) =>
+      hostSection(block.title, '', block.detail?.(attributes) ?? [])
+    )
   }
 
   const simpleBlocks: Array<[string, string]> = [
@@ -1071,11 +1120,20 @@ export function serializeHostMarkupForModel(value: string): string {
     ['completed_history_input', '已完成历史输入'],
     ['completed_history_result', '已完成历史结果'],
     ['compressed_context', '已压缩上下文'],
+    ['compressed_history_summary', '历史压缩摘要'],
     ['user_guidance', '用户补充'],
     ['user_guidance_history', '历史补充'],
+    ['message_attachments', '消息附件'],
+    ['task_state', '任务状态'],
+    ['interaction_event', '交互事件'],
+    ['host_runtime_context', '宿主运行环境'],
+    ['live_web_evidence', '实时网页证据'],
     ['runtime_model_error', '模型运行错误'],
     ['task_understanding', '任务理解'],
     ['runtime_workflow_stage', '工作流阶段'],
+    ['runtime_completion_guard', '任务完成检查'],
+    ['runtime_replace_recovery', '精确替换恢复'],
+    ['runtime_anchor_context', '选区上下文状态'],
     ['runtime_research_gate', '资料检索约束'],
     ['runtime_web_status', '网页检索状态'],
     ['runtime_history_status', '会话历史检索状态'],
@@ -1087,6 +1145,11 @@ export function serializeHostMarkupForModel(value: string): string {
     output = output.replace(pattern, (_match, body: string) => hostSection(title, body))
     output = output.replace(new RegExp(`<\\/?${tag}\\b[^>]*>`, 'gi'), `【${title}】`)
   }
+  output = output.replace(
+    /<((?:runtime|host_runtime)_[a-z0-9_]+)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi,
+    (_match, tag: string, body: string) => hostSection('运行时约束', body, [`类型：${tag}`])
+  )
+  output = output.replace(/<\/?(?:runtime|host_runtime)_[a-z0-9_]+\b[^>]*>/gi, '')
   return output.replace(/\n{4,}/g, '\n\n\n').trim()
 }
 
