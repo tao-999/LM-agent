@@ -306,7 +306,13 @@ function describeToolCall(
       detail: ''
     },
     insert_lines: {
-      title: `insert_lines · ${pathValue || '未指定文件'}:${String(args.line || '?')}`,
+      title: `insert_lines · ${pathValue || '未指定文件'}:${
+        args.position === 'start'
+          ? '开头'
+          : args.position === 'end'
+            ? '结尾'
+            : String(args.line ?? '?')
+      }`,
       detail: ''
     },
     run_command: {
@@ -336,13 +342,9 @@ function validateToolCallArguments(name: string, args: Record<string, unknown>):
   }
   const hasOwn = (key: string): boolean => Object.prototype.hasOwnProperty.call(args, key)
   const hasText = (key: string): boolean => text(args[key]).trim().length > 0
-  const hasNumber = (key: string): boolean => Number.isFinite(Number(args[key]))
   const missing: string[] = []
   const requireText = (key: string): void => {
     if (!hasText(key)) missing.push(key)
-  }
-  const requireNumber = (key: string): void => {
-    if (!hasNumber(key)) missing.push(key)
   }
   const requirePresent = (key: string): void => {
     if (!hasOwn(key)) missing.push(key)
@@ -380,9 +382,17 @@ function validateToolCallArguments(name: string, args: Record<string, unknown>):
       break
     case 'insert_lines':
       requireText('path')
-      requireNumber('line')
       requireText('position')
       requirePresent('content')
+      if (!['start', 'end', 'before', 'after'].includes(text(args.position))) {
+        return `insert_lines 参数错误：position 必须是 start、end、before 或 after，实际收到 ${String(args.position)}`
+      }
+      if (
+        (args.position === 'before' || args.position === 'after') &&
+        (!Number.isSafeInteger(Number(args.line)) || Number(args.line) < 0)
+      ) {
+        return `insert_lines 参数错误：${String(args.position)} 模式必须提供大于等于 0 的安全整数 line，实际收到 ${String(args.line)}`
+      }
       break
     case 'move_path':
     case 'copy_path':
@@ -2006,6 +2016,7 @@ export async function runAgent(
 ): Promise<void> {
   const changes = new Map<string, AgentChange>()
   const tools = new Map<string, RegisteredTool>()
+  const permissionMode = request.permissionMode || 'read-write-manual'
   let activeTasks: AgentTask[] = []
   const workflow: { stage: 'understand' | 'tasks' | 'execute' } = { stage: 'understand' }
   let totalUsage: TokenUsage = {
@@ -2047,6 +2058,10 @@ export async function runAgent(
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，只允许搜索、读取和引用 ${restrictedWebHosts.join('、')}，禁止访问其他网站，也禁止为了凑来源跨站核验。`
     : '用户未指定网页来源时，才执行多网站交叉核验。'
+  const modelToolScopeInstruction =
+    permissionMode === 'read-only'
+      ? '当前为只读模式：模型仅可见读取、检索、网页查询与任务清单工具；编辑、创建、复制、移动、删除及命令工具不会发送给模型，禁止尝试调用。'
+      : '当前权限允许的全部工具从首轮起均已开放；工作流只提供操作建议，不限制工具选择。'
 
   const recordChanges = (nextChanges: AgentChange[]): void => {
     for (const change of nextChanges) {
@@ -2517,14 +2532,38 @@ export async function runAgent(
 
   const insertAtLine = (current: string, args: Record<string, unknown>): string => {
     const newline = current.includes('\r\n') ? '\r\n' : '\n'
-    const lines = current.split(/\r?\n/)
+    const lines = current === '' ? [] : current.split(/\r?\n/)
     const line = Number(args.line)
-    if (!Number.isInteger(line) || line < 1 || line > lines.length) {
-      throw new Error(`插入行必须在 1-${lines.length} 之间`)
-    }
+    const position = text(args.position)
     const inserted = text(args.content).split(/\r?\n/)
     if (current === '') return inserted.join(newline)
-    const index = text(args.position) === 'before' ? line - 1 : line
+    let index: number
+    if (position === 'start') {
+      index = 0
+    } else if (position === 'end') {
+      index = lines.length
+    } else {
+      if (!Number.isInteger(line)) {
+        throw new Error('insert_lines 参数错误：before/after 模式必须提供整数 line')
+      }
+      if (position === 'before') {
+        if (line < 1 || line > lines.length + 1) {
+          throw new Error(
+            `insert_lines 参数错误：before 模式允许 1-${lines.length + 1}；使用 1 可在开头插入，使用 ${lines.length + 1} 可在结尾追加`
+          )
+        }
+        index = line - 1
+      } else if (position === 'after') {
+        if (line < 0 || line > lines.length + 1) {
+          throw new Error(
+            `insert_lines 参数错误：after 模式允许 0-${lines.length + 1}；使用 0 可在开头插入，使用 ${lines.length} 或 ${lines.length + 1} 可在结尾追加`
+          )
+        }
+        index = Math.min(line, lines.length)
+      } else {
+        throw new Error('insert_lines 参数错误：position 必须是 start、end、before 或 after')
+      }
+    }
     return [...lines.slice(0, index), ...inserted, ...lines.slice(index)].join(newline)
   }
 
@@ -3224,14 +3263,18 @@ export async function runAgent(
       function: {
         name: 'insert_lines',
         description:
-          '在已通过 read_file 读取过的文件指定行之前或之后插入内容，不覆盖其他行。空文件可在第 1 行之前插入。',
+          '在已通过 read_file 读取过的文件中插入内容，不覆盖其他行。position=start 在全文开头插入，position=end 在全文结尾追加；position=before/after 时使用 line 指定相邻行。兼容 before(line=总行数+1) 追加、after(line=0) 前置，空文件可直接插入。',
         parameters: {
           type: 'object',
-          required: ['path', 'line', 'position', 'content'],
+          required: ['path', 'position', 'content'],
           properties: {
             path: { type: 'string' },
-            line: { type: 'number' },
-            position: { type: 'string', enum: ['before', 'after'] },
+            line: {
+              type: 'integer',
+              minimum: 0,
+              description: 'before/after 使用的行号；start/end 模式可省略'
+            },
+            position: { type: 'string', enum: ['start', 'end', 'before', 'after'] },
             content: { type: 'string' }
           }
         }
@@ -3249,11 +3292,14 @@ export async function runAgent(
     execute: async (args, preview) => {
       const relative = text(args.path)
       const line = Number(args.line)
+      const position = text(args.position)
       await applyTextPreview(
         preview ??
           (await createTextPreview(relative, (current) => insertAtLine(current, args), false, true))
       )
-      return `已在 ${relative} 第 ${line} 行${text(args.position) === 'before' ? '之前' : '之后'}插入内容`
+      if (position === 'start') return `已在 ${relative} 全文开头插入内容`
+      if (position === 'end') return `已在 ${relative} 全文结尾追加内容`
+      return `已在 ${relative} 第 ${line} 行${position === 'before' ? '之前' : '之后'}插入内容`
     }
   })
 
@@ -3391,7 +3437,7 @@ export async function runAgent(
       ? `会话历史规则：当前请求默认只直接携带本轮目标，不携带历史聊天原文；${request.historyArchive.length} 条历史记录在本机会话历史资料库中。若本轮目标可独立理解，禁止检索历史；若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段。禁止把旧任务拿出来重做。`
       : '',
     '先判断用户目标属于咨询解释、搜索定位、代码审查、运行验证、文件修改或综合任务，再选择最小必要动作。',
-    '任务清单规则：Agent 模式必须在完成前建立可见 tasks；应先理解当前目标，再根据任务实际需要自主决定清单内容、粒度、顺序与状态。全部工具始终开放，tasks 只负责表达和同步执行判断，禁止用固定模板限制任务拆分。',
+    `任务清单规则：Agent 模式必须在完成前建立可见 tasks；应先理解当前目标，再根据任务实际需要自主决定清单内容、粒度、顺序与状态。${modelToolScopeInstruction} tasks 只负责表达和同步执行判断，禁止用固定模板限制任务拆分。`,
     '咨询解释任务：可直接回答；需要项目事实时只使用读取与搜索工具，禁止修改文件。',
     '搜索定位与代码审查任务：读取、搜索并给出结论；除非用户明确要求修复，否则禁止修改文件。',
     '运行验证任务：仅执行与目标直接相关的检查或测试，禁止顺手修改无关内容。',
@@ -3418,7 +3464,7 @@ export async function runAgent(
     '网页事实核验规则：最终回答必须列出实际读取过的来源标题与直接网址，禁止引用必应或 DuckDuckGo 跳转链接。',
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
-    `当前权限模式：${request.permissionMode || 'read-write-manual'}。只读模式禁止全部写入、创建、删除与命令；读写手动模式要求普通写入与命令逐次确认；读写自动模式允许普通写入自动执行。命令始终逐次确认；创建、复制与删除当前${request.confirmCreateDelete === false ? '允许自动执行' : '必须逐次确认'}。`,
+    `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求普通写入逐次确认；读写自动模式允许普通写入自动执行。命令始终逐次确认；创建、复制与删除当前${request.confirmCreateDelete === false ? '允许自动执行' : '必须逐次确认'}。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
     '文件工具中的路径必须使用工作区相对路径。'
   ]
@@ -3641,6 +3687,7 @@ export async function runAgent(
       .join('、')
   const buildModelToolDefinitions = (): ToolDefinition[] => {
     return [...tools.entries()]
+      .filter(([, tool]) => permissionMode !== 'read-only' || tool.risk === 'read')
       .sort(
         ([leftName], [rightName]) =>
           (toolPriority.get(leftName) ?? 20) - (toolPriority.get(rightName) ?? 20)
@@ -3657,7 +3704,7 @@ export async function runAgent(
 
     const toolChoice = workflow.stage === 'understand' ? 'auto' : forceToolNext ? 'required' : 'auto'
     forceToolNext = false
-    const editToolsNeedRead = readFilePaths.size === 0
+    const editToolsNeedRead = permissionMode !== 'read-only' && readFilePaths.size === 0
     const runtimeSystemMessages: LlmMessage[] = [
       ...(activeTasks.length
         ? [
@@ -3674,7 +3721,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                '编辑工具前置条件：完整工具集已经开放，但修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。search_files 始终可用且检索优先级高于 read_file；优先像 grep 一样定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件或网页资料。'
+                `编辑工具前置条件：${modelToolScopeInstruction} 修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。search_files 始终可用且检索优先级高于 read_file；优先像 grep 一样定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件或网页资料。`
             }
           ]
         : []),
@@ -3685,14 +3732,14 @@ export async function runAgent(
         ? [
             {
               role: 'system' as const,
-                content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。完整工具集仍然可用；建议先用 search_files 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
+                content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。${modelToolScopeInstruction} 建议先用 search_files 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
             }
           ]
         : replaceLinesFallbackPath
           ? [
               {
                 role: 'system' as const,
-                content: `replace_in_file 重复参数已被拦截。完整工具集仍然可用；若最新行号已经明确，优先用 replace_lines 修改 ${replaceLinesFallbackPath}，也可重新检索或读取后构造新的精准参数。`
+                content: `replace_in_file 重复参数已被拦截。${modelToolScopeInstruction} 若最新行号已经明确，优先用 replace_lines 修改 ${replaceLinesFallbackPath}，也可重新检索或读取后构造新的精准参数。`
               }
             ]
           : replaceFailureGuidance
@@ -3704,12 +3751,12 @@ export async function runAgent(
               role: 'system' as const,
               content:
                 knowledgeResearchStage === 'anchor-read'
-                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。完整工具集始终可用；需要定位关键词、同义表达或跨文件资料时优先 search_files，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具，严禁声称工具不可用。`
+                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。${modelToolScopeInstruction} 需要定位关键词、同义表达或跨文件资料时优先 search_files，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具。`
                   : knowledgeResearchStage === 'local-search'
-                  ? '当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 search_files 检索本地项目资料。完整工具集始终可用，请根据当前子任务自主选择；严禁声称编辑或其他工具不可用。'
+                  ? `当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 search_files 检索本地项目资料。${modelToolScopeInstruction} 请根据当前子任务自主选择。`
                   : knowledgeResearchStage === 'local-read'
-                    ? '当前资料建议：优先用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 search_files，也可根据当前子任务调用其他工具。完整工具集始终可用。'
-                    : '本地资料未命中。若任务仍依赖外部人物、武学或既有设定，建议调用 search_web 并带上准确名称与作品名；完整工具集始终可用，请根据当前子任务自主选择。'
+                    ? `当前资料建议：优先用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 search_files，也可根据当前子任务调用其他工具。${modelToolScopeInstruction}`
+                    : `本地资料未命中。若任务仍依赖外部人物、武学或既有设定，建议调用 search_web 并带上准确名称与作品名；${modelToolScopeInstruction}`
             }
           ]
         : []),
@@ -3718,7 +3765,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                '当前建议先理解任务：完整阅读本轮 current_task、用户选区、附件与可用上下文，用简体中文明确目标、关键约束、已知信息与可验证完成标准。全部工具从首轮起均已开放；若理解任务确实需要检索、读取或核验，可自主调用合适工具。尚未形成可靠理解前不要制定 tasks，也不要输出最终回复。'
+                `当前建议先理解任务：完整阅读本轮 current_task、用户选区、附件与可用上下文，用简体中文明确目标、关键约束、已知信息与可验证完成标准。${modelToolScopeInstruction} 若理解任务确实需要检索、读取或核验，可自主调用合适工具。尚未形成可靠理解前不要制定 tasks，也不要输出最终回复。`
             }
           ]
         : workflow.stage === 'tasks'
@@ -3726,7 +3773,7 @@ export async function runAgent(
               {
                 role: 'system' as const,
                 content:
-                  '当前建议依据已经形成的任务理解调用 update_tasks 建立清单。清单内容、粒度、顺序与状态由你依据当前任务自主决定，不套用固定模板。全部工具仍然开放；若仍需补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks。'
+                  `当前建议依据已经形成的任务理解调用 update_tasks 建立清单。清单内容、粒度、顺序与状态由你依据当前任务自主决定，不套用固定模板。${modelToolScopeInstruction} 若仍需补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks。`
               }
             ]
           : [])
@@ -3912,8 +3959,7 @@ export async function runAgent(
       })
       messages.push({
         role: 'user',
-        content:
-          '<runtime_workflow_stage>任务理解已完成。现在依据上一条任务理解优先调用 update_tasks 制定精简任务清单；全部工具仍然开放，确需补充事实时可自主调用。</runtime_workflow_stage>'
+        content: `<runtime_workflow_stage>任务理解已完成。现在依据上一条任务理解优先调用 update_tasks 制定精简任务清单；${modelToolScopeInstruction}确需补充事实时可自主调用。</runtime_workflow_stage>`
       })
       workflow.stage = 'tasks'
       forceToolNext = true
@@ -4085,9 +4131,10 @@ export async function runAgent(
 相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续任务。
 </conversation_history_results>`
         } else {
-          const permissionMode = request.permissionMode || 'read-write-manual'
           if (permissionMode === 'read-only' && tool.risk !== 'read') {
-            result = '权限已阻止：当前会话为只读模式，请仅分析并向用户说明需要执行的操作'
+            result =
+              '权限状态：当前会话为只读模式，该工具未向模型开放，写入未执行。请停止尝试写入，仅使用当前可见的读取与检索工具完成分析。'
+            toolSucceeded = true
           } else {
             const needsApproval =
               (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
