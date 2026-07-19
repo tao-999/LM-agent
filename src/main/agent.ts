@@ -3619,6 +3619,7 @@ export async function runAgent(
   }
 
   let invalidToolCallRetries = 0
+  let invalidToolArgumentRetries = 0
   let invalidToolCorrection = ''
   let modelRequestFailures = 0
   let completionGuardRetries = 0
@@ -4180,7 +4181,14 @@ export async function runAgent(
           }
         }
       } catch (error) {
-        result = `工具执行失败：${error instanceof Error ? error.message : String(error)}`
+        if (argumentError?.startsWith('工具参数不是合法 JSON')) {
+          invalidToolArgumentRetries += 1
+          result = `工具参数格式无效：${argumentError}`
+          invalidToolCorrection = `工具参数 JSON 纠错：${call.name} 上一次参数缺少必要的对象花括号或引号，程序无法安全恢复。请严格依据该工具 JSON Schema 重新生成完整 arguments 对象；数组中的每一项都必须使用 { } 包裹。禁止原样重复。`
+          forceToolNext = true
+        } else {
+          result = `工具执行失败：${error instanceof Error ? error.message : String(error)}`
+        }
       }
       const searchReturnedNoEvidence =
         call.name === 'search_web' && webSearchReturnedNoEvidence(result)
@@ -4203,6 +4211,7 @@ export async function runAgent(
       } else if (toolSucceeded) {
         consecutiveToolFailures = 0
         recentToolFailures.length = 0
+        invalidToolArgumentRetries = 0
       }
       const replaceMatchFailed =
         call.name === 'replace_in_file' &&
@@ -4482,6 +4491,22 @@ export async function runAgent(
         toolName: call.name,
         content: toolResultPreview(result)
       })
+      if (invalidToolArgumentRetries >= 3) {
+        send({
+          requestId: request.requestId,
+          type: 'message',
+          content:
+            '模型连续三次生成无法安全恢复的工具参数 JSON，任务已停止。工具本身没有执行失败；请检查该模型的 Harmony 聊天模板或换用兼容模板后重试。'
+        })
+        send({
+          requestId: request.requestId,
+          type: 'done',
+          title: '模型工具参数格式连续错误',
+          changes: [...changes.values()],
+          usage: totalUsage
+        })
+        return
+      }
       if (consecutiveToolFailures >= 3) {
         send({
           requestId: request.requestId,

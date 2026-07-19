@@ -6,6 +6,7 @@ import type {
 } from '../shared/types'
 import { resolveThinkingEnabled } from '../shared/thinking'
 import { session, type Session } from 'electron'
+import { parseToolArgumentsJson } from './tool-json'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -199,13 +200,11 @@ function parseArguments(value: unknown): Record<string, unknown> {
     return sanitizeJsonValue(value as Record<string, unknown>)
   }
   if (typeof value !== 'string' || value.trim() === '') return {}
-  try {
-    return sanitizeJsonValue(JSON.parse(value) as Record<string, unknown>)
-  } catch {
-    const tagged = parseTaggedToolArguments(value)
-    if (Object.keys(tagged).length) return sanitizeJsonValue(tagged)
-    return { value: sanitizeUnicodeString(value) }
-  }
+  const parsed = parseToolArgumentsJson(value)
+  if (parsed) return sanitizeJsonValue(parsed)
+  const tagged = parseTaggedToolArguments(value)
+  if (Object.keys(tagged).length) return sanitizeJsonValue(tagged)
+  return { value: sanitizeUnicodeString(value) }
 }
 
 function parseTaggedToolArguments(value: string): Record<string, unknown> {
@@ -221,14 +220,7 @@ function parseTaggedToolArguments(value: string): Record<string, unknown> {
   )?.[1]
   if (!argumentBody) return output
   const decoded = decodeXmlText(argumentBody).trim()
-  try {
-    const parsed = JSON.parse(decoded) as unknown
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : output
-  } catch {
-    return output
-  }
+  return parseToolArgumentsJson(decoded) ?? output
 }
 
 function normalizeStructuredToolCall(
@@ -443,6 +435,7 @@ function kimiLinearToolNameFromId(
 }
 
 type ToolProtocol =
+  | 'gpt-oss-harmony'
   | 'kimi-linear'
   | 'qwen-xml'
   | 'hermes-json'
@@ -455,6 +448,7 @@ const CONTEXT_COMPRESSION_THRESHOLD = 0.9
 
 function preferredToolProtocol(modelName: string): ToolProtocol {
   const value = modelName.toLocaleLowerCase()
+  if (/gpt[-_. ]?oss/.test(value)) return 'gpt-oss-harmony'
   if (/kimi|moonshot/.test(value)) return 'kimi-linear'
   if (/qwen/.test(value)) return 'qwen-xml'
   if (/hermes|nous/.test(value)) return 'hermes-json'
@@ -527,30 +521,32 @@ export function parseTextToolCalls(
   }
   const addJsonPayload = (value: string): boolean => {
     for (const candidate of jsonPayloadCandidates(value)) {
+      let parsed: TextToolPayload | TextToolPayload[] | null = null
       try {
-        const parsed = JSON.parse(candidate) as TextToolPayload | TextToolPayload[]
-        const payloads = Array.isArray(parsed) ? parsed : [parsed]
-        let added = false
-        for (const payload of payloads) {
-          const before = calls.length
-          const explicitName = payload.name ?? payload.tool ?? payload.function?.name
-          const envelopedArguments =
-            payload.arguments ??
-            payload.parameters ??
-            payload.input ??
-            payload.function?.arguments ??
-            payload.function?.parameters
-          addCall(
-            explicitName,
-            envelopedArguments ?? (explicitName ? {} : payload),
-            !explicitName
-          )
-          if (calls.length > before) added = true
-        }
-        if (added) return true
+        parsed = JSON.parse(candidate) as TextToolPayload | TextToolPayload[]
       } catch {
-        // Try the next candidate or protocol adapter.
+        parsed = parseToolArgumentsJson(candidate) as TextToolPayload | null
       }
+      if (!parsed) continue
+      const payloads = Array.isArray(parsed) ? parsed : [parsed]
+      let added = false
+      for (const payload of payloads) {
+        const before = calls.length
+        const explicitName = payload.name ?? payload.tool ?? payload.function?.name
+        const envelopedArguments =
+          payload.arguments ??
+          payload.parameters ??
+          payload.input ??
+          payload.function?.arguments ??
+          payload.function?.parameters
+        addCall(
+          explicitName,
+          envelopedArguments ?? (explicitName ? {} : payload),
+          !explicitName
+        )
+        if (calls.length > before) added = true
+      }
+      if (added) return true
     }
     return false
   }
@@ -707,6 +703,7 @@ export function parseTextToolCalls(
     }
   ]
   const priority: Record<ToolProtocol, number[]> = {
+    'gpt-oss-harmony': [1, 4, 0, 2, 3, 5],
     'kimi-linear': [5, 0, 4, 1, 2, 3],
     'qwen-xml': [0, 4, 1, 2, 3, 5],
     'hermes-json': [0, 4, 1, 2, 3, 5],
