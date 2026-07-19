@@ -35,6 +35,7 @@ export type CompletionResult = {
   content: string
   reasoning?: string
   toolCalls: ToolCall[]
+  toolCallParseError?: string
   rawMessage: LlmMessage
   usage: TokenUsage
   contextTokens: number
@@ -291,7 +292,7 @@ function parseXmlParameter(value: string): unknown {
 function stripToolCallMarkup(value: string): string {
   return value
     .replace(
-      /<(current_task|turn_boundary|completed_history_input|completed_history_result|user_guidance|user_guidance_history|selected_code|current_file|file_reference|runtime_model_error|runtime_research_gate|runtime_web_status|tool_runtime_observation)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+      /<(current_task|turn_boundary|completed_history_input|completed_history_result|user_guidance|user_guidance_history|selected_code|current_file|file_reference|runtime_model_error|runtime_research_gate|runtime_web_status|runtime_history_status|tool_runtime_observation)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
       ''
     )
     .replace(
@@ -310,6 +311,14 @@ function stripToolCallMarkup(value: string): string {
     .replace(/<[\|｜]tool[_▁]calls[_▁]begin[\|｜]>[\s\S]*$/gi, '')
     .replace(/<\|python_tag\|>[\s\S]*$/gi, '')
     .replace(/\[tool_calls\][\s\S]*$/gi, '')
+    .replace(
+      /(?:^|[\r\n]|<\|tool_calls_section_end\|>)\s*[A-Za-z_][\w.-]*\s*:\s*\d+\s*<\|tool_call_argument_begin\|>[\s\S]*?<\|tool_call_end\|>\s*(?:<\|tool_calls_section_end\|>)?/gi,
+      '\n'
+    )
+    .replace(
+      /<\|(?:tool_call_argument_begin|tool_call_end|tool_calls_section_end)\|>/gi,
+      ''
+    )
     .replace(/```tool_code[\s\S]*?```/gi, '')
     .replace(/<function\s*=\s*["']?[A-Za-z_][\w.-]*["']?\s*>[\s\S]*?<\/function\s*>/gi, '')
     .replace(
@@ -332,7 +341,39 @@ type TextToolPayload = {
   }
 }
 
+type ToolNameInference = {
+  name?: string
+  candidates: string[]
+}
+
+function inferToolNameFromArguments(
+  argumentsValue: Record<string, unknown>,
+  tools: ToolDefinition[]
+): ToolNameInference {
+  const argumentKeys = Object.keys(argumentsValue)
+  if (!argumentKeys.length) return { candidates: [] }
+  const candidates = tools
+    .filter((tool) => {
+      const schema = tool.function.parameters
+      const properties =
+        schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+          ? (schema.properties as Record<string, unknown>)
+          : {}
+      const required = Array.isArray(schema.required)
+        ? schema.required.filter((value): value is string => typeof value === 'string')
+        : []
+      return (
+        Object.keys(properties).length > 0 &&
+        required.every((key) => Object.prototype.hasOwnProperty.call(argumentsValue, key)) &&
+        argumentKeys.every((key) => Object.prototype.hasOwnProperty.call(properties, key))
+      )
+    })
+    .map((tool) => tool.function.name)
+  return candidates.length === 1 ? { name: candidates[0], candidates } : { candidates }
+}
+
 type ToolProtocol =
+  | 'kimi-linear'
   | 'qwen-xml'
   | 'hermes-json'
   | 'llama-python'
@@ -344,6 +385,7 @@ const CONTEXT_COMPRESSION_THRESHOLD = 0.9
 
 function preferredToolProtocol(modelName: string): ToolProtocol {
   const value = modelName.toLocaleLowerCase()
+  if (/kimi|moonshot/.test(value)) return 'kimi-linear'
   if (/qwen/.test(value)) return 'qwen-xml'
   if (/hermes|nous/.test(value)) return 'hermes-json'
   if (/llama|granite/.test(value)) return 'llama-python'
@@ -374,20 +416,28 @@ function jsonPayloadCandidates(value: string): string[] {
 export function parseTextToolCalls(
   content: string,
   reasoning: string,
-  allowedToolNames: string[],
+  tools: ToolDefinition[],
   modelName = ''
-): { content: string; reasoning: string; toolCalls: ToolCall[] } {
+): { content: string; reasoning: string; toolCalls: ToolCall[]; toolCallParseError?: string } {
   const source = `${reasoning}\n${content}`
-  const allowed = new Set(allowedToolNames)
+  const allowed = new Set(tools.map((tool) => tool.function.name))
   const calls: ToolCall[] = []
   const seen = new Set<string>()
   const protocol = preferredToolProtocol(modelName)
   let consumedBareContent = false
   let consumedBareReasoning = false
-  const addCall = (nameValue: unknown, argsValue: unknown): void => {
-    const name = typeof nameValue === 'string' ? nameValue.trim() : ''
-    if (!name || !allowed.has(name)) return
+  let toolCallParseError = ''
+  const addCall = (nameValue: unknown, argsValue: unknown, inferMissingName = false): void => {
+    let name = typeof nameValue === 'string' ? nameValue.trim() : ''
     const argumentsValue = parseArguments(argsValue)
+    if (!name && inferMissingName) {
+      const inferred = inferToolNameFromArguments(argumentsValue, tools)
+      name = inferred.name ?? ''
+      if (!name && inferred.candidates.length > 0) {
+        toolCallParseError = `模型只输出了工具参数 JSON，缺少函数名；匹配到多个候选工具：${inferred.candidates.join('、')}`
+      }
+    }
+    if (!name || !allowed.has(name)) return
     const signature = `${name}:${JSON.stringify(argumentsValue)}`
     if (seen.has(signature)) return
     seen.add(signature)
@@ -405,13 +455,17 @@ export function parseTextToolCalls(
         let added = false
         for (const payload of payloads) {
           const before = calls.length
-          addCall(
-            payload.name ?? payload.tool ?? payload.function?.name,
+          const explicitName = payload.name ?? payload.tool ?? payload.function?.name
+          const envelopedArguments =
             payload.arguments ??
-              payload.parameters ??
-              payload.input ??
-              payload.function?.arguments ??
-              payload.function?.parameters
+            payload.parameters ??
+            payload.input ??
+            payload.function?.arguments ??
+            payload.function?.parameters
+          addCall(
+            explicitName,
+            envelopedArguments ?? (explicitName ? {} : payload),
+            !explicitName
           )
           if (calls.length > before) added = true
         }
@@ -468,7 +522,7 @@ export function parseTextToolCalls(
         )
       }
     }
-    addCall(name, argumentsValue)
+    addCall(name, argumentsValue, !name)
   }
 
   const adapters: Array<() => void> = [
@@ -545,8 +599,12 @@ export function parseTextToolCalls(
           (trimmed.startsWith('[') && trimmed.endsWith(']'))
         ) {
           const before = calls.length
+          const priorParseError = toolCallParseError
           addJsonPayload(trimmed)
           if (calls.length > before) {
+            if (channel === 'content') consumedBareContent = true
+            else consumedBareReasoning = true
+          } else if (toolCallParseError && toolCallParseError !== priorParseError) {
             if (channel === 'content') consumedBareContent = true
             else consumedBareReasoning = true
           }
@@ -555,23 +613,51 @@ export function parseTextToolCalls(
           else consumedBareReasoning = true
         }
       }
+    },
+    () => {
+      const kimiLinearPattern =
+        /(?:^|[\r\n]|<\|tool_calls_section_end\|>)\s*([A-Za-z_][\w.-]*)\s*:\s*\d+\s*<\|tool_call_argument_begin\|>\s*([\s\S]*?)<\|tool_call_end\|>/gi
+      for (const match of source.matchAll(kimiLinearPattern)) {
+        addCall(match[1], match[2])
+      }
     }
   ]
   const priority: Record<ToolProtocol, number[]> = {
-    'qwen-xml': [0, 4, 1, 2, 3],
-    'hermes-json': [0, 4, 1, 2, 3],
-    'llama-python': [1, 4, 0, 2, 3],
-    'mistral-json': [2, 4, 0, 1, 3],
-    deepseek: [3, 4, 0, 1, 2],
-    auto: [0, 1, 2, 3, 4]
+    'kimi-linear': [5, 0, 4, 1, 2, 3],
+    'qwen-xml': [0, 4, 1, 2, 3, 5],
+    'hermes-json': [0, 4, 1, 2, 3, 5],
+    'llama-python': [1, 4, 0, 2, 3, 5],
+    'mistral-json': [2, 4, 0, 1, 3, 5],
+    deepseek: [3, 4, 0, 1, 2, 5],
+    auto: [5, 0, 1, 2, 3, 4]
   }
   for (const index of priority[protocol]) {
     adapters[index]()
   }
+  if (calls.length === 0) {
+    for (const [channel, value] of [
+      ['content', content],
+      ['reasoning', reasoning]
+    ] as const) {
+      const declaredCall = value.match(
+        /(?:调用|call(?:ing)?)\s+`?([A-Za-z_][\w.-]*)`?[\s\S]{0,240}?```json\s*([\s\S]*?)```/i
+      )
+      if (!declaredCall || !allowed.has(declaredCall[1])) continue
+      const argumentBody = declaredCall[2].trim()
+      if (argumentBody) {
+        addCall(declaredCall[1], argumentBody)
+      } else {
+        toolCallParseError = `模型声明调用 ${declaredCall[1]}，但 JSON 参数为空，实际工具尚未执行`
+      }
+      if (channel === 'content') consumedBareContent = true
+      else consumedBareReasoning = true
+    }
+  }
   return {
     content: consumedBareContent ? '' : stripToolCallMarkup(content),
     reasoning: consumedBareReasoning ? '' : stripToolCallMarkup(reasoning),
-    toolCalls: calls
+    toolCalls: calls,
+    ...(toolCallParseError && calls.length === 0 ? { toolCallParseError } : {})
   }
 }
 
@@ -594,6 +680,7 @@ function createToolMarkupFilter(
     { open: '<runtime_model_error', close: '</runtime_model_error>' },
     { open: '<runtime_research_gate', close: '</runtime_research_gate>' },
     { open: '<runtime_web_status', close: '</runtime_web_status>' },
+    { open: '<runtime_history_status', close: '</runtime_history_status>' },
     { open: '<tool_runtime_observation', close: '</tool_runtime_observation>' },
     { open: '<tool_call', close: '</tool_call>' },
     { open: '<function_call', close: '</function_call>' },
@@ -607,6 +694,9 @@ function createToolMarkupFilter(
     { open: '<|tool_calls_begin|>', close: '<|tool_calls_end|>' },
     { open: '<|python_tag|>', close: null },
     { open: '[tool_calls]', close: null },
+    { open: '<|tool_call_argument_begin|>', close: '<|tool_call_end|>' },
+    { open: '<|tool_call_end|>', close: '' },
+    { open: '<|tool_calls_section_end|>', close: '' },
     { open: '```tool_code', close: '```' }
   ]
   const partialMarkerLength = (value: string): number => {
@@ -617,6 +707,10 @@ function createToolMarkupFilter(
         if (value.endsWith(marker.open.slice(0, length))) keep = Math.max(keep, length)
       }
     }
+    const toolHeader = value.match(
+      /(?:^|[\r\n])([A-Za-z_][\w.-]*\s*:\s*\d+\s*(?:<\|tool_call_argument_begin\|>)?)$/i
+    )
+    if (toolHeader?.[1]) keep = Math.max(keep, toolHeader[1].length)
     return keep
   }
   return {
@@ -645,7 +739,14 @@ function createToolMarkupFilter(
           .filter((item) => item.index >= 0)
           .sort((left, right) => left.index - right.index)[0]
         if (found) {
-          onVisible(buffer.slice(0, found.index))
+          let visibleEnd = found.index
+          if (found.marker.open === '<|tool_call_argument_begin|>') {
+            const header = buffer
+              .slice(0, found.index)
+              .match(/([A-Za-z_][\w.-]*\s*:\s*\d+\s*)$/i)
+            if (header?.[1]) visibleEnd -= header[1].length
+          }
+          onVisible(buffer.slice(0, visibleEnd))
           buffer = buffer.slice(found.index)
           const tagEnd = buffer.indexOf('>')
           if (found.marker.open.startsWith('[') || found.marker.open.startsWith('```')) {
@@ -937,6 +1038,7 @@ export function serializeHostMarkupForModel(value: string): string {
     ['runtime_workflow_stage', '工作流阶段'],
     ['runtime_research_gate', '资料检索约束'],
     ['runtime_web_status', '网页检索状态'],
+    ['runtime_history_status', '会话历史检索状态'],
     ['tool_runtime_observation', '工具运行观察'],
     ['post_edit_review', '编辑后复查']
   ]
@@ -2437,7 +2539,7 @@ async function streamCompleteWithTools(
     const parsedTextCalls = parseTextToolCalls(
       content,
       reasoning,
-      tools.map((tool) => tool.function.name),
+      tools,
       model.model
     )
     visibleContent.flush(parsedTextCalls.toolCalls.length > 0)
@@ -2470,6 +2572,7 @@ async function streamCompleteWithTools(
       content: parsedTextCalls.content,
       reasoning: parsedTextCalls.reasoning,
       toolCalls,
+      toolCallParseError: parsedTextCalls.toolCallParseError,
       rawMessage: {
         role: 'assistant',
         content: parsedTextCalls.content,
@@ -2601,7 +2704,7 @@ async function streamCompleteWithTools(
   const parsedTextCalls = parseTextToolCalls(
     content,
     reasoning,
-    tools.map((tool) => tool.function.name),
+    tools,
     model.model
   )
   visibleContent.flush(parsedTextCalls.toolCalls.length > 0)
@@ -2644,6 +2747,7 @@ async function streamCompleteWithTools(
     content: parsedTextCalls.content,
     reasoning: parsedTextCalls.reasoning,
     toolCalls,
+    toolCallParseError: parsedTextCalls.toolCallParseError,
     rawMessage: {
       role: 'assistant',
       content: parsedTextCalls.content,
@@ -2727,7 +2831,7 @@ export async function completeWithTools(
     const parsedTextCalls = parseTextToolCalls(
       message.content ?? '',
       rawReasoning,
-      tools.map((tool) => tool.function.name),
+      tools,
       model.model
     )
     const toolCalls =
@@ -2759,6 +2863,7 @@ export async function completeWithTools(
       content: parsedTextCalls.content,
       reasoning: parsedTextCalls.reasoning,
       toolCalls,
+      toolCallParseError: parsedTextCalls.toolCallParseError,
       rawMessage,
       usage: addUsage(prepared.compressionUsage, providerUsage),
       contextTokens: providerUsage.promptTokens,
@@ -2811,7 +2916,7 @@ export async function completeWithTools(
   const parsedTextCalls = parseTextToolCalls(
     message.content ?? '',
     rawReasoning,
-    tools.map((tool) => tool.function.name),
+    tools,
     model.model
   )
   const toolCalls =
@@ -2848,6 +2953,7 @@ export async function completeWithTools(
     content: parsedTextCalls.content,
     reasoning: parsedTextCalls.reasoning,
     toolCalls,
+    toolCallParseError: parsedTextCalls.toolCallParseError,
     rawMessage,
     usage: addUsage(prepared.compressionUsage, providerUsage),
     contextTokens: providerUsage.promptTokens,

@@ -184,8 +184,13 @@ export function searchConversationHistoryArchive(
   limitValue = 6
 ): string {
   const archiveMessages = archive ?? []
-  if (!archiveMessages.length) return '会话历史资料库为空。'
   const query = queryValue.trim()
+  const escapedQuery = query.replace(/"/g, '&quot;')
+  if (!archiveMessages.length) {
+    return `<conversation_history_results query="${escapedQuery}" total="0" returned="0" exhausted="true">
+会话历史资料库为空。禁止使用相同或相近关键词重复检索；请直接依据当前消息继续回答。
+</conversation_history_results>`
+  }
   const terms = historySearchTerms(query)
   const limit = Math.max(1, Math.min(12, limitValue || 6))
   const scored = archiveMessages.map((message, index) => {
@@ -197,9 +202,14 @@ export function searchConversationHistoryArchive(
   const pool = scored
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score || right.index - left.index)
-  const selected = (pool.length ? pool : scored.slice(-limit)).slice(0, limit)
+  const selected = pool.slice(0, limit)
+  if (!selected.length) {
+    return `<conversation_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="0">
+未检索到与当前关键词匹配的历史内容。禁止原样重复查询；确有必要时只允许换用明显不同的关键词再检索一次，否则直接依据当前消息继续回答。
+</conversation_history_results>`
+  }
   return [
-    `<conversation_history_results query="${query.replace(/"/g, '&quot;')}" total="${archiveMessages.length}" returned="${selected.length}">`,
+    `<conversation_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="${selected.length}">`,
     '说明：以下内容来自本机会话历史资料库，只可在与当前任务直接相关时引用，禁止重新执行已完成任务。',
     ...selected.map((item) => {
       const role = item.message.role === 'user' ? '用户' : 'AI'
@@ -209,6 +219,14 @@ export function searchConversationHistoryArchive(
     }),
     '</conversation_history_results>'
   ].join('\n\n')
+}
+
+function conversationHistoryReturnedNoEvidence(value: string): boolean {
+  return /<conversation_history_results\b[^>]*\breturned="0"/i.test(value)
+}
+
+function conversationHistoryArchiveEmpty(value: string): boolean {
+  return /<conversation_history_results\b[^>]*\btotal="0"/i.test(value)
 }
 
 function describeToolCall(
@@ -1723,6 +1741,8 @@ export async function runWebChat(
   let webFailureStreak = 0
   let webFailureTotal = 0
   let webAccessExhausted = false
+  const emptyHistoryQueries = new Set<string>()
+  let historySearchExhausted = false
 
   for (let step = 0; step < 18; step += 1) {
     let streamedReasoning = false
@@ -1772,10 +1792,14 @@ export async function runWebChat(
     }
     if (!completion.content.trim() && completion.toolCalls.length === 0) {
       invalidRetries += 1
-      if (invalidRetries >= 3) throw new Error('本地模型连续生成无效网页工具调用')
-      workingMessages[0].content += forceWebSearch
-        ? '\n上一次工具调用被服务丢弃。用户已明确要求联网，必须调用一个有效网页工具，函数名来自 tools，arguments 为严格 JSON。'
-        : '\n上一次输出为空。请重新判断：无需联网就直接给出明确中文回答；确需联网才调用一个有效网页工具。arguments 必须为严格 JSON。'
+      if (invalidRetries >= 3) {
+        throw new Error(completion.toolCallParseError || '本地模型连续生成无效网页工具调用')
+      }
+      workingMessages[0].content += completion.toolCallParseError
+        ? `\n上一次工具调用格式无效：${completion.toolCallParseError}。重新调用时必须同时返回 tools 中的准确函数名与完整 arguments，禁止只输出参数 JSON。`
+        : forceWebSearch
+          ? '\n上一次工具调用被服务丢弃。用户已明确要求联网，必须调用一个有效网页工具，函数名来自 tools，arguments 为严格 JSON。'
+          : '\n上一次输出为空。请重新判断：无需联网就直接给出明确中文回答；确需联网才调用一个有效网页工具。arguments 必须为严格 JSON。'
       forceTool = forceWebSearch
       continue
     }
@@ -1823,6 +1847,8 @@ export async function runWebChat(
 
     const call = completion.toolCalls[0]
     let result = ''
+    let historySearchReturnedNoEvidence = false
+    let duplicateHistorySearchBlocked = false
     const toolTitle =
       call.name === 'search_web'
         ? '调用函数：search_web'
@@ -1888,11 +1914,26 @@ export async function runWebChat(
         verifiedHosts.add(hostname)
         if (webSourceKind(finalUrl) !== '社区讨论') referenceHosts.add(hostname)
       } else if (call.name === 'search_conversation_history') {
-        result = searchConversationHistoryArchive(
-          historyArchive,
-          text(call.arguments.query),
-          Number(call.arguments.max_results) || 6
-        )
+        const normalizedQuery = text(call.arguments.query).trim().toLocaleLowerCase()
+        if (historySearchExhausted || emptyHistoryQueries.has(normalizedQuery)) {
+          duplicateHistorySearchBlocked = true
+          result = `<conversation_history_results query="${normalizedQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
+相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续回答。
+</conversation_history_results>`
+        } else {
+          result = searchConversationHistoryArchive(
+            historyArchive,
+            text(call.arguments.query),
+            Number(call.arguments.max_results) || 6
+          )
+          historySearchReturnedNoEvidence = conversationHistoryReturnedNoEvidence(result)
+          if (historySearchReturnedNoEvidence) {
+            emptyHistoryQueries.add(normalizedQuery)
+            if (conversationHistoryArchiveEmpty(result) || emptyHistoryQueries.size >= 2) {
+              historySearchExhausted = true
+            }
+          }
+        }
       } else {
         result = `未知网页工具：${call.name}`
       }
@@ -1924,6 +1965,14 @@ export async function runWebChat(
         '\n网页工具已连续解析失败。禁止继续调用 search_web 或 fetch_webpage；请直接说明当前无法完成可靠网页核验，并列出已成功读取的来源与失败原因。'
     }
     workingMessages.push({ role: 'tool', content: result, tool_call_id: call.id })
+    if (historySearchReturnedNoEvidence || duplicateHistorySearchBlocked) {
+      workingMessages.push({
+        role: 'user',
+        content: historySearchExhausted || duplicateHistorySearchBlocked
+          ? '<runtime_history_status evidence="empty" exhausted="true">会话历史检索已确认无可用结果，禁止继续调用 search_conversation_history。请直接依据当前消息给出结论；信息确实不足时简明说明。</runtime_history_status>'
+          : '<runtime_history_status evidence="empty">本次会话历史零命中。禁止原样重复；确有必要时只允许换用明显不同的关键词再检索一次，否则直接依据当前消息继续回答。</runtime_history_status>'
+      })
+    }
     onEvent({
       type: 'tool',
       title: `${call.name} 已返回`,
@@ -3536,6 +3585,8 @@ export async function runAgent(
   let webFailureTotal = 0
   let webEmptyResultStreak = 0
   let blockedWebToolCalls = 0
+  const emptyAgentHistoryQueries = new Set<string>()
+  let agentHistorySearchExhausted = false
   type KnowledgeResearchStage =
     | 'anchor-read'
     | 'local-search'
@@ -3808,9 +3859,11 @@ export async function runAgent(
     if (missingStructuredToolCall || emptyCompletion) {
       invalidToolCallRetries += 1
       const finishReason = completion.finishReason || '未提供'
-      const directError = missingStructuredToolCall
-        ? `模型接口返回 finish_reason=${finishReason}，但 tool_calls 数组为空，无法取得函数名与参数`
-        : `模型接口返回空响应：finish_reason=${finishReason}，正文 0 字符，工具调用 0 项`
+      const directError =
+        completion.toolCallParseError ||
+        (missingStructuredToolCall
+          ? `模型接口返回 finish_reason=${finishReason}，但 tool_calls 数组为空，无法取得函数名与参数`
+          : `模型接口返回空响应：finish_reason=${finishReason}，正文 0 字符，工具调用 0 项`)
       send({
         requestId: request.requestId,
         type: 'status',
@@ -3999,6 +4052,11 @@ export async function runAgent(
       let toolSucceeded = false
       let preview: AgentChange[] | undefined
       let duplicateReplaceBlocked = false
+      let duplicateHistorySearchBlocked = false
+      const normalizedHistoryQuery =
+        call.name === 'search_conversation_history'
+          ? text(call.arguments.query).trim().toLocaleLowerCase()
+          : ''
       try {
         if (argumentError) throw new Error(argumentError)
         if (
@@ -4017,50 +4075,61 @@ export async function runAgent(
           )
         }
         if (!tool) throw new Error(`未知工具：${call.name}`)
-        const permissionMode = request.permissionMode || 'read-write-manual'
-        if (permissionMode === 'read-only' && tool.risk !== 'read') {
-          result = '权限已阻止：当前会话为只读模式，请仅分析并向用户说明需要执行的操作'
+        if (
+          call.name === 'search_conversation_history' &&
+          (agentHistorySearchExhausted || emptyAgentHistoryQueries.has(normalizedHistoryQuery))
+        ) {
+          duplicateHistorySearchBlocked = true
+          toolSucceeded = true
+          result = `<conversation_history_results query="${normalizedHistoryQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
+相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续任务。
+</conversation_history_results>`
         } else {
-          const needsApproval =
-            (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
-            ((tool.risk === 'create' || tool.risk === 'delete') &&
-              request.confirmCreateDelete !== false) ||
-            tool.risk === 'command'
-          preview = tool.preview ? await tool.preview(call.arguments) : undefined
-          if (needsApproval) {
-            const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'
-            const approvalTitle = {
-              write: '确认文件修改',
-              create: '确认创建内容',
-              delete: '确认删除内容',
-              command: '确认执行命令'
-            }[approvalRisk]
-            const approvalDescription = {
-              write: `修改范围：${preview?.length || 0} 个文件`,
-              create: `创建范围：${preview?.length || 0} 个路径`,
-              delete: `删除范围：${preview?.length || 0} 个路径`,
-              command: `待确认命令：${call.name}`
-            }[approvalRisk]
-            const approval: AgentApproval = {
-              requestId: request.requestId,
-              approvalId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              title: approvalTitle,
-              description: approvalDescription,
-              toolName: call.name,
-              toolArgs: call.arguments,
-              risk: approvalRisk,
-              changes: preview
-            }
-            const approved = await requestApproval(approval)
-            if (!approved) {
-              result = '用户拒绝了本次操作，请调整方案或跳过此步骤'
+          const permissionMode = request.permissionMode || 'read-write-manual'
+          if (permissionMode === 'read-only' && tool.risk !== 'read') {
+            result = '权限已阻止：当前会话为只读模式，请仅分析并向用户说明需要执行的操作'
+          } else {
+            const needsApproval =
+              (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
+              ((tool.risk === 'create' || tool.risk === 'delete') &&
+                request.confirmCreateDelete !== false) ||
+              tool.risk === 'command'
+            preview = tool.preview ? await tool.preview(call.arguments) : undefined
+            if (needsApproval) {
+              const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'
+              const approvalTitle = {
+                write: '确认文件修改',
+                create: '确认创建内容',
+                delete: '确认删除内容',
+                command: '确认执行命令'
+              }[approvalRisk]
+              const approvalDescription = {
+                write: `修改范围：${preview?.length || 0} 个文件`,
+                create: `创建范围：${preview?.length || 0} 个路径`,
+                delete: `删除范围：${preview?.length || 0} 个路径`,
+                command: `待确认命令：${call.name}`
+              }[approvalRisk]
+              const approval: AgentApproval = {
+                requestId: request.requestId,
+                approvalId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                title: approvalTitle,
+                description: approvalDescription,
+                toolName: call.name,
+                toolArgs: call.arguments,
+                risk: approvalRisk,
+                changes: preview
+              }
+              const approved = await requestApproval(approval)
+              if (!approved) {
+                result = '用户拒绝了本次操作，请调整方案或跳过此步骤'
+              } else {
+                result = await tool.execute(call.arguments, preview)
+                toolSucceeded = true
+              }
             } else {
               result = await tool.execute(call.arguments, preview)
               toolSucceeded = true
             }
-          } else {
-            result = await tool.execute(call.arguments, preview)
-            toolSucceeded = true
           }
         }
       } catch (error) {
@@ -4068,6 +4137,18 @@ export async function runAgent(
       }
       const searchReturnedNoEvidence =
         call.name === 'search_web' && webSearchReturnedNoEvidence(result)
+      const historyReturnedNoEvidence =
+        call.name === 'search_conversation_history' &&
+        conversationHistoryReturnedNoEvidence(result)
+      if (toolSucceeded && historyReturnedNoEvidence && !duplicateHistorySearchBlocked) {
+        emptyAgentHistoryQueries.add(normalizedHistoryQuery)
+        if (
+          conversationHistoryArchiveEmpty(result) ||
+          emptyAgentHistoryQueries.size >= 2
+        ) {
+          agentHistorySearchExhausted = true
+        }
+      }
       if (result.startsWith('工具执行失败：')) {
         consecutiveToolFailures += 1
         recentToolFailures.push(`${call.name}：${result.slice('工具执行失败：'.length)}`)
@@ -4218,6 +4299,15 @@ export async function runAgent(
         content: result,
         tool_call_id: call.id
       })
+      if (historyReturnedNoEvidence || duplicateHistorySearchBlocked) {
+        messages.push({
+          role: 'user',
+          content:
+            agentHistorySearchExhausted || duplicateHistorySearchBlocked
+              ? '<runtime_history_status evidence="empty" exhausted="true">会话历史已确认无可用结果，禁止继续调用 search_conversation_history。请依据当前消息与其他可用资料继续完成任务；信息确实不足时在最终回复中说明。</runtime_history_status>'
+              : '<runtime_history_status evidence="empty">本次会话历史零命中。禁止原样重复；确有必要时只允许换用明显不同的关键词再检索一次，否则继续当前任务。</runtime_history_status>'
+        })
+      }
       if (replaceMatchFailed) {
         messages.push({
           role: 'user',
