@@ -468,7 +468,7 @@ export default function App(): React.JSX.Element {
       if (target === 'project') {
         setProjectWidth(Math.max(180, Math.min(460, startWidth + delta)))
       } else {
-        setChatWidth(Math.max(320, Math.min(720, startWidth + delta)))
+        setChatWidth(Math.max(220, Math.min(720, startWidth + delta)))
       }
     }
     const stop = (): void => {
@@ -1091,7 +1091,7 @@ export default function App(): React.JSX.Element {
       <div
         className="app-content"
         style={{
-          gridTemplateColumns: `${projectWidth + 62}px 4px ${chatWidth}px 4px minmax(360px, 1fr)`
+        gridTemplateColumns: `${projectWidth + 62}px 4px ${chatWidth}px 4px minmax(260px, 1fr)`
         }}
       >
         <aside className="navigation-shell">
@@ -1157,7 +1157,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-              <div><dt>版本</dt><dd>0.7.112</dd></div>
+              <div><dt>版本</dt><dd>0.7.113</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

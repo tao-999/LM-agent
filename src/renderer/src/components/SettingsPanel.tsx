@@ -26,6 +26,7 @@ import type {
 } from '../../../shared/types'
 import { useAppStore } from '../store'
 import { MacSelect } from './MacSelect'
+import { MacDatePicker } from './MacDatePicker'
 
 const uid = (): string => crypto.randomUUID()
 
@@ -305,10 +306,10 @@ function TokenModelChartModal({
             <div className="token-chart-date-filter">
               <label>
                 统计日期
-                <input
-                  type="date"
+                <MacDatePicker
                   value={selectedDay}
-                  onChange={(event) => setSelectedDay(event.target.value || todayKey)}
+                  ariaLabel="统计日期"
+                  onChange={(value) => setSelectedDay(value || todayKey)}
                 />
               </label>
             </div>
@@ -318,19 +319,19 @@ function TokenModelChartModal({
             <div className="token-chart-date-filter range">
               <label>
                 开始日期
-                <input
-                  type="date"
+                <MacDatePicker
                   value={rangeStart}
-                  onChange={(event) => setRangeStart(event.target.value || todayKey)}
+                  ariaLabel="开始日期"
+                  onChange={(value) => setRangeStart(value || todayKey)}
                 />
               </label>
               <span>至</span>
               <label>
                 结束日期
-                <input
-                  type="date"
+                <MacDatePicker
                   value={rangeEnd}
-                  onChange={(event) => setRangeEnd(event.target.value || todayKey)}
+                  ariaLabel="结束日期"
+                  onChange={(value) => setRangeEnd(value || todayKey)}
                 />
               </label>
             </div>

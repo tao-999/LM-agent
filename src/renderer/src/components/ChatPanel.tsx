@@ -939,14 +939,26 @@ function AssistantMessageMetaActions({
   onReview: (checkpointId: string) => void
   onRetry: () => void
 }): React.JSX.Element {
+  const exactUsage = message.usage && !message.usage.estimated ? message.usage : null
+  const usageUnavailable =
+    message.status !== 'streaming' && (!message.usage || message.usage.estimated)
+
   return (
     <>
-      {message.usage && !message.usage.estimated && (
+      {exactUsage && (
         <span
           className="token-usage"
-          title={`输入 ${message.usage.promptTokens.toLocaleString()} Token，缓存命中 ${(message.usage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${message.usage.completionTokens.toLocaleString()} Token，合计 ${message.usage.totalTokens.toLocaleString()} Token${!message.usage.estimated && message.usage.tokensPerSecond ? `，生成速度 ${message.usage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+          title={`输入 ${exactUsage.promptTokens.toLocaleString()} Token，缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${exactUsage.completionTokens.toLocaleString()} Token，合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? `，生成速度 ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         >
-          {`输入 ${message.usage.promptTokens.toLocaleString()} · 缓存命中 ${(message.usage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${message.usage.completionTokens.toLocaleString()} · 合计 ${message.usage.totalTokens.toLocaleString()} Token${!message.usage.estimated && message.usage.tokensPerSecond ? ` · ${message.usage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+          {`输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+        </span>
+      )}
+      {usageUnavailable && (
+        <span
+          className="token-usage unavailable"
+          title="当前模型服务未在本轮响应中返回真实 Token 用量"
+        >
+          Token 未返回
         </span>
       )}
       <ResponseTimer message={message} />

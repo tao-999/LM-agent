@@ -3869,7 +3869,12 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 }
 
 .assistant-message-footer {
+  display: flex;
+  align-self: stretch;
   width: 100%;
+  min-width: 0;
+  min-height: 20px;
+  flex-wrap: wrap;
   justify-content: flex-end;
   margin-top: 8px;
 }
@@ -3975,8 +3980,17 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 }
 
 .token-usage {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   color: #8d97a6;
   font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-usage.unavailable {
+  color: #727b89;
 }
 
 .scroll-to-bottom-button {

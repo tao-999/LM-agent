@@ -34,7 +34,7 @@ export function MacSelect({
 }: MacSelectProps): React.JSX.Element {
   const anchorRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(false)
-  const [position, setPosition] = useState({ left: 0, top: 0, width: 220, maxHeight: 320 })
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 340, maxHeight: 300 })
   const flatOptions = useMemo(() => groups.flatMap((group) => group.options), [groups])
   const selected = flatOptions.find((option) => option.value === value)
 
@@ -43,14 +43,17 @@ export function MacSelect({
     const updatePosition = (): void => {
       const rect = anchorRef.current?.getBoundingClientRect()
       if (!rect) return
-      const roomBelow = window.innerHeight - rect.bottom - 14
-      const menuHeight = Math.min(360, Math.max(120, flatOptions.length * 34 + groups.length * 24))
+      const roomBelow = window.innerHeight - rect.bottom - 8
+      const roomAbove = rect.top - 8
+      const menuHeight = Math.min(300, Math.max(86, flatOptions.length * 28 + groups.filter((group) => group.label).length * 22 + 10))
       const opensUp = roomBelow < Math.min(220, menuHeight) && rect.top > roomBelow
+      const maxHeight = Math.min(300, opensUp ? roomAbove : roomBelow)
+      const menuWidth = Math.min(Math.max(rect.width, 340), window.innerWidth - 16)
       setPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - Math.max(rect.width, 220) - 8)),
-        top: opensUp ? Math.max(8, rect.top - menuHeight - 6) : rect.bottom + 6,
-        width: Math.max(rect.width, 220),
-        maxHeight: opensUp ? Math.max(120, rect.top - 20) : Math.max(120, roomBelow)
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)),
+        top: opensUp ? Math.max(8, rect.top - Math.min(menuHeight, maxHeight) - 2) : rect.bottom + 2,
+        width: menuWidth,
+        maxHeight: Math.max(86, maxHeight)
       })
     }
     const close = (event: PointerEvent): void => {

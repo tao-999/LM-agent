@@ -286,7 +286,8 @@ input[type=checkbox], input[type=radio] { accent-color:var(--mac-blue); }
 }
 .mac-select-group + .mac-select-group { margin-top:4px; padding-top:4px; border-top:1px solid rgba(255,255,255,.08); }
 .mac-select-group>header { padding:5px 9px 4px; color:var(--mac-tertiary); font-size:10px; font-weight:600; }
-.mac-select-group>button { display:flex; width:100%; min-height:29px; align-items:center; justify-content:space-between; gap:10px; padding:0 9px; border:0; border-radius:6px; background:transparent; color:var(--mac-label); cursor:default; text-align:left; }
+.mac-select-group>button { display:flex; width:100%; min-height:26px; align-items:center; justify-content:space-between; gap:10px; padding:0 9px; border:0; border-radius:6px; background:transparent; color:var(--mac-label); cursor:default; font-size:11px; line-height:1.2; text-align:left; }
+.mac-select-group>button span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .mac-select-group>button:hover { background:var(--mac-blue); color:#fff; }
 .mac-select-group>button.selected { font-weight:600; }
 .mac-select-group>button svg { color:#fff; }
@@ -314,6 +315,37 @@ input[type=checkbox], input[type=radio] { accent-color:var(--mac-blue); }
 .composer-footer-controls .model-picker { min-width:150px; padding:0 3px 0 8px; }
 .composer-footer-controls .model-refresh { width:26px; height:26px; border:0; border-radius:6px; background:transparent; }
 .composer-footer-controls .model-refresh:hover { background:rgba(255,255,255,.1); }
+
+/* Compact chat can shrink without forcing the workspace offscreen. */
+.chat-column, .chat-panel, .chat-scroll-region, .message-list, .message-card, .message-body,
+.assistant-content-wrap, .agent-execution-stream, .agent-timeline, .agent-step-card, .agent-step-content,
+.composer-wrap, .composer, .composer-footer-controls { min-width:0 !important; max-width:100%; }
+.agent-step-card summary, .agent-operation-block summary { min-width:0; overflow:hidden; }
+.agent-step-card summary span, .agent-operation-block summary span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.message-body, .agent-step-content, .thinking-markdown { overflow-wrap:anywhere; word-break:break-word; }
+.message-card.assistant .message-body { display:flex; min-width:0; flex-direction:column; }
+.assistant-message-footer { flex:none; align-self:stretch; margin-top:10px; }
+.composer-footer-controls { overflow-x:auto; overflow-y:hidden; scrollbar-width:none; }
+.composer-footer-controls::-webkit-scrollbar { display:none; }
+.composer-footer-controls .model-picker { min-width:105px; }
+
+/* Fully custom calendar; Chromium's Windows date popup is not used. */
+.mac-date-picker { position:relative; min-width:150px; }
+.mac-date-trigger { display:flex; width:100%; height:29px; align-items:center; justify-content:space-between; gap:10px; padding:0 9px; border:1px solid rgba(255,255,255,.11); border-radius:7px; background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.065)); box-shadow:inset 0 1px rgba(255,255,255,.075),0 1px 2px rgba(0,0,0,.22); color:var(--mac-label); }
+.mac-date-trigger svg { color:var(--mac-secondary); }
+.mac-calendar-popover { position:absolute; top:calc(100% + 3px); left:0; z-index:11000; width:246px; padding:9px; border:1px solid rgba(255,255,255,.16); border-radius:12px; background:rgba(48,52,64,.95); box-shadow:0 24px 58px rgba(0,0,0,.62),inset 0 1px rgba(255,255,255,.11); backdrop-filter:blur(46px) saturate(185%); }
+.mac-calendar-popover>header { display:grid; grid-template-columns:28px 1fr 28px; align-items:center; margin-bottom:7px; }
+.mac-calendar-popover>header strong { text-align:center; font-size:12px; }
+.mac-calendar-popover>header button, .mac-calendar-popover>footer button { height:26px; border:0; border-radius:6px; background:transparent; color:var(--mac-secondary); }
+.mac-calendar-popover>header button:hover, .mac-calendar-popover>footer button:hover { background:rgba(255,255,255,.1); color:#fff; }
+.mac-calendar-weekdays, .mac-calendar-days { display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+.mac-calendar-weekdays span { padding:3px 0 5px; color:var(--mac-tertiary); font-size:10px; font-weight:600; text-align:center; }
+.mac-calendar-days button, .mac-calendar-days i { display:grid; width:28px; height:28px; place-items:center; border:0; border-radius:50%; background:transparent; color:var(--mac-label); font-size:11px; font-style:normal; }
+.mac-calendar-days button:hover { background:rgba(255,255,255,.11); }
+.mac-calendar-days button.today { box-shadow:inset 0 0 0 1px rgba(10,132,255,.75); color:#8cc8ff; }
+.mac-calendar-days button.selected { background:var(--mac-blue); box-shadow:none; color:#fff; }
+.mac-calendar-popover>footer { display:flex; justify-content:flex-end; margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,.08); }
+.mac-calendar-popover>footer button { color:#64b5ff; }
 
 @media (max-width:1180px) {
   .titlebar-workspace, .status-center { display:none; }
