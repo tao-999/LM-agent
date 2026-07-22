@@ -1028,6 +1028,7 @@ export function FileWorkspace(): React.JSX.Element {
               <Palette size={14} />
               <MacSelect
                 value={editorTheme}
+                menuMinWidth={220}
                 onChange={(value) => setEditorTheme(value as EditorTheme)}
                 ariaLabel="编辑器主题"
                 groups={[

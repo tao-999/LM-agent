@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 export interface MacSelectOption {
@@ -21,6 +21,7 @@ interface MacSelectProps {
   disabled?: boolean
   ariaLabel?: string
   className?: string
+  menuMinWidth?: number
 }
 
 export function MacSelect({
@@ -30,7 +31,8 @@ export function MacSelect({
   placeholder = '请选择',
   disabled = false,
   ariaLabel,
-  className = ''
+  className = '',
+  menuMinWidth = 0
 }: MacSelectProps): React.JSX.Element {
   const anchorRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(false)
@@ -38,7 +40,7 @@ export function MacSelect({
   const flatOptions = useMemo(() => groups.flatMap((group) => group.options), [groups])
   const selected = flatOptions.find((option) => option.value === value)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return
     const updatePosition = (): void => {
       const rect = anchorRef.current?.getBoundingClientRect()
@@ -48,7 +50,10 @@ export function MacSelect({
       const menuHeight = Math.min(300, Math.max(86, flatOptions.length * 28 + groups.filter((group) => group.label).length * 22 + 10))
       const opensUp = roomBelow < Math.min(220, menuHeight) && rect.top > roomBelow
       const maxHeight = Math.min(300, opensUp ? roomAbove : roomBelow)
-      const menuWidth = Math.min(Math.max(rect.width, 340), window.innerWidth - 16)
+      const menuWidth = Math.min(
+        Math.max(rect.width, menuMinWidth),
+        window.innerWidth - 16
+      )
       setPosition({
         left: Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)),
         top: opensUp ? Math.max(8, rect.top - Math.min(menuHeight, maxHeight) - 2) : rect.bottom + 2,
@@ -75,7 +80,7 @@ export function MacSelect({
       document.removeEventListener('pointerdown', close)
       document.removeEventListener('keydown', escape)
     }
-  }, [flatOptions.length, groups.length, open])
+  }, [flatOptions.length, groups.length, menuMinWidth, open])
 
   return (
     <div className={`mac-select ${open ? 'open' : ''} ${className}`}>

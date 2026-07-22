@@ -3013,6 +3013,7 @@ export function ChatPanel(): React.JSX.Element {
             <MacSelect
               value={selectedModelId}
               ariaLabel="选择模型"
+              menuMinWidth={340}
               placeholder={discovering ? '正在扫描本地模型…' : '选择模型'}
               groups={(['Kimi Code', '自定义', 'Ollama', 'LM Studio', 'llama.cpp'] as const)
                 .map((source) => ({
