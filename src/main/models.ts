@@ -932,6 +932,66 @@ function createChannelRouter(
   }
 }
 
+type StreamRepetitionStop = {
+  channel: 'content' | 'reasoning'
+  periodCharacters: number
+}
+
+function createStreamRepetitionGuard(
+  channel: StreamRepetitionStop['channel'],
+  onStop: (stop: StreamRepetitionStop) => void
+): { push: (value: string) => boolean } {
+  const maxHistoryCharacters = 16_000
+  const signatureCharacters = 96
+  let history = ''
+  let stopped = false
+  let nextInspectionAt = 320
+
+  return {
+    push: (value) => {
+      if (stopped) return true
+      if (!value) return false
+      history += value
+      if (history.length < nextInspectionAt) return false
+      nextInspectionAt = history.length + 48
+
+      const sample = history.slice(-maxHistoryCharacters)
+      if (sample.length < signatureCharacters * 2) return false
+      const currentStart = sample.length - signatureCharacters
+      const signature = sample.slice(currentStart)
+      let previousStart = sample.lastIndexOf(signature, currentStart - 1)
+      let inspectedCandidates = 0
+      while (previousStart >= 0 && inspectedCandidates < 12) {
+        const period = currentStart - previousStart
+        if (period > 6_000) break
+        if (period >= 80) {
+          const repetitions = period >= 160 ? 2 : 3
+          const requiredCharacters = period * repetitions
+          if (requiredCharacters <= sample.length) {
+            const repeatedTail = sample.slice(-requiredCharacters)
+            const unit = repeatedTail.slice(0, period)
+            let identical = true
+            for (let index = 1; index < repetitions; index += 1) {
+              if (repeatedTail.slice(index * period, (index + 1) * period) !== unit) {
+                identical = false
+                break
+              }
+            }
+            if (identical && /\S/.test(unit)) {
+              stopped = true
+              onStop({ channel, periodCharacters: period })
+              return true
+            }
+          }
+        }
+        inspectedCandidates += 1
+        previousStart = sample.lastIndexOf(signature, previousStart - 1)
+      }
+      return false
+    }
+  }
+}
+
 function headers(model: ModelConfig): Record<string, string> {
   const result: Record<string, string> = { 'Content-Type': 'application/json' }
   if (model.apiKey) result.Authorization = `Bearer ${model.apiKey}`
@@ -2300,6 +2360,7 @@ export async function streamChat(
     disableThinking?: boolean
     maxOutputTokens?: number
     onContextCompressed?: (memory: ContextCompressionMemory) => void
+    onRepetitionStopped?: (stop: StreamRepetitionStop) => void
   } = {}
 ): Promise<TokenUsage> {
   const prepared = await prepareMessages(model, messages, [], signal, onReasoning)
@@ -2309,11 +2370,21 @@ export async function streamChat(
     0
   )
   let output = ''
+  let repetitionStop: StreamRepetitionStop | null = null
+  const stopForRepetition = (stop: StreamRepetitionStop): void => {
+    if (repetitionStop) return
+    repetitionStop = stop
+    options.onRepetitionStopped?.(stop)
+  }
+  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
+  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter((content) => {
+    if (contentRepetitionGuard.push(content)) return
     output += content
     onChunk(content)
   })
   const visibleReasoning = createToolMarkupFilter((content) => {
+    if (reasoningRepetitionGuard.push(content)) return
     onReasoning(content)
   })
   const reasoningTagFilter = createReasoningTagFilter((content) =>
@@ -2357,7 +2428,7 @@ export async function streamChat(
     let providerUsage: TokenUsage | null = null
     let firstOutputAt = 0
     let providerGenerationDurationMs: number | undefined
-    while (true) {
+    ollamaChatStream: while (true) {
       const { value, done } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
@@ -2381,6 +2452,10 @@ export async function streamChat(
         if (data.message?.content) {
           if (!firstOutputAt) firstOutputAt = Date.now()
           normalizedContent.push(data.message.content)
+        }
+        if (repetitionStop) {
+          await reader.cancel().catch(() => undefined)
+          break ollamaChatStream
         }
         if (
           typeof data.prompt_eval_count === 'number' ||
@@ -2437,7 +2512,7 @@ export async function streamChat(
   let buffer = ''
   let providerUsage: TokenUsage | null = null
   let firstOutputAt = 0
-  while (true) {
+  openAiChatStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -2472,6 +2547,10 @@ export async function streamChat(
       if (content) {
         if (!firstOutputAt) firstOutputAt = Date.now()
         normalizedContent.push(content)
+      }
+      if (repetitionStop) {
+        await reader.cancel().catch(() => undefined)
+        break openAiChatStream
       }
       if (data.usage) {
         providerUsage = createUsage(
@@ -2509,7 +2588,8 @@ async function streamCompleteWithTools(
   signal: AbortSignal,
   toolChoice: 'auto' | 'required',
   onReasoning: (content: string) => void,
-  onContent: (content: string) => void
+  onContent: (content: string) => void,
+  options: { stopStrings?: string[] } = {}
 ): Promise<CompletionResult> {
   const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
   const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
@@ -2517,13 +2597,20 @@ async function streamCompleteWithTools(
     compatible.messages.reduce(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
-    ) + estimateTextTokens(JSON.stringify(tools))
+  ) + estimateTextTokens(JSON.stringify(tools))
   let content = ''
   let reasoning = ''
+  let repetitionStop: StreamRepetitionStop | null = null
+  const stopForRepetition = (stop: StreamRepetitionStop): void => {
+    if (!repetitionStop) repetitionStop = stop
+  }
+  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
+  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
   const appendReasoning = (value: string): void => {
     if (!value) return
+    if (reasoningRepetitionGuard.push(value)) return
     reasoning += value
     visibleReasoning.push(value)
   }
@@ -2531,6 +2618,7 @@ async function streamCompleteWithTools(
   const emitReasoning = (value: string): void => reasoningTagFilter.push(value)
   const thinkRouter = createThinkRouter(
     (value) => {
+      if (contentRepetitionGuard.push(value)) return
       content += value
       visibleContent.push(value)
     },
@@ -2555,7 +2643,8 @@ async function streamCompleteWithTools(
         messages: providerMessages(model, prepared.messages),
         ...(tools.length > 0 ? { tools } : {}),
         stream: true,
-        ...ollamaThinkingOptions(model)
+        ...ollamaThinkingOptions(model),
+        ...(options.stopStrings?.length ? { options: { stop: options.stopStrings } } : {})
       })
     })
     if (!response.ok || !response.body) {
@@ -2572,7 +2661,7 @@ async function streamCompleteWithTools(
       id?: string
       function?: { name?: string; arguments?: unknown }
     }> = []
-    while (true) {
+    ollamaToolStream: while (true) {
       const { value, done } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
@@ -2613,6 +2702,10 @@ async function streamCompleteWithTools(
         if (data.message?.tool_calls?.length) {
           if (!firstOutputAt) firstOutputAt = Date.now()
           rawToolCalls = data.message.tool_calls
+        }
+        if (repetitionStop) {
+          await reader.cancel().catch(() => undefined)
+          break ollamaToolStream
         }
         if (
           typeof data.prompt_eval_count === 'number' ||
@@ -2683,7 +2776,11 @@ async function streamCompleteWithTools(
       contextTokens: providerFinalUsage.promptTokens,
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
-      finishReason: toolCalls.length ? 'tool_calls' : finishReason
+      finishReason: toolCalls.length
+        ? 'tool_calls'
+        : repetitionStop
+          ? 'repetition_guard'
+          : finishReason
     }
   }
 
@@ -2699,7 +2796,8 @@ async function streamCompleteWithTools(
           : {}),
         stream: true,
       stream_options: { include_usage: true },
-      ...openAiThinkingOptions(model)
+      ...openAiThinkingOptions(model),
+      ...(options.stopStrings?.length ? { stop: options.stopStrings } : {})
     })
   })
   if (!response.ok || !response.body) {
@@ -2715,7 +2813,7 @@ async function streamCompleteWithTools(
     number,
     { id?: string; name: string; arguments: string }
   >()
-  while (true) {
+  openAiToolStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
@@ -2783,6 +2881,10 @@ async function streamCompleteWithTools(
           )
         }
         pendingToolCalls.set(index, current)
+      }
+      if (repetitionStop) {
+        await reader.cancel().catch(() => undefined)
+        break openAiToolStream
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason
       if (data.usage) {
@@ -2859,7 +2961,11 @@ async function streamCompleteWithTools(
     contextEstimated: Boolean(providerFinalUsage.estimated),
     compressed: prepared.compressed,
     contextMemory: prepared.contextMemory,
-    finishReason: toolCalls.length ? 'tool_calls' : finishReason
+    finishReason: toolCalls.length
+      ? 'tool_calls'
+      : repetitionStop
+        ? 'repetition_guard'
+        : finishReason
   }
 }
 
@@ -2870,7 +2976,8 @@ export async function completeWithTools(
   signal: AbortSignal,
   toolChoice: 'auto' | 'required' = 'auto',
   onReasoning?: (content: string) => void,
-  onContent?: (content: string) => void
+  onContent?: (content: string) => void,
+  options: { stopStrings?: string[] } = {}
 ): Promise<CompletionResult> {
   if (onReasoning || onContent) {
     return streamCompleteWithTools(
@@ -2880,7 +2987,8 @@ export async function completeWithTools(
       signal,
       toolChoice,
       onReasoning ?? (() => undefined),
-      onContent ?? (() => undefined)
+      onContent ?? (() => undefined),
+      options
     )
   }
   const prepared = await prepareMessages(model, messages, tools, signal)
@@ -2900,7 +3008,8 @@ export async function completeWithTools(
         messages: providerMessages(model, prepared.messages),
         ...(tools.length > 0 ? { tools } : {}),
         stream: false,
-        ...ollamaThinkingOptions(model)
+        ...ollamaThinkingOptions(model),
+        ...(options.stopStrings?.length ? { options: { stop: options.stopStrings } } : {})
       })
     })
     if (!response.ok) throw new Error(`模型请求失败：${response.status} ${await response.text()}`)
@@ -2985,7 +3094,8 @@ export async function completeWithTools(
         ? { tools, tool_choice: compatible.toolChoice }
         : {}),
       stream: false,
-      ...openAiThinkingOptions(model)
+      ...openAiThinkingOptions(model),
+      ...(options.stopStrings?.length ? { stop: options.stopStrings } : {})
     })
   })
   if (!response.ok) throw new Error(`模型请求失败：${response.status} ${await response.text()}`)

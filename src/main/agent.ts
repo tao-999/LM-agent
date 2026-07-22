@@ -307,11 +307,11 @@ function describeToolCall(
     },
     insert_lines: {
       title: `insert_lines · ${pathValue || '未指定文件'}:${
-        args.position === 'start'
+        args.placement === 'file_start'
           ? '开头'
-          : args.position === 'end'
+          : args.placement === 'file_end'
             ? '结尾'
-            : String(args.line ?? '?')
+            : `第${String(args.reference_line ?? '?')}行${args.placement === 'before_line' ? '前' : '后'}`
       }`,
       detail: ''
     },
@@ -382,16 +382,16 @@ function validateToolCallArguments(name: string, args: Record<string, unknown>):
       break
     case 'insert_lines':
       requireText('path')
-      requireText('position')
+      requireText('placement')
       requirePresent('content')
-      if (!['start', 'end', 'before', 'after'].includes(text(args.position))) {
-        return `insert_lines 参数错误：position 必须是 start、end、before 或 after，实际收到 ${String(args.position)}`
+      if (!['file_start', 'file_end', 'before_line', 'after_line'].includes(text(args.placement))) {
+        return `insert_lines 参数错误：placement 必须明确指定 file_start、file_end、before_line 或 after_line，实际收到 ${String(args.placement)}`
       }
       if (
-        (args.position === 'before' || args.position === 'after') &&
-        (!Number.isSafeInteger(Number(args.line)) || Number(args.line) < 0)
+        (args.placement === 'before_line' || args.placement === 'after_line') &&
+        (!Number.isSafeInteger(Number(args.reference_line)) || Number(args.reference_line) < 1)
       ) {
-        return `insert_lines 参数错误：${String(args.position)} 模式必须提供大于等于 0 的安全整数 line，实际收到 ${String(args.line)}`
+        return `insert_lines 参数错误：${String(args.placement)} 必须提供大于等于 1 的安全整数 reference_line，实际收到 ${String(args.reference_line)}`
       }
       break
     case 'move_path':
@@ -1782,6 +1782,13 @@ export async function runWebChat(
     }
     forceTool = false
     totalUsage = addUsage(totalUsage, completion.usage)
+    if (completion.finishReason === 'repetition_guard') {
+      onEvent({
+        type: 'status',
+        title: '检测到重复输出，已自动停止',
+        content: '模型连续生成相同内容，程序已终止本轮流式响应并保留已经生成的有效结果。'
+      })
+    }
     onEvent({
       type: 'context',
       usage: totalUsage,
@@ -2223,6 +2230,92 @@ export async function runAgent(
         return { arguments: args }
       }
     }
+    if (name === 'insert_lines') {
+      const explicitPlacement = text(args.placement).trim()
+      const legacyPosition = text(args.position).trim()
+      const legacyReference = args.reference_line ?? args.line
+      const referenceLine = Number(legacyReference)
+      const hasReferenceLine =
+        Number.isSafeInteger(referenceLine) && referenceLine >= 0
+      const supportedPlacements = new Set([
+        'file_start',
+        'file_end',
+        'before_line',
+        'after_line'
+      ])
+
+      if (supportedPlacements.has(explicitPlacement)) {
+        const normalizedArguments: Record<string, unknown> = {
+          ...args,
+          placement: explicitPlacement
+        }
+        if (
+          (explicitPlacement === 'before_line' || explicitPlacement === 'after_line') &&
+          hasReferenceLine
+        ) {
+          normalizedArguments.reference_line = referenceLine
+        }
+        delete normalizedArguments.position
+        delete normalizedArguments.line
+        return { arguments: normalizedArguments, presentation: normalizedArguments }
+      }
+
+      if (!['start', 'end', 'before', 'after'].includes(legacyPosition)) {
+        return { arguments: args }
+      }
+
+      let totalLines: number | null = null
+      const relative = text(args.path).trim()
+      if (relative) {
+        try {
+          const current = await readTextFile(request.workspaceRoot, relative)
+          totalLines = current === '' ? 0 : current.split(/\r?\n/).length
+        } catch {
+          totalLines = null
+        }
+      }
+
+      let placement: 'file_start' | 'file_end' | 'before_line' | 'after_line'
+      let normalizedReferenceLine: number | undefined
+      if (legacyPosition === 'start') {
+        placement = 'file_start'
+      } else if (legacyPosition === 'end') {
+        placement = 'file_end'
+      } else if (legacyPosition === 'before') {
+        if (!hasReferenceLine || referenceLine <= 1) {
+          placement = 'file_start'
+        } else if (totalLines !== null && referenceLine > totalLines) {
+          placement = 'file_end'
+        } else {
+          placement = 'before_line'
+          normalizedReferenceLine = referenceLine
+        }
+      } else if (!hasReferenceLine || referenceLine === 0) {
+        placement = hasReferenceLine ? 'file_start' : 'file_end'
+      } else if (totalLines !== null && referenceLine >= totalLines) {
+        placement = 'file_end'
+      } else {
+        placement = 'after_line'
+        normalizedReferenceLine = referenceLine
+      }
+
+      const normalizedArguments: Record<string, unknown> = {
+        ...args,
+        placement
+      }
+      if (normalizedReferenceLine !== undefined) {
+        normalizedArguments.reference_line = normalizedReferenceLine
+      } else {
+        delete normalizedArguments.reference_line
+      }
+      delete normalizedArguments.position
+      delete normalizedArguments.line
+      return {
+        arguments: normalizedArguments,
+        presentation: normalizedArguments,
+        note: `已把旧版 insert_lines 参数自动转换为无歧义位置：${placement}${normalizedReferenceLine !== undefined ? `，参考行 ${normalizedReferenceLine}` : ''}`
+      }
+    }
     if (name !== 'replace_lines') return { arguments: args }
     const relative = text(args.path).trim()
     const rawStart = Number(args.start_line)
@@ -2533,35 +2626,33 @@ export async function runAgent(
   const insertAtLine = (current: string, args: Record<string, unknown>): string => {
     const newline = current.includes('\r\n') ? '\r\n' : '\n'
     const lines = current === '' ? [] : current.split(/\r?\n/)
-    const line = Number(args.line)
-    const position = text(args.position)
+    const referenceLine = Number(args.reference_line)
+    const placement = text(args.placement)
     const inserted = text(args.content).split(/\r?\n/)
-    if (current === '') return inserted.join(newline)
     let index: number
-    if (position === 'start') {
+    if (placement === 'file_start') {
       index = 0
-    } else if (position === 'end') {
+    } else if (placement === 'file_end') {
       index = lines.length
     } else {
-      if (!Number.isInteger(line)) {
-        throw new Error('insert_lines 参数错误：before/after 模式必须提供整数 line')
+      if (!Number.isSafeInteger(referenceLine) || referenceLine < 1) {
+        throw new Error(
+          'insert_lines 参数错误：before_line/after_line 必须提供大于等于 1 的整数 reference_line'
+        )
       }
-      if (position === 'before') {
-        if (line < 1 || line > lines.length + 1) {
-          throw new Error(
-            `insert_lines 参数错误：before 模式允许 1-${lines.length + 1}；使用 1 可在开头插入，使用 ${lines.length + 1} 可在结尾追加`
-          )
-        }
-        index = line - 1
-      } else if (position === 'after') {
-        if (line < 0 || line > lines.length + 1) {
-          throw new Error(
-            `insert_lines 参数错误：after 模式允许 0-${lines.length + 1}；使用 0 可在开头插入，使用 ${lines.length} 或 ${lines.length + 1} 可在结尾追加`
-          )
-        }
-        index = Math.min(line, lines.length)
+      if (referenceLine > lines.length) {
+        throw new Error(
+          `insert_lines 参数错误：reference_line=${referenceLine} 超出当前文件总行数 ${lines.length}；文件开头请用 file_start，文件结尾请用 file_end`
+        )
+      }
+      if (placement === 'before_line') {
+        index = referenceLine - 1
+      } else if (placement === 'after_line') {
+        index = referenceLine
       } else {
-        throw new Error('insert_lines 参数错误：position 必须是 start、end、before 或 after')
+        throw new Error(
+          'insert_lines 参数错误：placement 必须是 file_start、file_end、before_line 或 after_line'
+        )
       }
     }
     return [...lines.slice(0, index), ...inserted, ...lines.slice(index)].join(newline)
@@ -3263,19 +3354,26 @@ export async function runAgent(
       function: {
         name: 'insert_lines',
         description:
-          '在已通过 read_file 读取过的文件中插入内容，不覆盖其他行。position=start 在全文开头插入，position=end 在全文结尾追加；position=before/after 时使用 line 指定相邻行。兼容 before(line=总行数+1) 追加、after(line=0) 前置，空文件可直接插入。',
+          '在已通过 read_file 读取过的文件中插入内容，不覆盖其他行。placement=file_start 表示文件开头，placement=file_end 表示文件结尾，placement=before_line 或 after_line 表示指定现有行的前方或后方。只有按行定位时才填写 reference_line，禁止用 0、总行数加一或其他魔法行号表达文件边界。',
         parameters: {
           type: 'object',
-          required: ['path', 'position', 'content'],
+          additionalProperties: false,
+          required: ['path', 'placement', 'content'],
           properties: {
-            path: { type: 'string' },
-            line: {
-              type: 'integer',
-              minimum: 0,
-              description: 'before/after 使用的行号；start/end 模式可省略'
+            path: { type: 'string', description: '工作区内的相对文件路径' },
+            placement: {
+              type: 'string',
+              enum: ['file_start', 'file_end', 'before_line', 'after_line'],
+              description:
+                '明确的插入位置：文件开头、文件结尾、指定行之前或指定行之后'
             },
-            position: { type: 'string', enum: ['start', 'end', 'before', 'after'] },
-            content: { type: 'string' }
+            reference_line: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                'before_line/after_line 使用的现有行号；file_start/file_end 禁止填写'
+            },
+            content: { type: 'string', description: '需要插入的完整文本' }
           }
         }
       }
@@ -3291,15 +3389,15 @@ export async function runAgent(
       ),
     execute: async (args, preview) => {
       const relative = text(args.path)
-      const line = Number(args.line)
-      const position = text(args.position)
+      const referenceLine = Number(args.reference_line)
+      const placement = text(args.placement)
       await applyTextPreview(
         preview ??
           (await createTextPreview(relative, (current) => insertAtLine(current, args), false, true))
       )
-      if (position === 'start') return `已在 ${relative} 全文开头插入内容`
-      if (position === 'end') return `已在 ${relative} 全文结尾追加内容`
-      return `已在 ${relative} 第 ${line} 行${position === 'before' ? '之前' : '之后'}插入内容`
+      if (placement === 'file_start') return `已在 ${relative} 全文开头插入内容`
+      if (placement === 'file_end') return `已在 ${relative} 全文结尾追加内容`
+      return `已在 ${relative} 第 ${referenceLine} 行${placement === 'before_line' ? '之前' : '之后'}插入内容`
     }
   })
 
@@ -3463,6 +3561,7 @@ export async function runAgent(
     '网页事实核验规则：必须比较来源中的关键姓名、标题、日期和数值；来源冲突时继续搜索，证据仍不足时明确说明无法确认，严禁根据常识或搜索摘要补写细节。',
     '网页事实核验规则：最终回答必须列出实际读取过的来源标题与直接网址，禁止引用必应或 DuckDuckGo 跳转链接。',
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
+    'insert_lines 位置规则：文件开头使用 placement=file_start，文件结尾使用 placement=file_end；指定现有行之前或之后使用 placement=before_line 或 after_line，并填写 reference_line。禁止使用 0、总行数加一或省略参考行来暗示文件边界。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
     `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求普通写入逐次确认；读写自动模式允许普通写入自动执行。命令始终逐次确认；创建、复制与删除当前${request.confirmCreateDelete === false ? '允许自动执行' : '必须逐次确认'}。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
@@ -3820,6 +3919,14 @@ export async function runAgent(
               content
             })
           }
+        },
+        {
+          stopStrings:
+            workflow.stage === 'execute' &&
+            activeTasks.length > 0 &&
+            activeTasks.every((task) => task.status === 'completed')
+              ? ['等待用户下一个任务', '等待下一个任务']
+              : undefined
         }
       )
       modelRequestFailures = 0
@@ -3868,6 +3975,14 @@ export async function runAgent(
         usage: totalUsage
       })
       return
+    }
+    if (completion.finishReason === 'repetition_guard') {
+      send({
+        requestId: request.requestId,
+        type: 'status',
+        title: '检测到重复输出，已自动停止',
+        content: '模型连续生成相同内容，程序已终止本轮流式响应；已生成正文、文件改动与 Token 统计继续保留。'
+      })
     }
     if (completion.contextMemory) {
       applyCompressionMemory(messages, completion.contextMemory)

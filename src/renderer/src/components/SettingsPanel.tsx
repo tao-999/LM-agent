@@ -25,6 +25,7 @@ import type {
   TokenUsageRecord
 } from '../../../shared/types'
 import { useAppStore } from '../store'
+import { MacSelect } from './MacSelect'
 
 const uid = (): string => crypto.randomUUID()
 
@@ -825,10 +826,16 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
           </div>
           <label className="field-label">
             本地模型
-            <select
+            <MacSelect
               value={selectedModelId}
-              onChange={(event) => {
-                const selected = localModels.find((item) => item.id === event.target.value)
+              placeholder={discovering ? '正在扫描本地模型…' : localModels.length ? `已发现 ${localModels.length} 个模型` : '未发现本地模型'}
+              ariaLabel="本地模型"
+              groups={groupedModels.filter((group) => group.items.length).map((group) => ({
+                label: group.source,
+                options: group.items.map((item) => ({ value: item.id, label: item.name }))
+              }))}
+              onChange={(value) => {
+                const selected = localModels.find((item) => item.id === value)
                 if (!selected) return
                 setModel({
                   provider: selected.provider,
@@ -840,48 +847,21 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
                 setRemoteSelection('')
                 setTestResult('')
               }}
-            >
-              <option value="">
-                {discovering
-                  ? '正在扫描本地模型…'
-                  : localModels.length
-                    ? `已发现 ${localModels.length} 个模型`
-                    : '未发现本地模型'}
-              </option>
-              {groupedModels.map((group) =>
-                group.items.length ? (
-                  <optgroup key={group.source} label={group.source}>
-                    {group.items.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                ) : null
-              )}
-            </select>
+            />
           </label>
           <label className="field-label remote-model-select">
             远程模型
-            <select
+            <MacSelect
               value={remoteSelection}
-              onChange={(event) => void selectRemoteModel(event.target.value)}
-            >
-              <option value="">选择远程模型</option>
-              <optgroup label="内置服务">
-                <option value="kimi-code">Kimi Code</option>
-              </optgroup>
-              {customModels.length > 0 && (
-                <optgroup label="自定义服务">
-                  {customModels.map((item) => (
-                    <option key={item.connectionId} value={item.connectionId}>
-                      {item.model} · {item.baseUrl}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              <option value="new">＋ 添加自定义模型</option>
-            </select>
+              placeholder="选择远程模型"
+              ariaLabel="远程模型"
+              groups={[
+                { label: '内置服务', options: [{ value: 'kimi-code', label: 'Kimi Code' }] },
+                { label: '自定义服务', options: customModels.map((item) => ({ value: item.connectionId!, label: `${item.model} · ${item.baseUrl}` })) },
+                { options: [{ value: 'new', label: '＋ 添加自定义模型' }] }
+              ].filter((group) => group.options.length)}
+              onChange={(value) => void selectRemoteModel(value)}
+            />
           </label>
 
           {remoteSelection === 'kimi-code' && (
@@ -898,11 +878,11 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
               </header>
               <label className="field-label">
                 模型
-                <select value={kimiModel} onChange={(event) => setKimiModel(event.target.value)}>
-                  <option value="k3">Kimi K3</option>
-                  <option value="kimi-for-coding">Kimi K2.7 Code</option>
-                  <option value="kimi-for-coding-highspeed">Kimi K2.7 Code 高速版</option>
-                </select>
+                <MacSelect value={kimiModel} onChange={setKimiModel} ariaLabel="Kimi 模型" groups={[{ options: [
+                  { value: 'k3', label: 'Kimi K3' },
+                  { value: 'kimi-for-coding', label: 'Kimi K2.7 Code' },
+                  { value: 'kimi-for-coding-highspeed', label: 'Kimi K2.7 Code 高速版' }
+                ] }]} />
               </label>
               <label className="field-label">
                 Kimi Code API Key
@@ -955,18 +935,20 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
               </header>
               <label className="field-label">
                 服务类型
-                <select
+                <MacSelect
                   value={customConnection.provider}
-                  onChange={(event) =>
+                  ariaLabel="服务类型"
+                  groups={[{ options: [
+                    { value: 'ollama', label: 'Ollama' },
+                    { value: 'openai', label: '兼容 OpenAI 接口' }
+                  ] }]}
+                  onChange={(value) =>
                     setCustomConnection({
                       ...customConnection,
-                      provider: event.target.value as ModelConfig['provider']
+                      provider: value as ModelConfig['provider']
                     })
                   }
-                >
-                  <option value="ollama">Ollama</option>
-                  <option value="openai">兼容 OpenAI 接口</option>
-                </select>
+                />
               </label>
               <label className="field-label">
                 服务地址

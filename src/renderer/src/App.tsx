@@ -1052,6 +1052,26 @@ export default function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <header className="titlebar">
+        <div className="mac-traffic-lights" aria-label="窗口控制">
+          <button
+            className="mac-traffic-light close"
+            type="button"
+            aria-label="关闭窗口"
+            onClick={() => void window.localAgent.window.close()}
+          />
+          <button
+            className="mac-traffic-light minimize"
+            type="button"
+            aria-label="最小化窗口"
+            onClick={() => void window.localAgent.window.minimize()}
+          />
+          <button
+            className="mac-traffic-light maximize"
+            type="button"
+            aria-label="缩放窗口"
+            onClick={() => void window.localAgent.window.toggleMaximize()}
+          />
+        </div>
         <div className="titlebar-brand">
           <span className="brand-glyph">SA</span>
           <strong>星伴 AI</strong>
@@ -1071,12 +1091,14 @@ export default function App(): React.JSX.Element {
       <div
         className="app-content"
         style={{
-          gridTemplateColumns: `54px ${projectWidth}px 4px ${chatWidth}px 4px minmax(360px, 1fr)`
+          gridTemplateColumns: `${projectWidth + 62}px 4px ${chatWidth}px 4px minmax(360px, 1fr)`
         }}
       >
-        <ActivityBar />
-        <aside className="left-panel">
-          <LeftPanel onOpenFile={openFile} />
+        <aside className="navigation-shell">
+          <ActivityBar />
+          <section className="left-panel">
+            <LeftPanel onOpenFile={openFile} />
+          </section>
         </aside>
         <div
           className="resize-handle vertical"
@@ -1135,7 +1157,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-              <div><dt>版本</dt><dd>0.7.102</dd></div>
+              <div><dt>版本</dt><dd>0.7.112</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

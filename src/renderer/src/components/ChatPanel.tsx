@@ -68,6 +68,7 @@ import {
   inferThinkingCapability,
   thinkingModelKey
 } from '../../../shared/thinking'
+import { MacSelect } from './MacSelect'
 import { markdownKatexOptions, normalizeMarkdownMath } from '../markdown'
 import { useAppStore } from '../store'
 
@@ -2577,7 +2578,8 @@ export function ChatPanel(): React.JSX.Element {
         )}
       </div>
 
-      {approvalForConversation && (
+      {approvalForConversation &&
+        !(approvalForConversation.risk === 'write' && approvalForConversation.changes?.length) && (
         <InlineApprovalCard
           approval={approvalForConversation}
           blocked={approvalBlocked}
@@ -2916,19 +2918,19 @@ export function ChatPanel(): React.JSX.Element {
           </div>
           {mode === 'agent' && (
             <>
-              <label className="permission-picker" title="控制 Agent 可执行的操作">
+              <div className="permission-picker" title="控制 Agent 可执行的操作">
                 <ShieldCheck size={13} />
-                <select
+                <MacSelect
                   value={agentPermissionMode}
-                  onChange={(event) =>
-                    setAgentPermissionMode(event.target.value as AgentPermissionMode)
-                  }
-                >
-                  <option value="read-only">只读</option>
-                  <option value="read-write-manual">手动</option>
-                  <option value="read-write-auto">自动</option>
-                </select>
-              </label>
+                  ariaLabel="Agent 权限"
+                  groups={[{ options: [
+                    { value: 'read-only', label: '只读' },
+                    { value: 'read-write-manual', label: '手动' },
+                    { value: 'read-write-auto', label: '自动' }
+                  ] }]}
+                  onChange={(value) => setAgentPermissionMode(value as AgentPermissionMode)}
+                />
+              </div>
               <button
                 className={`creation-confirm-toggle ${confirmCreateDelete ? 'active' : ''}`}
                 type="button"
@@ -2942,7 +2944,7 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </>
           )}
-          <label
+          <div
             className={`thinking-picker capability-${thinkingCapability}`}
             title={
               thinkingCapability === 'unsupported'
@@ -2955,7 +2957,7 @@ export function ChatPanel(): React.JSX.Element {
             }
           >
             <BrainCircuit size={13} />
-            <select
+            <MacSelect
               value={
                 thinkingCapability === 'unsupported'
                   ? 'unsupported'
@@ -2968,30 +2970,26 @@ export function ChatPanel(): React.JSX.Element {
                 thinkingCapability === 'unsupported' ||
                 thinkingCapability === 'always'
               }
-              onChange={(event) => {
+              ariaLabel="Thinking 模式"
+              groups={[{ options: thinkingCapability === 'unsupported'
+                ? [{ value: 'unsupported', label: '不支持' }]
+                : thinkingCapability === 'always'
+                  ? [{ value: 'always', label: '常开' }]
+                  : [
+                      { value: 'auto', label: '自动' },
+                      { value: 'on', label: '开启' },
+                      { value: 'off', label: '关闭' }
+                    ] }]}
+              onChange={(value) => {
                 if (!conversation) return
                 setConversationThinkingMode(
                   conversation.id,
                   thinkingModelKey(model),
-                  event.target.value as ThinkingMode
+                  value as ThinkingMode
                 )
               }}
-            >
-              {thinkingCapability === 'unsupported' && (
-                <option value="unsupported">不支持</option>
-              )}
-              {thinkingCapability === 'always' && (
-                <option value="always">常开</option>
-              )}
-              {thinkingCapability !== 'unsupported' && thinkingCapability !== 'always' && (
-                <>
-                  <option value="auto">自动</option>
-                  <option value="on">开启</option>
-                  <option value="off">关闭</option>
-                </>
-              )}
-            </select>
-          </label>
+            />
+          </div>
           <div className="model-picker">
             <span
               className={`status-dot ${
@@ -3000,10 +2998,23 @@ export function ChatPanel(): React.JSX.Element {
                   : 'offline'
               }`}
             />
-            <select
+            <MacSelect
               value={selectedModelId}
-              onChange={(event) => {
-                const selected = displayedModels.find((item) => item.id === event.target.value)
+              ariaLabel="选择模型"
+              placeholder={discovering ? '正在扫描本地模型…' : '选择模型'}
+              groups={(['Kimi Code', '自定义', 'Ollama', 'LM Studio', 'llama.cpp'] as const)
+                .map((source) => ({
+                  label: source,
+                  options: displayedModels
+                    .filter((item) => item.source === source)
+                    .map((item) => ({
+                      value: item.id,
+                      label: `${item.id === 'kimi-code:k3' ? 'Kimi K3' : item.name}${item.contextLength ? ` · ${Math.round(item.contextLength / 1024)}K` : ''}`
+                    }))
+                }))
+                .filter((group) => group.options.length)}
+              onChange={(selectedId) => {
+                const selected = displayedModels.find((item) => item.id === selectedId)
                 if (!selected) {
                   const clearedModel = {
                     ...model,
@@ -3054,29 +3065,7 @@ export function ChatPanel(): React.JSX.Element {
                   }
                 })()
               }}
-            >
-              <option value="">
-                {discovering
-                  ? '正在扫描本地模型…'
-                  : '选择模型'}
-              </option>
-              {(['Kimi Code', '自定义', 'Ollama', 'LM Studio', 'llama.cpp'] as const).map((source) => {
-                const options = displayedModels.filter((item) => item.source === source)
-                if (!options.length) return null
-                return (
-                  <optgroup key={source} label={source}>
-                    {options.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.id === 'kimi-code:k3' ? 'Kimi K3' : item.name}
-                        {item.contextLength
-                          ? ` · ${Math.round(item.contextLength / 1024)}K`
-                          : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                )
-              })}
-            </select>
+            />
             <button
               className="model-refresh"
               onClick={() => void discoverModels()}

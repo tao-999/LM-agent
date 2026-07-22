@@ -573,13 +573,8 @@ function createWindow(): void {
     minWidth: 1080,
     minHeight: 680,
     show: false,
-    backgroundColor: '#0b0d12',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#0b0d12',
-      symbolColor: '#aeb5c2',
-      height: 38
-    },
+    backgroundColor: '#0f1013',
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
@@ -623,6 +618,18 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle('window:minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+  ipcMain.handle('window:toggleMaximize', (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender)
+    if (!target) return
+    if (target.isMaximized()) target.unmaximize()
+    else target.maximize()
+  })
+  ipcMain.handle('window:close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
+  })
   ipcMain.handle('app:openExternal', async (_event, url: string) =>
     openExternalUrl(url)
   )
@@ -915,6 +922,13 @@ function registerIpc(): void {
                 requestId: request.requestId,
                 type: 'context',
                 contextMemory
+              }),
+            onRepetitionStopped: (stop) =>
+              send('chat:event', {
+                requestId: request.requestId,
+                type: 'status',
+                title: '检测到重复输出，已自动停止',
+                content: `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中连续生成相同内容，程序已终止本轮流式响应，防止继续消耗 Token。`
               })
           }
         )

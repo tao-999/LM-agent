@@ -106,6 +106,11 @@ const api = {
     openExternal: (url: string) =>
       ipcRenderer.invoke('app:openExternal', url) as Promise<boolean>
   },
+  window: {
+    minimize: () => ipcRenderer.invoke('window:minimize') as Promise<void>,
+    toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize') as Promise<void>,
+    close: () => ipcRenderer.invoke('window:close') as Promise<void>
+  },
   model: {
     test: (model: ModelConfig) => ipcRenderer.invoke('model:test', model),
     discover: () => ipcRenderer.invoke('model:discover'),
