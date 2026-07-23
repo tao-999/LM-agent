@@ -1759,6 +1759,7 @@ export async function runWebChat(
   let forceTool = forceWebSearch
   let webSearchUsed = false
   let invalidRetries = 0
+  let repetitionRecoveryAttempts = 0
   let verificationRetries = 0
   let lastQuery = ''
   let webFailureStreak = 0
@@ -1814,13 +1815,30 @@ export async function runWebChat(
       })
     }
     if (completion.finishReason === 'repetition_guard') {
+      repetitionRecoveryAttempts += 1
+      if (repetitionRecoveryAttempts < 2) {
+        onEvent({
+          type: 'status',
+          title: '异常思考段已停止，任务继续',
+          content:
+            '程序仅丢弃当前失控的思考段，已保留网页结果与服务确认的 Token 统计，并要求模型从当前目标继续。'
+        })
+        workingMessages.push({
+          role: 'user',
+          content:
+            '运行时纠错：上一轮思考出现重复输出，程序已终止该生成段。请保留已经取得的网页结果，跳过重复总结，直接继续当前目标；任务完成时只输出一次简洁结论。'
+        })
+        continue
+      }
       onEvent({
         type: 'status',
-        title: '检测到重复输出，已自动停止',
-        content: '模型连续生成异常内容，程序已终止当前任务并保留已确认的 Token 统计。'
+        title: '异常思考连续出现，任务已停止',
+        content:
+          '模型连续两次生成异常思考，程序已停止当前任务；网页结果与服务确认的 Token 统计继续保留。'
       })
       return visibleWebUsage()
     }
+    repetitionRecoveryAttempts = 0
     if (!completion.content.trim() && completion.toolCalls.length === 0) {
       invalidRetries += 1
       if (invalidRetries >= 3) {
@@ -3759,6 +3777,7 @@ export async function runAgent(
   let invalidToolArgumentRetries = 0
   let invalidToolCorrection = ''
   let modelRequestFailures = 0
+  let repetitionRecoveryAttempts = 0
   let completionGuardRetries = 0
   let webSearchUsed = false
   let lastWebQuery = ''
@@ -4044,21 +4063,40 @@ export async function runAgent(
       })
     }
     if (completion.finishReason === 'repetition_guard') {
+      repetitionRecoveryAttempts += 1
+      if (repetitionRecoveryAttempts < 2) {
+        send({
+          requestId: request.requestId,
+          type: 'status',
+          title: '异常思考段已停止，任务继续',
+          content:
+            '程序仅丢弃当前失控的思考段，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留，模型将从当前子任务继续。'
+        })
+        messages.push({
+          role: 'user',
+          content:
+            '运行时纠错：上一轮思考出现重复输出，程序已终止该生成段。请保留当前任务清单、工具结果与文件改动，跳过重复总结，直接继续尚未完成的当前子任务；任务完成时只输出一次简洁结论。'
+        })
+        forceToolNext = false
+        continue
+      }
       send({
         requestId: request.requestId,
         type: 'status',
-        title: '检测到重复输出，已自动停止',
-        content: '模型连续生成异常内容，程序已终止当前任务；已生成正文、文件改动与服务确认的 Token 统计继续保留。'
+        title: '异常思考连续出现，任务已停止',
+        content:
+          '模型连续两次生成异常思考，程序已停止当前任务；已生成正文、文件改动、Tasks 与服务确认的 Token 统计继续保留。'
       })
       send({
         requestId: request.requestId,
         type: 'done',
-        title: '异常输出已停止',
+        title: '异常思考连续出现，任务已停止',
         changes: [...changes.values()],
         usage: visibleAgentUsage()
       })
       return
     }
+    repetitionRecoveryAttempts = 0
     const missingStructuredToolCall =
       completion.finishReason === 'tool_calls' && completion.toolCalls.length === 0
     const emptyCompletion =

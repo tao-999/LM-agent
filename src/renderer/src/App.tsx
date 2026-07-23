@@ -1157,7 +1157,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-              <div><dt>版本</dt><dd>0.7.115</dd></div>
+              <div><dt>版本</dt><dd>0.7.116</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>
