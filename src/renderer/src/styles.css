@@ -6062,6 +6062,7 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 .token-chart-toolbar {
   justify-content: space-between;
   gap: 12px;
+  padding-right: 12px;
 }
 
 .token-chart-ranges {
@@ -6274,6 +6275,9 @@ body.is-resizing-vertical .terminal-resize-handle::after {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-height: 42px;
+  padding: 6px 14px 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
 }
 
 .token-call-detail-header .ghost-button {
@@ -6285,6 +6289,7 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 .token-call-detail-header > div {
   display: grid;
   min-width: 0;
+  max-width: 48%;
   gap: 2px;
   text-align: right;
 }
@@ -6386,6 +6391,7 @@ body.is-resizing-vertical .terminal-resize-handle::after {
   .token-chart-toolbar {
     align-items: flex-start;
     flex-direction: column;
+    padding-right: 0;
   }
 
   .token-chart-date-filter.range {

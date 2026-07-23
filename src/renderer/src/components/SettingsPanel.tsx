@@ -241,6 +241,7 @@ function TokenModelChartModal({
     }
   }, [range, rangeEnd, rangeStart, records, selectedDay])
   const selectedModel = summary.models.find((item) => item.key === selectedModelKey)
+  const visibleSummary = selectedModel ?? summary
   useEffect(() => {
     setDetailPage(1)
   }, [range, rangeEnd, rangeStart, selectedDay])
@@ -270,7 +271,7 @@ function TokenModelChartModal({
         <header className="token-chart-header">
           <div>
             <span className="eyebrow">用量分析</span>
-            <h2>模型 Token 图表</h2>
+            <h2>{selectedModel ? `${selectedModel.model} Token 图表` : '模型 Token 图表'}</h2>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭图表">
             <X size={17} />
@@ -338,16 +339,16 @@ function TokenModelChartModal({
           )}
 
           <div className="token-chart-summary">
-            <article><span>输入</span><strong>{formatTokens(summary.promptTokens)}</strong></article>
-            <article><span>缓存命中</span><strong>{formatTokens(summary.cachedPromptTokens)}</strong></article>
-            <article><span>输出</span><strong>{formatTokens(summary.completionTokens)}</strong></article>
-            <article><span>合计</span><strong>{formatTokens(summary.totalTokens)}</strong></article>
-            <article><span>调用</span><strong>{summary.calls.toLocaleString()}</strong></article>
+            <article><span>输入</span><strong>{formatTokens(visibleSummary.promptTokens)}</strong></article>
+            <article><span>缓存命中</span><strong>{formatTokens(visibleSummary.cachedPromptTokens)}</strong></article>
+            <article><span>输出</span><strong>{formatTokens(visibleSummary.completionTokens)}</strong></article>
+            <article><span>合计</span><strong>{formatTokens(visibleSummary.totalTokens)}</strong></article>
+            <article><span>调用</span><strong>{visibleSummary.calls.toLocaleString()}</strong></article>
             <article>
               <span>缓存命中率</span>
               <strong>
-                {summary.promptTokens > 0
-                  ? `${((summary.cachedPromptTokens / summary.promptTokens) * 100).toFixed(1)}%`
+                {visibleSummary.promptTokens > 0
+                  ? `${((visibleSummary.cachedPromptTokens / visibleSummary.promptTokens) * 100).toFixed(1)}%`
                   : '0%'}
               </strong>
             </article>
