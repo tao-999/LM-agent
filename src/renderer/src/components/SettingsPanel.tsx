@@ -37,7 +37,13 @@ function formatTokens(value: number): string {
   return value.toLocaleString()
 }
 
-function TokenCalendar({ records }: { records: TokenUsageRecord[] }): React.JSX.Element {
+function TokenCalendar({
+  records,
+  onOpenDay
+}: {
+  records: TokenUsageRecord[]
+  onOpenDay: (day: string) => void
+}): React.JSX.Element {
   const [month, setMonth] = useState(() => {
     const today = new Date()
     return new Date(today.getFullYear(), today.getMonth(), 1)
@@ -110,6 +116,10 @@ function TokenCalendar({ records }: { records: TokenUsageRecord[] }): React.JSX.
               className={`${total ? 'used' : ''} ${selectedDay === key ? 'selected' : ''}`}
               style={{ '--heat': intensity } as React.CSSProperties}
               onClick={() => setSelectedDay(key)}
+              onDoubleClick={() => {
+                setSelectedDay(key)
+                onOpenDay(key)
+              }}
               title={`${key} · ${formatTokens(total)} Token`}
             >
               <span>{day}</span>
@@ -150,15 +160,17 @@ function dateBoundary(value: string, endOfDay = false): number {
 
 function TokenModelChartModal({
   records,
+  initialDay,
   onClose
 }: {
   records: TokenUsageRecord[]
+  initialDay?: string
   onClose: () => void
 }): React.JSX.Element {
-  const [range, setRange] = useState<TokenChartRange>('all')
+  const [range, setRange] = useState<TokenChartRange>(initialDay ? 'day' : 'all')
   const today = new Date()
   const todayKey = localDateKey(today)
-  const [selectedDay, setSelectedDay] = useState(todayKey)
+  const [selectedDay, setSelectedDay] = useState(initialDay || todayKey)
   const [rangeStart, setRangeStart] = useState(
     localDateKey(new Date(today.getFullYear(), today.getMonth(), 1))
   )
@@ -517,6 +529,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
   })
   const [editingSkill, setEditingSkill] = useState<SkillDefinition | null>(null)
   const [tokenChartOpen, setTokenChartOpen] = useState(false)
+  const [tokenChartInitialDay, setTokenChartInitialDay] = useState('')
 
   const discover = async (): Promise<void> => {
     setDiscovering(true)
@@ -733,13 +746,22 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             </div>
             <button
               className="secondary-button token-chart-open"
-              onClick={() => setTokenChartOpen(true)}
+              onClick={() => {
+                setTokenChartInitialDay('')
+                setTokenChartOpen(true)
+              }}
               title="按模型查看 Token 图表"
             >
               <BarChart3 size={14} /> 模型图表
             </button>
           </div>
-          <TokenCalendar records={tokenUsageRecords} />
+          <TokenCalendar
+            records={tokenUsageRecords}
+            onOpenDay={(day) => {
+              setTokenChartInitialDay(day)
+              setTokenChartOpen(true)
+            }}
+          />
         </div>
 
         <div className="settings-group">
@@ -1080,7 +1102,11 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         </div>
       )}
       {tokenChartOpen && (
-        <TokenModelChartModal records={tokenUsageRecords} onClose={() => setTokenChartOpen(false)} />
+        <TokenModelChartModal
+          records={tokenUsageRecords}
+          initialDay={tokenChartInitialDay || undefined}
+          onClose={() => setTokenChartOpen(false)}
+        />
       )}
     </section>
   )

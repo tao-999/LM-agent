@@ -1,6 +1,6 @@
 {
   "name": "local-agent-studio",
-  "version": "0.7.119",
+  "version": "0.7.120",
   "private": true,
   "description": "星伴 AI｜你的本地 AI 伙伴",
   "main": "out/main/index.js",
@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "icon:build": "node scripts/build-icon.cjs",
-    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts",
+    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts tests/workflow-cycle-guard.test.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "dist": "npm run icon:build && npm run build && electron-builder --win",

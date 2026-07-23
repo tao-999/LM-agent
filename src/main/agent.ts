@@ -35,6 +35,7 @@ import {
   type LlmMessage,
   type ToolDefinition
 } from './models'
+import { WorkflowCycleGuard } from './workflow-cycle-guard'
 
 const execAsync = promisify(exec)
 
@@ -2056,6 +2057,16 @@ export async function runAgent(
   const permissionMode = request.permissionMode || 'read-write-manual'
   let activeTasks: AgentTask[] = []
   const workflow: { stage: 'understand' | 'tasks' | 'execute' } = { stage: 'understand' }
+  const workflowCycleGuard = new WorkflowCycleGuard()
+  let progressRevision = 0
+  const taskStateSignature = (): string =>
+    activeTasks.length
+      ? activeTasks.map((task) => `${task.id}:${task.status}`).join('|')
+      : `${workflow.stage}:tasks-empty`
+  const allTasksCompleted = (): boolean =>
+    workflow.stage === 'execute' &&
+    activeTasks.length > 0 &&
+    activeTasks.every((task) => task.status === 'completed')
   let totalUsage: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,
@@ -3536,8 +3547,13 @@ export async function runAgent(
           status: status as AgentTask['status']
         }
       })
+      const previousTaskState = taskStateSignature()
       workflow.stage = 'execute'
       activeTasks = tasks
+      if (taskStateSignature() !== previousTaskState) {
+        progressRevision += 1
+        workflowCycleGuard.reset()
+      }
       send({
         requestId: request.requestId,
         type: 'tasks',
@@ -3852,7 +3868,10 @@ export async function runAgent(
   while (!signal.aborted) {
     step += 1
     if (signal.aborted) throw new Error('任务已停止')
-    appendQueuedGuidance()
+    if (appendQueuedGuidance()) {
+      progressRevision += 1
+      workflowCycleGuard.reset()
+    }
     if (workflow.stage === 'understand') forceToolNext = false
     if (workflow.stage === 'tasks') forceToolNext = true
 
@@ -3919,7 +3938,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                `当前建议先理解任务：完整阅读本轮 current_task、用户选区、附件与可用上下文，用简体中文明确目标、关键约束、已知信息与可验证完成标准。${modelToolScopeInstruction} 若理解任务确实需要检索、读取或核验，可自主调用合适工具。尚未形成可靠理解前不要制定 tasks，也不要输出最终回复。`
+                `当前状态：尚未建立任务清单。请先理解本轮 current_task 的目标、约束、已知信息与完成标准；理解充分时，首次正式操作应调用 update_tasks 建立可见清单。${modelToolScopeInstruction} 只有理解目标确实缺少必要事实时才先检索或读取；tasks 建立前不得执行文件写入。`
             }
           ]
         : workflow.stage === 'tasks'
@@ -4060,12 +4079,7 @@ export async function runAgent(
       })
     }
     if (completion.finishReason === 'repetition_guard') {
-      const completedTaskLoop =
-        workflow.stage === 'execute' &&
-        activeTasks.length > 0 &&
-        activeTasks.every((task) => task.status === 'completed') &&
-        (!requiresWorkspaceEdit || changes.size > 0)
-      if (completedTaskLoop) {
+      if (allTasksCompleted()) {
         send({
           requestId: request.requestId,
           type: 'status',
@@ -4085,19 +4099,25 @@ export async function runAgent(
       send({
         requestId: request.requestId,
         type: 'status',
-        title: '异常思考段已停止，任务继续',
+        title: '异常思考段已停止，状态已恢复',
         content:
-          '程序仅丢弃当前失控的思考段，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留，模型将从当前子任务继续。'
+          '程序仅丢弃当前失控输出，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留。'
       })
       const recoveryMessage: LlmMessage = {
-        role: 'user',
-        content:
-          '运行时纠错：上一轮思考出现重复输出，程序已终止该生成段。请保留当前任务清单、工具结果与文件改动，跳过重复总结，直接继续尚未完成的当前子任务；任务完成时只输出一次简洁结论。'
+        role: 'system',
+        content: [
+          '运行时状态快照：上一轮模型输出因重复生成被截断。',
+          '用户在此期间没有发送新请求；本条状态不是新任务，也不代表必须继续执行。',
+          `工作流阶段：${workflow.stage}。`,
+          `任务清单：${activeTasks.length ? activeTasks.map((task) => `${task.id}=${task.status}`).join('；') : '尚未建立'}。`,
+          `已记录文件改动：${changes.size} 个。`,
+          '请只依据以上真实状态自主判断本轮应当结束，或仍有未完成目标需要处理。'
+        ].join('\n')
       }
       const lastMessage = messages.at(-1)
       if (
-        lastMessage?.role === 'user' &&
-        lastMessage.content.startsWith('运行时纠错：上一轮思考出现重复输出')
+        lastMessage?.role === 'system' &&
+        lastMessage.content.startsWith('运行时状态快照：上一轮模型输出因重复生成被截断')
       ) {
         messages[messages.length - 1] = recoveryMessage
       } else {
@@ -4147,6 +4167,8 @@ export async function runAgent(
       continue
     }
     if (appendQueuedGuidance()) {
+      progressRevision += 1
+      workflowCycleGuard.reset()
       forceToolNext = false
       continue
     }
@@ -4216,7 +4238,10 @@ export async function runAgent(
         continue
       }
       const incompleteTasks = activeTasks.filter((task) => task.status !== 'completed')
-      const missingEditEvidence = requiresWorkspaceEdit && changes.size === 0
+      const missingEditEvidence =
+        requiresWorkspaceEdit &&
+        changes.size === 0 &&
+        !allTasksCompleted()
       if (incompleteTasks.length > 0 || missingEditEvidence) {
         completionGuardRetries += 1
         if (completionGuardRetries <= 3) {
@@ -4282,6 +4307,8 @@ export async function runAgent(
     }
 
     let restartAfterReplaceRecovery = false
+    let completedStateToolAttempt = false
+    let workflowCycleRecovered = false
     for (let callIndex = 0; callIndex < completion.toolCalls.length; callIndex += 1) {
       const call = completion.toolCalls[callIndex]
       if (signal.aborted) throw new Error('任务已停止')
@@ -4303,18 +4330,50 @@ export async function runAgent(
         toolName: call.name,
         toolArgs: call.arguments
       })
-      let result: string
+      let result = ''
       let toolSucceeded = false
       let preview: AgentChange[] | undefined
       let duplicateReplaceBlocked = false
       let duplicateHistorySearchBlocked = false
+      let workflowHistoryHandled = false
       const normalizedHistoryQuery =
         call.name === 'search_conversation_history'
           ? text(call.arguments.query).trim().toLocaleLowerCase()
           : ''
+      const workflowCycle =
+        workflow.stage === 'execute' &&
+        call.name === 'search_conversation_history'
+          ? workflowCycleGuard.observe({
+              toolName: call.name,
+              arguments: call.arguments,
+              taskState: taskStateSignature(),
+              progressRevision
+            })
+          : undefined
       try {
         if (argumentError) throw new Error(argumentError)
-        if (
+        if (call.name === 'search_conversation_history' && allTasksCompleted()) {
+          workflowHistoryHandled = true
+          duplicateHistorySearchBlocked = true
+          completedStateToolAttempt = true
+          toolSucceeded = true
+          result = [
+            '<conversation_history_results returned="0" skipped="task_completed">',
+            '当前状态：用户没有发送新请求；任务清单全部完成；会话历史检索未执行。',
+            '</conversation_history_results>'
+          ].join('\n')
+        } else if (workflowCycle?.detected) {
+          workflowHistoryHandled = true
+          duplicateHistorySearchBlocked = true
+          workflowCycleRecovered = true
+          toolSucceeded = true
+          result = [
+            '<conversation_history_results returned="0" skipped="workflow_cycle">',
+            `当前状态：同一任务状态下已连续出现 ${workflowCycle.occurrences} 次相近的会话历史检索；期间任务状态与文件进度均未变化，本次重复检索未执行。`,
+            `任务清单：${activeTasks.map((task) => `${task.id}=${task.status}`).join('；') || '尚未建立'}。`,
+            '</conversation_history_results>'
+          ].join('\n')
+        } else if (
           call.name === 'replace_in_file' &&
           failedReplaceSignatures.has(replaceSignature(call.arguments))
         ) {
@@ -4323,68 +4382,81 @@ export async function runAgent(
             `replace_in_file 已拦截完全相同的失败参数：${text(call.arguments.path)}。必须重新读取最新原文并修改 search；若行号明确，请改用 replace_lines。`
           )
         }
-        if (webVerificationExhausted && isWebTool(call.name)) {
-          blockedWebToolCalls += 1
-          throw new Error(
-            '网页工具已因连续解析失败停止。请基于已读取内容直接回答；证据不足时说明无法完成可靠核验。'
-          )
-        }
-        if (!tool) throw new Error(`未知工具：${call.name}`)
-        if (
-          call.name === 'search_conversation_history' &&
-          (agentHistorySearchExhausted || emptyAgentHistoryQueries.has(normalizedHistoryQuery))
-        ) {
-          duplicateHistorySearchBlocked = true
-          toolSucceeded = true
-          result = `<conversation_history_results query="${normalizedHistoryQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
+        if (!workflowHistoryHandled) {
+          if (webVerificationExhausted && isWebTool(call.name)) {
+            blockedWebToolCalls += 1
+            throw new Error(
+              '网页工具已因连续解析失败停止。请基于已读取内容直接回答；证据不足时说明无法完成可靠核验。'
+            )
+          }
+          if (!tool) throw new Error(`未知工具：${call.name}`)
+          if (
+            workflow.stage !== 'execute' &&
+            call.name !== 'update_tasks' &&
+            tool.risk !== 'read'
+          ) {
+            toolSucceeded = true
+            result = [
+              '当前工作流状态：任务清单尚未建立，文件写入未执行。',
+              `当前阶段：${workflow.stage}。`,
+              '可用工具保持不变。'
+            ].join('\n')
+          } else if (
+            call.name === 'search_conversation_history' &&
+            (agentHistorySearchExhausted || emptyAgentHistoryQueries.has(normalizedHistoryQuery))
+          ) {
+            duplicateHistorySearchBlocked = true
+            toolSucceeded = true
+            result = `<conversation_history_results query="${normalizedHistoryQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
 相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续任务。
 </conversation_history_results>`
-        } else {
-          if (permissionMode === 'read-only' && tool.risk !== 'read') {
-            result =
-              '权限状态：当前会话为只读模式，该工具未向模型开放，写入未执行。请停止尝试写入，仅使用当前可见的读取与检索工具完成分析。'
-            toolSucceeded = true
           } else {
-            const needsApproval =
-              (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
-              ((tool.risk === 'create' || tool.risk === 'delete') &&
-                request.confirmCreateDelete !== false) ||
-              tool.risk === 'command'
-            preview = tool.preview ? await tool.preview(call.arguments) : undefined
-            if (needsApproval) {
-              const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'
-              const approvalTitle = {
-                write: '确认文件修改',
-                create: '确认创建内容',
-                delete: '确认删除内容',
-                command: '确认执行命令'
-              }[approvalRisk]
-              const approvalDescription = {
-                write: `修改范围：${preview?.length || 0} 个文件`,
-                create: `创建范围：${preview?.length || 0} 个路径`,
-                delete: `删除范围：${preview?.length || 0} 个路径`,
-                command: `待确认命令：${call.name}`
-              }[approvalRisk]
-              const approval: AgentApproval = {
-                requestId: request.requestId,
-                approvalId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                title: approvalTitle,
-                description: approvalDescription,
-                toolName: call.name,
-                toolArgs: call.arguments,
-                risk: approvalRisk,
-                changes: preview
-              }
-              const approved = await requestApproval(approval)
-              if (!approved) {
-                result = '用户拒绝了本次操作，请调整方案或跳过此步骤'
+            if (permissionMode === 'read-only' && tool.risk !== 'read') {
+              result =
+                '权限状态：当前会话为只读模式，该工具未向模型开放，写入未执行。请停止尝试写入，仅使用当前可见的读取与检索工具完成分析。'
+              toolSucceeded = true
+            } else {
+              const needsApproval =
+                (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
+                ((tool.risk === 'create' || tool.risk === 'delete') &&
+                  request.confirmCreateDelete !== false) ||
+                tool.risk === 'command'
+              preview = tool.preview ? await tool.preview(call.arguments) : undefined
+              if (needsApproval) {
+                const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'
+                const approvalTitle = {
+                  write: '确认文件修改',
+                  create: '确认创建内容',
+                  delete: '确认删除内容',
+                  command: '确认执行命令'
+                }[approvalRisk]
+                const approvalDescription = {
+                  write: `修改范围：${preview?.length || 0} 个文件`,
+                  create: `创建范围：${preview?.length || 0} 个路径`,
+                  delete: `删除范围：${preview?.length || 0} 个路径`,
+                  command: `待确认命令：${call.name}`
+                }[approvalRisk]
+                const approval: AgentApproval = {
+                  requestId: request.requestId,
+                  approvalId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                  title: approvalTitle,
+                  description: approvalDescription,
+                  toolName: call.name,
+                  toolArgs: call.arguments,
+                  risk: approvalRisk,
+                  changes: preview
+                }
+                const approved = await requestApproval(approval)
+                if (!approved) {
+                  result = '用户拒绝了本次操作，请调整方案或跳过此步骤'
+                } else {
+                  result = await tool.execute(call.arguments, preview)
+                  toolSucceeded = true
+                }
               } else {
                 result = await tool.execute(call.arguments, preview)
                 toolSucceeded = true
               }
-            } else {
-              result = await tool.execute(call.arguments, preview)
-              toolSucceeded = true
             }
           }
         }
@@ -4420,6 +4492,14 @@ export async function runAgent(
         consecutiveToolFailures = 0
         recentToolFailures.length = 0
         invalidToolArgumentRetries = 0
+      }
+      if (
+        toolSucceeded &&
+        tool &&
+        ['write', 'create', 'delete', 'command'].includes(tool.risk)
+      ) {
+        progressRevision += 1
+        workflowCycleGuard.reset()
       }
       const replaceMatchFailed =
         call.name === 'replace_in_file' &&
@@ -4699,6 +4779,23 @@ export async function runAgent(
         toolName: call.name,
         content: toolResultPreview(result)
       })
+      if (completedStateToolAttempt) {
+        send({
+          requestId: request.requestId,
+          type: 'status',
+          title: '任务完成，忽略多余历史检索',
+          content:
+            '用户没有发送新请求，任务清单已经完成；程序未执行模型额外发起的历史检索。'
+        })
+        send({
+          requestId: request.requestId,
+          type: 'done',
+          title: '任务完成',
+          changes: [...changes.values()],
+          usage: visibleAgentUsage()
+        })
+        return
+      }
       if (invalidToolArgumentRetries >= 3) {
         send({
           requestId: request.requestId,
@@ -4754,6 +4851,21 @@ export async function runAgent(
         }
         break
       }
+    }
+    if (workflowCycleRecovered) {
+      const stateMessage: LlmMessage = {
+        role: 'system',
+        content: [
+          '运行时状态快照：检测到跨轮工作流重复，刚才的重复历史检索未执行。',
+          '用户没有发送新请求。',
+          `任务清单：${activeTasks.map((task) => `${task.id}=${task.status}`).join('；') || '尚未建立'}。`,
+          `已记录文件改动：${changes.size} 个。`,
+          '本条仅陈述当前状态，不指定下一步动作。'
+        ].join('\n')
+      }
+      messages.push(stateMessage)
+      forceToolNext = false
+      continue
     }
     if (restartAfterReplaceRecovery) continue
   }

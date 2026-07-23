@@ -1,0 +1,14 @@
+[
+  {
+    "toolName": "search_conversation_history",
+    "query": "多轮事件 M 开启 剧情推进"
+  },
+  {
+    "toolName": "search_conversation_history",
+    "query": "多轮事件 M 开启 剧情推进 续写"
+  },
+  {
+    "toolName": "search_conversation_history",
+    "query": "续写 剧情推进 多轮事件 后续"
+  }
+]
