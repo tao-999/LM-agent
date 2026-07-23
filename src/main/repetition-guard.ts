@@ -37,7 +37,10 @@ function hasEmojiFlood(value: string): boolean {
   )
 }
 
-function hasCompletionEchoLoop(value: string): boolean {
+function hasCompletionEchoLoop(
+  value: string,
+  channel: StreamRepetitionStop['channel']
+): boolean {
   const source = value.slice(-6_000)
   const closureEchoes =
     source.match(
@@ -62,7 +65,55 @@ function hasCompletionEchoLoop(value: string): boolean {
   const uniqueGrams = frequencies.size
   const highestFrequency = Math.max(...frequencies.values())
   const repeatedRatio = (totalGrams - uniqueGrams) / totalGrams
+  if (channel === 'content') {
+    return false
+  }
   return closureEchoes.length >= 12 || (highestFrequency >= 4 && repeatedRatio >= 0.35)
+}
+
+function normalizeEvidenceLine(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/(?:\uFFFD|�)+/gu, '')
+    .replace(/\d+/gu, '#')
+    .replace(/[\p{P}\p{S}\s]+/gu, '')
+}
+
+function hasRepeatedCompletionStructure(
+  value: string,
+  channel: StreamRepetitionStop['channel']
+): boolean {
+  const source = value.slice(-12_000)
+  const completionClaims =
+    source.match(
+      /(?:任务|修改|修复|处理|改动|验证|复查|检查)?(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|(?:task\s*)?(?:complete|completed)|\b(?:done|final|end)\b/giu
+    ) ?? []
+  if (completionClaims.length < (channel === 'content' ? 3 : 2)) return false
+
+  const frequencies = new Map<string, number>()
+  for (const rawLine of source.split(/\r?\n/u)) {
+    const line = normalizeEvidenceLine(rawLine)
+    if (line.length < 16) continue
+    frequencies.set(line, (frequencies.get(line) ?? 0) + 1)
+  }
+
+  const minimumCopies = channel === 'content' ? 3 : 2
+  const repeatedLines = [...frequencies.entries()].filter(
+    ([, count]) => count >= minimumCopies
+  )
+  const repeatedCharacters = repeatedLines.reduce(
+    (sum, [line, count]) => sum + line.length * (count - 1),
+    0
+  )
+  const minimumDistinctLines = channel === 'content' ? 2 : 1
+  const minimumRepeatedCharacters = channel === 'content' ? 120 : 96
+
+  return (
+    repeatedLines.length >= minimumDistinctLines &&
+    repeatedCharacters >= minimumRepeatedCharacters
+  )
 }
 
 function hasPostCompletionIdleDrift(value: string): boolean {
@@ -108,7 +159,12 @@ export function createStreamRepetitionGuard(
         onStop({ channel, periodCharacters: 0, kind: 'idle-drift' })
         return true
       }
-      if (hasCompletionEchoLoop(sample)) {
+      if (hasRepeatedCompletionStructure(sample, channel)) {
+        stopped = true
+        onStop({ channel, periodCharacters: 0, kind: 'completion-echo' })
+        return true
+      }
+      if (hasCompletionEchoLoop(sample, channel)) {
         stopped = true
         onStop({ channel, periodCharacters: 0, kind: 'completion-echo' })
         return true
@@ -123,7 +179,17 @@ export function createStreamRepetitionGuard(
         if (period > 6_000) break
         if (period >= 2) {
           const repetitions =
-            period >= 160 ? 2 : period >= 80 ? 3 : Math.max(6, Math.ceil(96 / period))
+            channel === 'content'
+              ? period >= 160
+                ? 3
+                : period >= 80
+                  ? 4
+                  : Math.max(8, Math.ceil(160 / period))
+              : period >= 160
+                ? 2
+                : period >= 80
+                  ? 3
+                  : Math.max(6, Math.ceil(96 / period))
           const requiredCharacters = period * repetitions
           if (requiredCharacters <= sample.length) {
             const repeatedTail = sample.slice(-requiredCharacters)

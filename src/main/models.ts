@@ -2335,8 +2335,10 @@ export async function streamChat(
     repetitionStop = stop
     options.onRepetitionStopped?.(stop)
   }
+  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
   const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter((content) => {
+    if (contentRepetitionGuard.push(content)) return
     output += content
     onChunk(content)
   })
@@ -2561,6 +2563,7 @@ async function streamCompleteWithTools(
   const stopForRepetition = (stop: StreamRepetitionStop): void => {
     if (!repetitionStop) repetitionStop = stop
   }
+  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
   const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
@@ -2574,6 +2577,7 @@ async function streamCompleteWithTools(
   const emitReasoning = (value: string): void => reasoningTagFilter.push(value)
   const thinkRouter = createThinkRouter(
     (value) => {
+      if (contentRepetitionGuard.push(value)) return
       content += value
       visibleContent.push(value)
     },

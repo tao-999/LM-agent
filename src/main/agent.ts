@@ -4060,19 +4060,18 @@ export async function runAgent(
       })
     }
     if (completion.finishReason === 'repetition_guard') {
-      const completedIdleDrift =
-        completion.repetitionStop?.kind === 'idle-drift' &&
+      const completedTaskLoop =
         workflow.stage === 'execute' &&
         activeTasks.length > 0 &&
         activeTasks.every((task) => task.status === 'completed') &&
         (!requiresWorkspaceEdit || changes.size > 0)
-      if (completedIdleDrift) {
+      if (completedTaskLoop) {
         send({
           requestId: request.requestId,
           type: 'status',
-          title: '任务完成，待机废话已收束',
+          title: '任务完成，异常尾流已收束',
           content:
-            '程序检测到模型在真实任务完成后继续输出等待指令与在线待命内容，已停止该生成段并正常结束任务。'
+            '程序确认真实任务清单与文件改动均已完成，已停止模型继续生成的重复总结、等待指令或异常尾流，并正常结束任务。'
         })
         send({
           requestId: request.requestId,
