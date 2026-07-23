@@ -7,6 +7,11 @@ import type {
 import { resolveThinkingEnabled } from '../shared/thinking'
 import { session, type Session } from 'electron'
 import { parseToolArgumentsJson } from './tool-json'
+import {
+  createStreamRepetitionGuard,
+  type StreamRepetitionStop
+} from './repetition-guard'
+import { stripPrivateModelOutput } from './protocol-output'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -44,6 +49,7 @@ export type CompletionResult = {
   compressed: boolean
   contextMemory?: ContextCompressionMemory
   finishReason?: string
+  repetitionStop?: StreamRepetitionStop
 }
 
 function createUsage(
@@ -330,7 +336,7 @@ const privateHostTagPattern = (): RegExp =>
   )
 
 function stripToolCallMarkup(value: string): string {
-  return value
+  return stripPrivateModelOutput(value)
     .replace(privateHostBlockPattern(), '')
     .replace(privateHostTagPattern(), '')
     .replace(
@@ -750,6 +756,19 @@ function createToolMarkupFilter(
   let deferredJson = false
   const markers = [
     ...PRIVATE_HOST_BLOCK_TAGS.map((tag) => ({ open: `<${tag}`, close: `</${tag}>` })),
+    {
+      open: '<details><summary>本次会话结构统计',
+      close: '</details>'
+    },
+    {
+      open: '不好意思，好像出错了。希望以下内容对你有帮助',
+      close: null
+    },
+    {
+      open: '任务类型判断错误，导致工具调用不符合预期',
+      close: null
+    },
+    { open: '## 工作流提示', close: null },
     { open: '<tool_call', close: '</tool_call>' },
     { open: '<function_call', close: '</function_call>' },
     { open: '<function=', close: '</function>' },
@@ -928,104 +947,6 @@ function createChannelRouter(
       if (!readingLabel && !buffer.toLocaleLowerCase().startsWith(openTag)) emit(buffer)
       buffer = ''
       readingLabel = false
-    }
-  }
-}
-
-type StreamRepetitionStop = {
-  channel: 'content' | 'reasoning'
-  periodCharacters: number
-  kind?: 'repeated-tail' | 'emoji-flood'
-}
-
-const emojiGraphemePattern = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u
-const substantiveGraphemePattern = /[\p{L}\p{N}]/u
-const graphemeSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' })
-
-function hasEmojiFlood(value: string): boolean {
-  const tail = value.slice(-2_400)
-  const graphemes = [...graphemeSegmenter.segment(tail)].map((entry) => entry.segment)
-  let emojiCount = 0
-  let nonWhitespaceDecorativeCount = 0
-
-  for (let index = graphemes.length - 1; index >= 0; index -= 1) {
-    const grapheme = graphemes[index]
-    if (emojiGraphemePattern.test(grapheme)) {
-      emojiCount += 1
-      nonWhitespaceDecorativeCount += 1
-      continue
-    }
-    if (/^\s+$/u.test(grapheme)) continue
-    if (!substantiveGraphemePattern.test(grapheme)) {
-      nonWhitespaceDecorativeCount += 1
-      continue
-    }
-    break
-  }
-
-  return (
-    emojiCount >= 40 &&
-    nonWhitespaceDecorativeCount >= 40 &&
-    emojiCount / nonWhitespaceDecorativeCount >= 0.7
-  )
-}
-
-function createStreamRepetitionGuard(
-  channel: StreamRepetitionStop['channel'],
-  onStop: (stop: StreamRepetitionStop) => void
-): { push: (value: string) => boolean } {
-  const maxHistoryCharacters = 16_000
-  const signatureCharacters = 96
-  let history = ''
-  let stopped = false
-  let nextInspectionAt = 320
-
-  return {
-    push: (value) => {
-      if (stopped) return true
-      if (!value) return false
-      history += value
-      if (history.length < nextInspectionAt) return false
-      nextInspectionAt = history.length + 48
-
-      const sample = history.slice(-maxHistoryCharacters)
-      if (hasEmojiFlood(sample)) {
-        stopped = true
-        onStop({ channel, periodCharacters: 0, kind: 'emoji-flood' })
-        return true
-      }
-      if (sample.length < signatureCharacters * 2) return false
-      const currentStart = sample.length - signatureCharacters
-      const signature = sample.slice(currentStart)
-      let previousStart = sample.lastIndexOf(signature, currentStart - 1)
-      let inspectedCandidates = 0
-      while (previousStart >= 0 && inspectedCandidates < 12) {
-        const period = currentStart - previousStart
-        if (period > 6_000) break
-        if (period >= 80) {
-          const repetitions = period >= 160 ? 2 : 3
-          const requiredCharacters = period * repetitions
-          if (requiredCharacters <= sample.length) {
-            const repeatedTail = sample.slice(-requiredCharacters)
-            const unit = repeatedTail.slice(0, period)
-            let identical = true
-            for (let index = 1; index < repetitions; index += 1) {
-              if (repeatedTail.slice(index * period, (index + 1) * period) !== unit) {
-                identical = false
-                break
-              }
-            }
-            if (identical && /\S/.test(unit)) {
-              stopped = true
-              onStop({ channel, periodCharacters: period, kind: 'repeated-tail' })
-              return true
-            }
-          }
-        }
-        inspectedCandidates += 1
-        previousStart = sample.lastIndexOf(signature, previousStart - 1)
-      }
-      return false
     }
   }
 }
@@ -2810,6 +2731,7 @@ async function streamCompleteWithTools(
       contextTokens: providerFinalUsage.promptTokens,
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
+      repetitionStop: repetitionStop ?? undefined,
       finishReason: toolCalls.length
         ? 'tool_calls'
         : repetitionStop
@@ -2995,6 +2917,7 @@ async function streamCompleteWithTools(
     contextEstimated: Boolean(providerFinalUsage.estimated),
     compressed: prepared.compressed,
     contextMemory: prepared.contextMemory,
+    repetitionStop: repetitionStop ?? undefined,
     finishReason: toolCalls.length
       ? 'tool_calls'
       : repetitionStop
