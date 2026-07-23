@@ -31,6 +31,7 @@ import {
 import {
   addUsage,
   completeWithTools,
+  estimateTextTokens,
   type LlmMessage,
   type ToolDefinition
 } from './models'
@@ -1743,6 +1744,18 @@ export async function runWebChat(
     completionTokens: 0,
     totalTokens: 0
   }
+  let hasConfirmedUsage = false
+  let latestUnconfirmedUsage: TokenUsage | undefined
+  const recordWebUsage = (usage: TokenUsage): void => {
+    if (usage.estimated) {
+      latestUnconfirmedUsage = usage
+      return
+    }
+    totalUsage = addUsage(totalUsage, usage)
+    hasConfirmedUsage = true
+  }
+  const visibleWebUsage = (): TokenUsage =>
+    hasConfirmedUsage ? totalUsage : latestUnconfirmedUsage ?? totalUsage
   let forceTool = forceWebSearch
   let webSearchUsed = false
   let invalidRetries = 0
@@ -1781,17 +1794,10 @@ export async function runWebChat(
       onEvent({ type: 'context', contextMemory: completion.contextMemory })
     }
     forceTool = false
-    totalUsage = addUsage(totalUsage, completion.usage)
-    if (completion.finishReason === 'repetition_guard') {
-      onEvent({
-        type: 'status',
-        title: '检测到重复输出，已自动停止',
-        content: '模型连续生成相同内容，程序已终止本轮流式响应并保留已经生成的有效结果。'
-      })
-    }
+    recordWebUsage(completion.usage)
     onEvent({
       type: 'context',
-      usage: totalUsage,
+      usage: visibleWebUsage(),
       contextState: {
         usedTokens: completion.contextTokens,
         limitTokens: model.contextLength || 8192,
@@ -1806,6 +1812,14 @@ export async function runWebChat(
         title: '思考',
         content: completion.reasoning
       })
+    }
+    if (completion.finishReason === 'repetition_guard') {
+      onEvent({
+        type: 'status',
+        title: '检测到重复输出，已自动停止',
+        content: '模型连续生成异常内容，程序已终止当前任务并保留已确认的 Token 统计。'
+      })
+      return visibleWebUsage()
     }
     if (!completion.content.trim() && completion.toolCalls.length === 0) {
       invalidRetries += 1
@@ -1852,14 +1866,14 @@ export async function runWebChat(
           onChunk(
             `当前公开来源不足，无法可靠确认。已读取 ${verifiedHosts.size} 个独立来源，其中 ${referenceHosts.size} 个非社区来源。`
           )
-          return totalUsage
+          return visibleWebUsage()
         }
         workingMessages[0].content += `\n网页核验仍不足：当前 ${verifiedHosts.size} 个独立来源、${referenceHosts.size} 个非社区来源。禁止回答结论，继续搜索并读取来源。`
         forceTool = true
         continue
       }
       if (!streamedContent) onChunk(completion.content)
-      return totalUsage
+      return visibleWebUsage()
     }
 
     const call = completion.toolCalls[0]
@@ -2006,7 +2020,7 @@ export async function runWebChat(
     onChunk(
       `网页解析连续失败，已安全停止网页循环。已读取 ${verifiedHosts.size} 个独立来源，其中 ${referenceHosts.size} 个非社区来源；当前证据不足，无法给出可靠网页核验结论。`
     )
-    return totalUsage
+    return visibleWebUsage()
   }
   throw new Error('网页核验达到 18 步安全上限')
 }
@@ -2031,6 +2045,18 @@ export async function runAgent(
     completionTokens: 0,
     totalTokens: 0
   }
+  let hasConfirmedUsage = false
+  let latestUnconfirmedUsage: TokenUsage | undefined
+  const recordAgentUsage = (usage: TokenUsage): void => {
+    if (usage.estimated) {
+      latestUnconfirmedUsage = usage
+      return
+    }
+    totalUsage = addUsage(totalUsage, usage)
+    hasConfirmedUsage = true
+  }
+  const visibleAgentUsage = (): TokenUsage | undefined =>
+    hasConfirmedUsage ? totalUsage : latestUnconfirmedUsage
   const restrictedWebHosts = requestedWebHosts(request.objective)
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
   const requiresWorkspaceEdit =
@@ -2787,7 +2813,7 @@ export async function runAgent(
       function: {
         name: 'read_file',
         description:
-          '按行读取工作区内的 UTF-8 文本文件并返回行号。默认必须提供 start_line+end_line，或 around_line+context_lines 精准读取区间；位置未知时先调用 search_files 定位。用户明确要求通读、总结、审查、重构全文或局部上下文确实不足时才省略区间读取全文；工具层不限制用户明确要求的读取行数。',
+          '按行读取工作区内的 UTF-8 文本文件并返回行号。默认优先提供 start_line+end_line，或 around_line+context_lines 精准读取区间；位置未知时先调用 search_files 定位。用户明确要求通读、总结、审查、重构全文，或文件估算 Token 不超过当前模型上下文窗口的 50% 时，可以省略区间读取全文；工具层不限制用户明确要求的读取行数。',
         parameters: {
           type: 'object',
           required: ['path'],
@@ -2846,12 +2872,24 @@ export async function runAgent(
       const hasStart = Number.isSafeInteger(Number(args.start_line)) && Number(args.start_line) >= 1
       const hasEnd = Number.isSafeInteger(Number(args.end_line)) && Number(args.end_line) >= 1
       const hasExplicitInterval = aroundLine > 0 || (hasStart && hasEnd)
-      if (!hasExplicitInterval && !userRequestedWholeFileRead && lines.length > 1) {
+      const contextLimit = Math.max(
+        1,
+        request.model.contextLength || request.model.maxContextLength || 8192
+      )
+      const wholeFileThreshold = Math.max(1, Math.floor(contextLimit * 0.5))
+      const estimatedFileTokens = estimateTextTokens(content)
+      const fileFitsWholeReadBudget = estimatedFileTokens <= wholeFileThreshold
+      if (
+        !hasExplicitInterval &&
+        !userRequestedWholeFileRead &&
+        !fileFitsWholeReadBudget &&
+        lines.length > 1
+      ) {
         throw new Error(
           [
-            `read_file 缺少准确读取区间：${relative} 当前共 ${lines.length} 行，已阻止默认读取全文。`,
+            `read_file 缺少准确读取区间：${relative} 当前共 ${lines.length} 行，估算 ${estimatedFileTokens.toLocaleString()} Token，超过当前上下文窗口 50% 阈值 ${wholeFileThreshold.toLocaleString()} Token，已阻止默认读取全文。`,
             '位置未知时先调用 search_files 定位关键词行号，再用 around_line 与 context_lines（默认上下各 50 行）读取上下文。',
-            '已有用户选区、明确行号或其他可靠区间时，提供 start_line 与 end_line。只有当前任务明确要求通读、总结、审查、重构全文时才省略区间。'
+            '已有用户选区、明确行号或其他可靠区间时，提供 start_line 与 end_line。当前任务明确要求全文处理时也可省略区间。'
           ].join('\n')
         )
       }
@@ -3972,17 +4010,9 @@ export async function runAgent(
         type: 'done',
         title: '模型连续失败，已安全终止',
         changes: [...changes.values()],
-        usage: totalUsage
+        usage: visibleAgentUsage()
       })
       return
-    }
-    if (completion.finishReason === 'repetition_guard') {
-      send({
-        requestId: request.requestId,
-        type: 'status',
-        title: '检测到重复输出，已自动停止',
-        content: '模型连续生成相同内容，程序已终止本轮流式响应；已生成正文、文件改动与 Token 统计继续保留。'
-      })
     }
     if (completion.contextMemory) {
       applyCompressionMemory(messages, completion.contextMemory)
@@ -3992,11 +4022,11 @@ export async function runAgent(
         contextMemory: completion.contextMemory
       })
     }
-    totalUsage = addUsage(totalUsage, completion.usage)
+    recordAgentUsage(completion.usage)
     send({
       requestId: request.requestId,
       type: 'context',
-      usage: totalUsage,
+      usage: visibleAgentUsage(),
       contextState: {
         usedTokens: completion.contextTokens,
         limitTokens: request.model.contextLength || 8192,
@@ -4012,6 +4042,22 @@ export async function runAgent(
         title: workflow.stage === 'understand' ? '理解任务' : '思考',
         content: completion.reasoning
       })
+    }
+    if (completion.finishReason === 'repetition_guard') {
+      send({
+        requestId: request.requestId,
+        type: 'status',
+        title: '检测到重复输出，已自动停止',
+        content: '模型连续生成异常内容，程序已终止当前任务；已生成正文、文件改动与服务确认的 Token 统计继续保留。'
+      })
+      send({
+        requestId: request.requestId,
+        type: 'done',
+        title: '异常输出已停止',
+        changes: [...changes.values()],
+        usage: visibleAgentUsage()
+      })
+      return
     }
     const missingStructuredToolCall =
       completion.finishReason === 'tool_calls' && completion.toolCalls.length === 0
@@ -4045,7 +4091,7 @@ export async function runAgent(
           type: 'done',
           title: '连续失败，任务已安全终止',
           changes: [...changes.values()],
-          usage: totalUsage
+          usage: visibleAgentUsage()
         })
         return
       }
@@ -4158,7 +4204,7 @@ export async function runAgent(
           type: 'done',
           title: '任务未完成',
           changes: [...changes.values()],
-          usage: totalUsage
+          usage: visibleAgentUsage()
         })
         return
       }
@@ -4175,7 +4221,7 @@ export async function runAgent(
         type: 'done',
         title: '任务完成',
         changes: [...changes.values()],
-        usage: totalUsage
+        usage: visibleAgentUsage()
       })
       return
     }
@@ -4388,7 +4434,7 @@ export async function runAgent(
           type: 'done',
           title: '任务完成',
           changes: [...changes.values()],
-          usage: totalUsage
+          usage: visibleAgentUsage()
         })
         return
       }
@@ -4618,7 +4664,7 @@ export async function runAgent(
           type: 'done',
           title: '模型工具参数格式连续错误',
           changes: [...changes.values()],
-          usage: totalUsage
+          usage: visibleAgentUsage()
         })
         return
       }
@@ -4646,7 +4692,7 @@ export async function runAgent(
           type: 'done',
           title: '连续失败，任务已安全终止',
           changes: [...changes.values()],
-          usage: totalUsage
+          usage: visibleAgentUsage()
         })
         return
       }

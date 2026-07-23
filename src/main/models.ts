@@ -935,6 +935,39 @@ function createChannelRouter(
 type StreamRepetitionStop = {
   channel: 'content' | 'reasoning'
   periodCharacters: number
+  kind?: 'repeated-tail' | 'emoji-flood'
+}
+
+const emojiGraphemePattern = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u
+const substantiveGraphemePattern = /[\p{L}\p{N}]/u
+const graphemeSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' })
+
+function hasEmojiFlood(value: string): boolean {
+  const tail = value.slice(-2_400)
+  const graphemes = [...graphemeSegmenter.segment(tail)].map((entry) => entry.segment)
+  let emojiCount = 0
+  let nonWhitespaceDecorativeCount = 0
+
+  for (let index = graphemes.length - 1; index >= 0; index -= 1) {
+    const grapheme = graphemes[index]
+    if (emojiGraphemePattern.test(grapheme)) {
+      emojiCount += 1
+      nonWhitespaceDecorativeCount += 1
+      continue
+    }
+    if (/^\s+$/u.test(grapheme)) continue
+    if (!substantiveGraphemePattern.test(grapheme)) {
+      nonWhitespaceDecorativeCount += 1
+      continue
+    }
+    break
+  }
+
+  return (
+    emojiCount >= 40 &&
+    nonWhitespaceDecorativeCount >= 40 &&
+    emojiCount / nonWhitespaceDecorativeCount >= 0.7
+  )
 }
 
 function createStreamRepetitionGuard(
@@ -956,6 +989,11 @@ function createStreamRepetitionGuard(
       nextInspectionAt = history.length + 48
 
       const sample = history.slice(-maxHistoryCharacters)
+      if (hasEmojiFlood(sample)) {
+        stopped = true
+        onStop({ channel, periodCharacters: 0, kind: 'emoji-flood' })
+        return true
+      }
       if (sample.length < signatureCharacters * 2) return false
       const currentStart = sample.length - signatureCharacters
       const signature = sample.slice(currentStart)
@@ -979,7 +1017,7 @@ function createStreamRepetitionGuard(
             }
             if (identical && /\S/.test(unit)) {
               stopped = true
-              onStop({ channel, periodCharacters: period })
+              onStop({ channel, periodCharacters: period, kind: 'repeated-tail' })
               return true
             }
           }
@@ -2376,10 +2414,8 @@ export async function streamChat(
     repetitionStop = stop
     options.onRepetitionStopped?.(stop)
   }
-  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
   const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter((content) => {
-    if (contentRepetitionGuard.push(content)) return
     output += content
     onChunk(content)
   })
@@ -2604,7 +2640,6 @@ async function streamCompleteWithTools(
   const stopForRepetition = (stop: StreamRepetitionStop): void => {
     if (!repetitionStop) repetitionStop = stop
   }
-  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
   const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
@@ -2618,7 +2653,6 @@ async function streamCompleteWithTools(
   const emitReasoning = (value: string): void => reasoningTagFilter.push(value)
   const thinkRouter = createThinkRouter(
     (value) => {
-      if (contentRepetitionGuard.push(value)) return
       content += value
       visibleContent.push(value)
     },

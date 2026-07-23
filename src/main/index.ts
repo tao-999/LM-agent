@@ -927,8 +927,14 @@ function registerIpc(): void {
               send('chat:event', {
                 requestId: request.requestId,
                 type: 'status',
-                title: '检测到重复输出，已自动停止',
-                content: `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中连续生成相同内容，程序已终止本轮流式响应，防止继续消耗 Token。`
+                title:
+                  stop.kind === 'emoji-flood'
+                    ? '检测到 Emoji 异常输出，已自动停止'
+                    : '检测到重复输出，已自动停止',
+                content:
+                  stop.kind === 'emoji-flood'
+                    ? `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中持续生成高密度 Emoji，程序已终止本轮流式响应，防止继续消耗 Token。`
+                    : `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中连续生成相同内容，程序已终止本轮流式响应，防止继续消耗 Token。`
               })
           }
         )
