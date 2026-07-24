@@ -40,6 +40,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  SquareTerminal,
   Trash2,
   X
 } from 'lucide-react'
@@ -1237,34 +1238,71 @@ const MessageCard = memo(function MessageCard({
 function InlineApprovalCard({
   approval,
   blocked,
+  workspaceRoot,
   onResolve
 }: {
   approval: AgentApproval
   blocked: boolean
+  workspaceRoot: string
   onResolve: (approved: boolean) => void
 }): React.JSX.Element {
+  const command = typeof approval.toolArgs.command === 'string' ? approval.toolArgs.command : ''
+  const isCommandApproval = approval.risk === 'command'
+
   return (
-    <section className="inline-approval-card" aria-label="Agent 操作审批">
+    <section
+      className={`inline-approval-card ${isCommandApproval ? 'command-approval' : ''}`}
+      aria-label="Agent 操作审批"
+    >
       <header>
         <span className="inline-approval-icon">
-          <ShieldCheck size={17} />
+          {isCommandApproval ? <SquareTerminal size={17} /> : <ShieldCheck size={17} />}
         </span>
         <div>
           <span className="eyebrow">等待你的确认</span>
           <h3>{approval.title}</h3>
         </div>
       </header>
-      <p>{approval.description}</p>
-      <details className="inline-approval-detail">
-        <summary>
-          <span>
-            <Code2 size={12} />
-            {approval.toolName}
-          </span>
-          <ChevronDown size={13} />
-        </summary>
-        <pre>{JSON.stringify(approval.toolArgs, null, 2)}</pre>
-      </details>
+      {isCommandApproval ? (
+        <div className="inline-command-terminal" role="region" aria-label="待执行命令">
+          <header>
+            <span className="terminal-lights" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <strong>
+              <SquareTerminal size={12} />
+              工作区终端
+            </strong>
+            <span>等待执行</span>
+          </header>
+          <div className="inline-command-terminal-body">
+            <div className="inline-command-cwd" title={workspaceRoot}>
+              CWD&nbsp; {workspaceRoot || '未打开工作区'}
+            </div>
+            <pre>
+              <span className="inline-command-prompt">$</span>
+              <code>{command || '未提供命令'}</code>
+              <span className="inline-command-cursor" aria-hidden="true" />
+            </pre>
+          </div>
+        </div>
+      ) : (
+        <>
+          <p>{approval.description}</p>
+          <details className="inline-approval-detail">
+            <summary>
+              <span>
+                <Code2 size={12} />
+                {approval.toolName}
+              </span>
+              <ChevronDown size={13} />
+            </summary>
+            <pre>{JSON.stringify(approval.toolArgs, null, 2)}</pre>
+          </details>
+        </>
+      )}
       {approval.changes?.length ? (
         <div className="inline-approval-files">
           <strong>将修改 {approval.changes.length} 个文件</strong>
@@ -1473,8 +1511,6 @@ export function ChatPanel(): React.JSX.Element {
   const skills = useAppStore((state) => state.skills)
   const agentPermissionMode = useAppStore((state) => state.agentPermissionMode)
   const setAgentPermissionMode = useAppStore((state) => state.setAgentPermissionMode)
-  const confirmCreateDelete = useAppStore((state) => state.confirmCreateDelete)
-  const setConfirmCreateDelete = useAppStore((state) => state.setConfirmCreateDelete)
   const agentApproval = useAppStore((state) => state.agentApproval)
   const setAgentApproval = useAppStore((state) => state.setAgentApproval)
   const workspaceRoot = useAppStore((state) => state.workspaceRoot)
@@ -2295,7 +2331,6 @@ export function ChatPanel(): React.JSX.Element {
         skills,
         attachments: requestAttachments,
         permissionMode: agentPermissionMode,
-        confirmCreateDelete,
         contextMessages: contextHistory.recent,
         historyArchive: contextHistory.archive
       })
@@ -2595,6 +2630,7 @@ export function ChatPanel(): React.JSX.Element {
         <InlineApprovalCard
           approval={approvalForConversation}
           blocked={approvalBlocked}
+          workspaceRoot={workspaceRoot}
           onResolve={(value) => void resolveApproval(value)}
         />
       )}
@@ -2943,17 +2979,6 @@ export function ChatPanel(): React.JSX.Element {
                   onChange={(value) => setAgentPermissionMode(value as AgentPermissionMode)}
                 />
               </div>
-              <button
-                className={`creation-confirm-toggle ${confirmCreateDelete ? 'active' : ''}`}
-                type="button"
-                role="switch"
-                aria-checked={confirmCreateDelete}
-                onClick={() => setConfirmCreateDelete(!confirmCreateDelete)}
-                title={confirmCreateDelete ? '创建与删除将逐次确认' : '创建与删除将自动执行'}
-              >
-                <span className="toggle-track"><i /></span>
-                创建/删除
-              </button>
             </>
           )}
           <div

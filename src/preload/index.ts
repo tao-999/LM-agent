@@ -98,6 +98,32 @@ const api = {
     ) => ipcRenderer.invoke('files:create', root, parentPath, name, kind),
     duplicate: (root: string, filePath: string) =>
       ipcRenderer.invoke('files:duplicate', root, filePath),
+    copyToDirectory: (
+      sourceRoot: string,
+      sourcePath: string,
+      targetRoot: string,
+      targetDirectory: string
+    ) =>
+      ipcRenderer.invoke(
+        'files:copyToDirectory',
+        sourceRoot,
+        sourcePath,
+        targetRoot,
+        targetDirectory
+      ) as Promise<string>,
+    moveToDirectory: (
+      sourceRoot: string,
+      sourcePath: string,
+      targetRoot: string,
+      targetDirectory: string
+    ) =>
+      ipcRenderer.invoke(
+        'files:moveToDirectory',
+        sourceRoot,
+        sourcePath,
+        targetRoot,
+        targetDirectory
+      ) as Promise<string>,
     reveal: (filePath: string) => ipcRenderer.invoke('files:reveal', filePath),
     openExternal: (filePath: string) => ipcRenderer.invoke('files:openExternal', filePath)
   },

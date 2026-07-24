@@ -412,11 +412,28 @@ body.is-resizing .resize-handle.vertical::after {
   position: fixed;
   z-index: 100;
   min-width: 150px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   border: 1px solid #303949;
   border-radius: 7px;
   background: #171c25;
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+}
+
+.project-context-menu[data-horizontal='left'][data-vertical='down'] {
+  transform-origin: top right;
+}
+
+.project-context-menu[data-horizontal='right'][data-vertical='up'] {
+  transform-origin: bottom left;
+}
+
+.project-context-menu[data-horizontal='left'][data-vertical='up'] {
+  transform-origin: bottom right;
 }
 
 .project-context-menu button {
@@ -445,6 +462,22 @@ body.is-resizing .resize-handle.vertical::after {
 
 .project-context-menu button.danger {
   color: #ef929c;
+}
+
+.project-context-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.tree-row.dragging {
+  opacity: 0.42;
+}
+
+.tree-row.directory.drop-target {
+  outline: 1px solid rgba(100, 190, 255, 0.9);
+  outline-offset: -1px;
+  background: rgba(10, 132, 255, 0.24) !important;
+  color: #fff;
 }
 
 .project-name-dialog {
@@ -5295,6 +5328,126 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 .inline-approval-card > footer button:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+
+.inline-approval-card.command-approval {
+  max-height: min(430px, 52vh);
+}
+
+.inline-command-terminal {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 10px;
+  background: #090c11;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 8px 22px rgba(0, 0, 0, 0.24);
+}
+
+.inline-command-terminal > header {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) auto;
+  min-height: 32px;
+  align-items: center;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.035));
+}
+
+.inline-command-terminal > header strong {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: rgba(235, 235, 245, 0.82);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.inline-command-terminal > header > span:last-child {
+  color: #ffbd5a;
+  font-size: 8px;
+}
+
+.terminal-lights {
+  display: flex;
+  gap: 5px;
+}
+
+.terminal-lights i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff5f57;
+  box-shadow: inset 0 -1px 1px rgba(0, 0, 0, 0.22);
+}
+
+.terminal-lights i:nth-child(2) {
+  background: #febc2e;
+}
+
+.terminal-lights i:nth-child(3) {
+  background: #28c840;
+}
+
+.inline-command-terminal-body {
+  min-height: 92px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px 13px;
+  color: #d6d9df;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+.inline-command-cwd {
+  overflow: hidden;
+  margin-bottom: 10px;
+  color: #6d7889;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-command-terminal pre {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: #e6e8ed;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-command-terminal pre code {
+  min-width: 0;
+  flex: 1;
+  color: inherit;
+  font: inherit;
+}
+
+.inline-command-prompt {
+  flex: none;
+  color: #61d78b;
+  font-weight: 700;
+}
+
+.inline-command-cursor {
+  width: 6px;
+  height: 14px;
+  flex: none;
+  margin-top: 1px;
+  background: rgba(220, 224, 232, 0.72);
+  animation: inline-terminal-cursor 1s steps(1) infinite;
+}
+
+@keyframes inline-terminal-cursor {
+  50% {
+    opacity: 0;
+  }
 }
 
 .diff-approval-hint {

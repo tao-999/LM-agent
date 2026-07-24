@@ -10,9 +10,11 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   buildFileTree,
+  copyWorkspaceEntryToDirectory,
   createWorkspaceEntry,
   deleteWorkspaceEntry,
   duplicateWorkspaceEntry,
+  moveWorkspaceEntryToDirectory,
   readTextFile,
   renameWorkspaceEntry,
   renameWorkspaceRoot,
@@ -729,6 +731,26 @@ function registerIpc(): void {
   )
   ipcMain.handle('files:duplicate', async (_event, root: string, filePath: string) =>
     duplicateWorkspaceEntry(root, filePath)
+  )
+  ipcMain.handle(
+    'files:copyToDirectory',
+    async (
+      _event,
+      sourceRoot: string,
+      sourcePath: string,
+      targetRoot: string,
+      targetDirectory: string
+    ) => copyWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory)
+  )
+  ipcMain.handle(
+    'files:moveToDirectory',
+    async (
+      _event,
+      sourceRoot: string,
+      sourcePath: string,
+      targetRoot: string,
+      targetDirectory: string
+    ) => moveWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory)
   )
   ipcMain.handle('files:reveal', (_event, filePath: string) => {
     shell.showItemInFolder(filePath)

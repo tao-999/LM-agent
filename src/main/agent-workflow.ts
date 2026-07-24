@@ -1,4 +1,6 @@
 export type AgentWorkflowStage = 'understand' | 'tasks' | 'execute'
+export type AgentToolRisk = 'read' | 'write' | 'create' | 'delete' | 'command'
+export type AgentPermissionMode = 'read-only' | 'read-write-manual' | 'read-write-auto'
 
 export function toolAvailableInStage(
   stage: AgentWorkflowStage,
@@ -18,3 +20,28 @@ export function workflowToolChoice(
   return forceTool ? 'required' : 'auto'
 }
 
+const destructiveCommandPatterns = [
+  /(?:^|[;&|]\s*|\s)(?:rm|rmdir|rd|del|erase|unlink|shred|ri)(?:\s|$)/i,
+  /\bremove-item\b/i,
+  /\bgit\s+clean\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\b(?:fs\.(?:rm|rmdir|unlink)|os\.(?:remove|unlink)|shutil\.rmtree)\s*\(/i,
+  /\.unlink\s*\(/i
+]
+
+export function commandContainsDestructiveOperation(command: string): boolean {
+  return destructiveCommandPatterns.some((pattern) => pattern.test(command))
+}
+
+export function shouldRequestToolApproval(
+  risk: AgentToolRisk,
+  permissionMode: AgentPermissionMode,
+  commandDeletes = false
+): boolean {
+  if (risk === 'read') return false
+  if (risk === 'delete') return true
+  if (risk === 'command') {
+    return permissionMode === 'read-write-manual' || commandDeletes
+  }
+  return permissionMode === 'read-write-manual'
+}

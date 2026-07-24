@@ -37,6 +37,8 @@ import {
 } from './models'
 import { WorkflowCycleGuard } from './workflow-cycle-guard'
 import {
+  commandContainsDestructiveOperation,
+  shouldRequestToolApproval,
   toolAvailableInStage,
   workflowToolChoice,
   type AgentWorkflowStage
@@ -153,6 +155,27 @@ function assertCommandWithinWorkspace(command: string): void {
   if (violations.some((pattern) => pattern.test(command))) {
     throw new Error('命令包含可能越出当前 CWD 的路径或目录切换，已拒绝执行')
   }
+}
+
+async function commandOrScriptDeletesWorkspace(
+  workspaceRoot: string,
+  command: string
+): Promise<boolean> {
+  if (commandContainsDestructiveOperation(command)) return true
+  const scriptPattern =
+    /(?:"([^"]+\.(?:py|ps1|js|mjs|cjs|sh|bat|cmd))"|'([^']+\.(?:py|ps1|js|mjs|cjs|sh|bat|cmd))'|([^\s"';&|]+\.(?:py|ps1|js|mjs|cjs|sh|bat|cmd)))/gi
+  const candidates = [...command.matchAll(scriptPattern)]
+    .map((match) => match[1] || match[2] || match[3])
+    .filter(Boolean)
+  for (const candidate of candidates) {
+    try {
+      const content = await readTextFile(workspaceRoot, candidate)
+      if (commandContainsDestructiveOperation(content)) return true
+    } catch {
+      // Missing or non-text script arguments are handled by the command itself.
+    }
+  }
+  return false
 }
 
 function stripHistoryTags(value: string): string {
@@ -3478,7 +3501,7 @@ export async function runAgent(
       function: {
         name: 'run_command',
         description:
-          '在当前工作区执行系统命令，仅用于安装依赖、构建、测试、运行程序与查看状态。创建文件或文件夹必须调用 create_file/create_directory，删除必须调用 delete_path，复制必须调用 copy_path，普通文件编辑必须调用精准编辑工具；严禁用 Python、PowerShell、Shell、重定向或脚本绕过对应的聊天确认模块。命令产生的构建输出会自动刷新。',
+          '在当前工作区执行系统命令，可用于安装依赖、构建、测试、运行项目脚本及批量处理工作区文件。读写自动模式下普通命令直接运行，读写手动模式下先确认；命令文本或被调用脚本包含删除操作时始终要求用户确认。命令产生的文件变化会自动刷新。',
         parameters: {
           type: 'object',
           required: ['command'],
@@ -3593,8 +3616,8 @@ export async function runAgent(
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 search_files 检索本地项目资料；命中后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
       : '',
     '未知知识检索规则：该规则同样适用于代码与普通问答。遇到模型训练资料中可能不存在、版本可能变化、记忆不确定、项目专有、第三方库或 API 行为不明确的事实，严禁凭印象猜测。先调用 search_files 检索本地项目文档、源码与配置；本地资料缺失或不足时必须调用 search_web。只有现有上下文已经给出可靠依据时才可跳过检索。',
-    `创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。create_file、create_directory、copy_path 与 delete_path 是否逐次审批由输入框“创建/删除确认”开关决定；当前开关为${request.confirmCreateDelete === false ? '关闭，允许按当前读写权限直接执行' : '开启，必须显示独立确认模块并等待用户允许'}。`,
-    '专用工具规则：创建文件使用 create_file，创建目录使用 create_directory，复制使用 copy_path，删除使用 delete_path。严禁调用 run_command、Python、PowerShell、Shell、重定向或临时脚本绕过创建与删除确认模块。',
+    '创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。创建、复制与普通写入跟随当前读写权限模式；删除工具始终显示独立确认模块并等待用户允许。',
+    '专用工具规则：单项创建优先使用 create_file/create_directory，复制使用 copy_path，删除使用 delete_path。允许 run_command 运行工作区脚本；命令或脚本包含删除操作时始终要求用户确认。',
     'CWD 硬边界规则：全部文件工具只允许读取或操作当前工作区内部路径；绝对外部路径、父级穿越和借助符号链接越界都会由工具层拒绝。run_command 禁止切换出当前工作区，也禁止引用外部绝对路径、父级路径或用户目录变量。',
     '中文引号修复最高优先级：用户要求把英文双引号或英文单引号改成中文引号、修复小说引号、统一中文标点时，必须先 read_file 读取目标文件，再调用 normalize_chinese_quotes，禁止手动逐行替换或重写全文。',
     request.instructions,
@@ -3638,7 +3661,7 @@ export async function runAgent(
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
     'insert_lines 位置规则：文件开头使用 placement=file_start，文件结尾使用 placement=file_end；指定现有行之前或之后使用 placement=before_line 或 after_line，并填写 reference_line。禁止使用 0、总行数加一或省略参考行来暗示文件边界。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
-    `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求普通写入逐次确认；读写自动模式允许普通写入自动执行。命令始终逐次确认；创建、复制与删除当前${request.confirmCreateDelete === false ? '允许自动执行' : '必须逐次确认'}。`,
+    `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求写入、创建、复制与命令逐次确认；读写自动模式允许上述普通操作自动执行。删除工具、删除命令及包含删除逻辑的项目脚本始终逐次确认。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
     '文件工具中的路径必须使用工作区相对路径。'
   ]
@@ -4426,11 +4449,18 @@ export async function runAgent(
                 '权限状态：当前会话为只读模式，该工具未向模型开放，写入未执行。请停止尝试写入，仅使用当前可见的读取与检索工具完成分析。'
               toolSucceeded = true
             } else {
-              const needsApproval =
-                (tool.risk === 'write' && permissionMode === 'read-write-manual') ||
-                ((tool.risk === 'create' || tool.risk === 'delete') &&
-                  request.confirmCreateDelete !== false) ||
+              const commandDeletes =
                 tool.risk === 'command'
+                  ? await commandOrScriptDeletesWorkspace(
+                      request.workspaceRoot,
+                      text(call.arguments.command)
+                    )
+                  : false
+              const needsApproval = shouldRequestToolApproval(
+                tool.risk,
+                permissionMode,
+                commandDeletes
+              )
               preview = tool.preview ? await tool.preview(call.arguments) : undefined
               if (needsApproval) {
                 const approvalRisk = tool.risk as 'write' | 'create' | 'delete' | 'command'

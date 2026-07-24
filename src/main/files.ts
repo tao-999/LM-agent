@@ -221,6 +221,82 @@ export async function moveWorkspaceEntry(
   return target
 }
 
+async function resolveWorkspaceTransfer(
+  sourceRoot: string,
+  sourcePath: string,
+  targetRoot: string,
+  targetDirectory: string
+): Promise<{ source: string; target: string }> {
+  const source = await resolveSecurelyInWorkspace(sourceRoot, sourcePath)
+  const directory = await resolveSecurelyInWorkspace(targetRoot, targetDirectory)
+  const directoryStat = await fs.stat(directory)
+  if (!directoryStat.isDirectory()) throw new Error('粘贴或拖拽目标必须是文件夹')
+  const sourceStat = await fs.stat(source)
+  const target = await resolveSecurelyInWorkspace(
+    targetRoot,
+    path.join(directory, path.basename(source)),
+    true
+  )
+  const sourceToDirectory = path.relative(source, directory)
+  if (
+    sourceStat.isDirectory() &&
+    (sourceToDirectory === '' ||
+      (!sourceToDirectory.startsWith('..') && !path.isAbsolute(sourceToDirectory)))
+  ) {
+    throw new Error('不能把文件夹移动或复制到自身内部')
+  }
+  if (path.resolve(source) === path.resolve(target)) {
+    throw new Error('来源与目标位置相同')
+  }
+  try {
+    await fs.access(target)
+    throw new Error(`目标目录已存在“${path.basename(source)}”`)
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('目标目录已存在')) throw error
+  }
+  return { source, target }
+}
+
+export async function copyWorkspaceEntryToDirectory(
+  sourceRoot: string,
+  sourcePath: string,
+  targetRoot: string,
+  targetDirectory: string
+): Promise<string> {
+  const { source, target } = await resolveWorkspaceTransfer(
+    sourceRoot,
+    sourcePath,
+    targetRoot,
+    targetDirectory
+  )
+  await fs.cp(source, target, { recursive: true, errorOnExist: true })
+  return target
+}
+
+export async function moveWorkspaceEntryToDirectory(
+  sourceRoot: string,
+  sourcePath: string,
+  targetRoot: string,
+  targetDirectory: string
+): Promise<string> {
+  const { source, target } = await resolveWorkspaceTransfer(
+    sourceRoot,
+    sourcePath,
+    targetRoot,
+    targetDirectory
+  )
+  try {
+    await fs.rename(source, target)
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EXDEV')) {
+      throw error
+    }
+    await fs.cp(source, target, { recursive: true, errorOnExist: true })
+    await fs.rm(source, { recursive: true })
+  }
+  return target
+}
+
 export async function workspaceEntryInfo(
   root: string,
   targetPath: string
