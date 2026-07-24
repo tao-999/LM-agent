@@ -9,6 +9,7 @@ import {
   useRef,
   useState
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AtSign,
   Bot,
@@ -1567,6 +1568,7 @@ export function ChatPanel(): React.JSX.Element {
   const [actionNotice, setActionNotice] = useState('')
   const [showSessions, setShowSessions] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  const [skillMenuPosition, setSkillMenuPosition] = useState<{ left: number; top: number } | null>(null)
   const [expandedUserMessageIds, setExpandedUserMessageIds] = useState<Set<string>>(
     () => new Set()
   )
@@ -1592,6 +1594,7 @@ export function ChatPanel(): React.JSX.Element {
   const scrollRegionRef = useRef<HTMLDivElement>(null)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const comfyScanStartedRef = useRef(false)
+  const skillButtonRef = useRef<HTMLButtonElement>(null)
 
   const conversation =
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
@@ -2813,41 +2816,25 @@ export function ChatPanel(): React.JSX.Element {
               </button>
               <div className="composer-skill-picker">
                 <button
+                  ref={skillButtonRef}
                   className={`composer-tool ${(conversation?.skillIds?.length ?? 0) > 0 ? 'active' : ''}`}
-                  onClick={() => setShowSkills((value) => !value)}
+                  onClick={() => {
+                    if (showSkills) {
+                      setShowSkills(false)
+                      setSkillMenuPosition(null)
+                    } else {
+                      const rect = skillButtonRef.current?.getBoundingClientRect()
+                      if (rect) {
+                        setSkillMenuPosition({ left: rect.left, top: rect.top })
+                      }
+                      setShowSkills(true)
+                    }
+                  }}
                   title="选择当前会话使用的 Skill"
                 >
                   <Sparkles size={14} />
                   Skill{conversation?.skillIds?.length ? ` · ${conversation.skillIds.length}` : ''}
                 </button>
-                {showSkills && (
-                  <div className="composer-skill-menu">
-                    <strong>当前会话 Skill</strong>
-                    {skills.length ? skills.map((skill) => {
-                      const selected = conversation?.skillIds?.includes(skill.id) ?? false
-                      return (
-                        <button
-                          type="button"
-                          className={selected ? 'selected' : ''}
-                          key={skill.id}
-                          onClick={() => {
-                            if (!conversation) return
-                            const current = conversation.skillIds ?? []
-                            setConversationSkillIds(
-                              conversation.id,
-                              selected
-                                ? current.filter((id) => id !== skill.id)
-                                : [...current, skill.id]
-                            )
-                          }}
-                        >
-                          <span>{skill.name}</span>
-                          {selected && <Check size={13} />}
-                        </button>
-                      )
-                    }) : <small>请先在设置中添加 Skill</small>}
-                  </div>
-                )}
               </div>
             </>
           ) : (
@@ -3463,8 +3450,53 @@ export function ChatPanel(): React.JSX.Element {
           </button>
         </div>
       )}
+      {showSkills && skillMenuPosition && createPortal(
+        <div
+          className="composer-skill-menu"
+          style={{ left: skillMenuPosition.left, top: skillMenuPosition.top - 6 }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <strong>当前会话 Skill</strong>
+          {skills.length ? skills.map((skill) => {
+            const selected = conversation?.skillIds?.includes(skill.id) ?? false
+            return (
+              <button
+                type="button"
+                className={selected ? 'selected' : ''}
+                key={skill.id}
+                onClick={() => {
+                  if (!conversation) return
+                  const current = conversation.skillIds ?? []
+                  setConversationSkillIds(
+                    conversation.id,
+                    selected
+                      ? current.filter((id) => id !== skill.id)
+                      : [...current, skill.id]
+                  )
+                }}
+              >
+                <span>{skill.name}</span>
+                {selected && <Check size={13} />}
+              </button>
+            )
+          }) : <small>请先在设置中添加 Skill</small>}
+        </div>,
+        document.body
+      )}
     </section>
   )
+
+  // Close skill menu when clicking outside
+  useEffect(() => {
+    if (!showSkills) return
+    const handleClick = () => {
+      setShowSkills(false)
+      setSkillMenuPosition(null)
+    }
+    document.addEventListener('pointerdown', handleClick, true)
+    return () => document.removeEventListener('pointerdown', handleClick, true)
+  }, [showSkills])
+
 }
 
 function FileTextIcon(): React.JSX.Element {
