@@ -3453,7 +3453,7 @@ export function ChatPanel(): React.JSX.Element {
       {showSkills && skillMenuPosition && createPortal(
         <div
           className="composer-skill-menu"
-          style={{ left: skillMenuPosition.left, top: skillMenuPosition.top - 6 }}
+          style={{ left: skillMenuPosition.left, bottom: window.innerHeight - skillMenuPosition.top + 8 }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           <strong>当前会话 Skill</strong>
