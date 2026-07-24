@@ -1907,7 +1907,7 @@ textarea::placeholder {
 
 .composer-skill-menu {
   position: absolute;
-  z-index: 260;
+  z-index: 501;
   left: 0;
   bottom: calc(100% + 7px);
   display: grid;
