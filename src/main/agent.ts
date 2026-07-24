@@ -36,6 +36,11 @@ import {
   type ToolDefinition
 } from './models'
 import { WorkflowCycleGuard } from './workflow-cycle-guard'
+import {
+  toolAvailableInStage,
+  workflowToolChoice,
+  type AgentWorkflowStage
+} from './agent-workflow'
 
 const execAsync = promisify(exec)
 
@@ -2056,7 +2061,7 @@ export async function runAgent(
   const tools = new Map<string, RegisteredTool>()
   const permissionMode = request.permissionMode || 'read-write-manual'
   let activeTasks: AgentTask[] = []
-  const workflow: { stage: 'understand' | 'tasks' | 'execute' } = { stage: 'understand' }
+  const workflow: { stage: AgentWorkflowStage } = { stage: 'understand' }
   const workflowCycleGuard = new WorkflowCycleGuard()
   let progressRevision = 0
   const taskStateSignature = (): string =>
@@ -2120,8 +2125,8 @@ export async function runAgent(
     : '用户未指定网页来源时，才执行多网站交叉核验。'
   const modelToolScopeInstruction =
     permissionMode === 'read-only'
-      ? '当前为只读模式：模型仅可见读取、检索、网页查询与任务清单工具；编辑、创建、复制、移动、删除及命令工具不会发送给模型，禁止尝试调用。'
-      : '当前权限允许的全部工具从首轮起均已开放；工作流只提供操作建议，不限制工具选择。'
+      ? '进入执行阶段后仅开放读取、检索、网页查询与任务清单工具；编辑、创建、复制、移动、删除及命令工具不会发送给模型。'
+      : '理解阶段不开放工具，任务清单阶段只开放 update_tasks，进入执行阶段后开放当前权限允许的完整工具。'
 
   const recordChanges = (nextChanges: AgentChange[]): void => {
     for (const change of nextChanges) {
@@ -3857,6 +3862,7 @@ export async function runAgent(
       .join('、')
   const buildModelToolDefinitions = (): ToolDefinition[] => {
     return [...tools.entries()]
+      .filter(([name]) => toolAvailableInStage(workflow.stage, name))
       .filter(([, tool]) => permissionMode !== 'read-only' || tool.risk === 'read')
       .sort(
         ([leftName], [rightName]) =>
@@ -3875,9 +3881,12 @@ export async function runAgent(
     if (workflow.stage === 'understand') forceToolNext = false
     if (workflow.stage === 'tasks') forceToolNext = true
 
-    const toolChoice = workflow.stage === 'understand' ? 'auto' : forceToolNext ? 'required' : 'auto'
+    const toolChoice = workflowToolChoice(workflow.stage, forceToolNext)
     forceToolNext = false
-    const editToolsNeedRead = permissionMode !== 'read-only' && readFilePaths.size === 0
+    const editToolsNeedRead =
+      workflow.stage === 'execute' &&
+      permissionMode !== 'read-only' &&
+      readFilePaths.size === 0
     const runtimeSystemMessages: LlmMessage[] = [
       ...(activeTasks.length
         ? [
@@ -3918,7 +3927,7 @@ export async function runAgent(
           : replaceFailureGuidance
             ? [{ role: 'system' as const, content: replaceFailureGuidance }]
             : []),
-      ...(knowledgeResearchStage !== 'complete'
+      ...(workflow.stage === 'execute' && knowledgeResearchStage !== 'complete'
         ? [
             {
               role: 'system' as const,
@@ -3938,7 +3947,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                `当前状态：尚未建立任务清单。请先理解本轮 current_task 的目标、约束、已知信息与完成标准；理解充分时，首次正式操作应调用 update_tasks 建立可见清单。${modelToolScopeInstruction} 只有理解目标确实缺少必要事实时才先检索或读取；tasks 建立前不得执行文件写入。`
+                '当前阶段仅用于理解本轮 current_task。请用简体中文归纳目标、约束、已知信息与可验证完成标准；本阶段没有工具调用，也不得输出最终答复。完成理解后，程序会切换到任务清单阶段。'
             }
           ]
         : workflow.stage === 'tasks'
@@ -3946,7 +3955,7 @@ export async function runAgent(
               {
                 role: 'system' as const,
                 content:
-                  `当前建议依据已经形成的任务理解调用 update_tasks 建立清单。清单内容、粒度、顺序与状态由你依据当前任务自主决定，不套用固定模板。${modelToolScopeInstruction} 若仍需补充检索、读取或核验，可自主调用，但完成 Agent 任务前必须建立 tasks。`
+                  '当前阶段只开放 update_tasks。请依据已经形成的任务理解建立可见清单；清单内容、粒度、顺序与初始状态由你根据当前目标自主决定。任务清单建立后，程序才会进入执行阶段并开放完整工具。'
               }
             ]
           : [])
@@ -4190,7 +4199,8 @@ export async function runAgent(
       })
       messages.push({
         role: 'user',
-        content: `<runtime_workflow_stage>任务理解已完成。现在依据上一条任务理解优先调用 update_tasks 制定精简任务清单；${modelToolScopeInstruction}确需补充事实时可自主调用。</runtime_workflow_stage>`
+        content:
+          '<runtime_workflow_stage>任务理解已完成。当前阶段只开放 update_tasks；请依据上一条任务理解建立任务清单。</runtime_workflow_stage>'
       })
       workflow.stage = 'tasks'
       forceToolNext = true
