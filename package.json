@@ -1,6 +1,6 @@
 {
   "name": "local-agent-studio",
-  "version": "0.7.123",
+  "version": "0.7.125",
   "private": true,
   "description": "星伴 AI｜你的本地 AI 伙伴",
   "main": "out/main/index.js",
@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "icon:build": "node scripts/build-icon.cjs",
-    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts tests/workflow-cycle-guard.test.ts tests/agent-workflow.test.ts tests/viewport-menu.test.ts tests/workspace-transfer.test.ts",
+    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts tests/workflow-cycle-guard.test.ts tests/agent-workflow.test.ts tests/viewport-menu.test.ts tests/workspace-transfer.test.ts tests/file-encoding.test.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "dist": "npm run icon:build && npm run build && electron-builder --win",
@@ -18,6 +18,7 @@
     "@monaco-editor/react": "^4.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "iconv-lite": "^0.7.2",
     "lucide-react": "^0.468.0",
     "katex": "^0.17.0",
     "react": "^19.2.0",

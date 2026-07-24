@@ -41,7 +41,7 @@ import {
 } from '../editorThemes'
 import { markdownKatexOptions, normalizeMarkdownMath } from '../markdown'
 import { useAppStore } from '../store'
-import type { AgentChange } from '../../../shared/types'
+import type { AgentChange, FileEncoding } from '../../../shared/types'
 import { MacSelect } from './MacSelect'
 
 type EditorViewState = ReturnType<Parameters<OnMount>[0]['saveViewState']>
@@ -92,6 +92,20 @@ type MonacoLineChange = {
   originalEndLineNumber: number
   modifiedStartLineNumber: number
   modifiedEndLineNumber: number
+}
+
+const fileEncodingOptions: Array<{ value: FileEncoding; label: string }> = [
+  { value: 'utf8', label: 'UTF-8' },
+  { value: 'utf8bom', label: 'UTF-8 with BOM' },
+  { value: 'gbk', label: 'GBK' },
+  { value: 'gb18030', label: 'GB18030' },
+  { value: 'big5', label: 'Big5' },
+  { value: 'utf16le', label: 'UTF-16 LE' },
+  { value: 'utf16be', label: 'UTF-16 BE' }
+]
+
+function fileEncodingLabel(encoding: FileEncoding): string {
+  return fileEncodingOptions.find((option) => option.value === encoding)?.label ?? encoding
 }
 
 function bindInlineDiffAction(button: HTMLButtonElement, action: () => void): void {
@@ -611,6 +625,45 @@ function TerminalPanel({
       lineBuffer = value
       terminal.write(lineBuffer)
     }
+    const insertInput = (value: string): void => {
+      const normalized = value.replace(/\r?\n/g, ' ')
+      if (!normalized) return
+      lineBuffer += normalized
+      terminal.write(normalized)
+    }
+    const copySelection = async (): Promise<boolean> => {
+      const selected = terminal.getSelection()
+      if (!selected) return false
+      await navigator.clipboard.writeText(selected)
+      return true
+    }
+    const pasteClipboard = async (): Promise<void> => {
+      insertInput(await navigator.clipboard.readText())
+      terminal.focus()
+    }
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true
+      const modifier = event.ctrlKey || event.metaKey
+      if (modifier && event.shiftKey && event.code === 'KeyC') {
+        void copySelection()
+        return false
+      }
+      if (modifier && event.shiftKey && event.code === 'KeyV') {
+        void pasteClipboard()
+        return false
+      }
+      if (modifier && !event.shiftKey && event.code === 'KeyC' && terminal.hasSelection()) {
+        void copySelection()
+        return false
+      }
+      return true
+    })
+    const handleContextMenu = (event: MouseEvent): void => {
+      event.preventDefault()
+      if (terminal.hasSelection()) void copySelection()
+      else void pasteClipboard()
+    }
+    containerRef.current.addEventListener('contextmenu', handleContextMenu)
     const input = terminal.onData((data) => {
       if (data === '\r') {
         terminal.write('\r\n')
@@ -641,6 +694,11 @@ function TerminalPanel({
         terminal.clear()
         return
       }
+      if (data === '\u0003') {
+        lineBuffer = ''
+        void window.localAgent.terminal.write(id, data)
+        return
+      }
       if (/^[\x20-\x7E\u0080-\uFFFF]+$/.test(data)) {
         lineBuffer += data
         terminal.write(data)
@@ -669,6 +727,7 @@ function TerminalPanel({
 
     return () => {
       resizeObserver.disconnect()
+      containerRef.current?.removeEventListener('contextmenu', handleContextMenu)
       input.dispose()
       removeEvent()
       void window.localAgent.terminal.close(id)
@@ -713,6 +772,7 @@ export function FileWorkspace(): React.JSX.Element {
   const closeAllFiles = useAppStore((state) => state.closeAllFiles)
   const reorderOpenFile = useAppStore((state) => state.reorderOpenFile)
   const updateFileContent = useAppStore((state) => state.updateFileContent)
+  const setFileEncoding = useAppStore((state) => state.setFileEncoding)
   const markFileSaved = useAppStore((state) => state.markFileSaved)
   const agentApproval = useAppStore((state) => state.agentApproval)
   const setAgentApproval = useAppStore((state) => state.setAgentApproval)
@@ -822,7 +882,8 @@ export function FileWorkspace(): React.JSX.Element {
       path: reviewChange.path,
       name: reviewChange.path.split(/[\\/]/).pop() ?? reviewChange.path,
       content,
-      savedContent: content
+      savedContent: content,
+      encoding: 'utf8'
     })
   }, [reviewChange?.path, reviewingApproval])
 
@@ -844,7 +905,8 @@ export function FileWorkspace(): React.JSX.Element {
     if (!fileRoot) return
     await window.localAgent.files.write(fileRoot, activeFile.path, activeFile.content, {
       source: 'user',
-      revision: userEditRevisions.current.get(activeFile.path) ?? 0
+      revision: userEditRevisions.current.get(activeFile.path) ?? 0,
+      encoding: activeFile.encoding
     })
     markFileSaved(activeFile.path)
     setSaveState('已保存')
@@ -870,7 +932,10 @@ export function FileWorkspace(): React.JSX.Element {
       try {
         await window.localAgent.files.write(fileRoot, filePath, content, {
           source: 'user',
-          revision
+          revision,
+          encoding:
+            useAppStore.getState().openFiles.find((file) => file.path === filePath)?.encoding ??
+            'utf8'
         })
         const current = useAppStore.getState().openFiles.find((file) => file.path === filePath)
         if (current?.content === content) markFileSaved(filePath)
@@ -914,6 +979,47 @@ export function FileWorkspace(): React.JSX.Element {
       )
     } finally {
       setRunningFile(false)
+    }
+  }
+
+  const reopenWithEncoding = async (encoding: FileEncoding): Promise<void> => {
+    if (!activeFile || activeFile.encoding === encoding) return
+    if (dirty) {
+      const accepted = window.confirm(
+        `切换编码会按 ${fileEncodingLabel(encoding)} 重新读取磁盘文件，当前未保存改动将被放弃。是否继续？`
+      )
+      if (!accepted) return
+    }
+    const fileRoot = [...workspaceRoots]
+      .sort((left, right) => right.length - left.length)
+      .find(
+        (item) =>
+          activeFile.path === item ||
+          activeFile.path.startsWith(`${item}\\`) ||
+          activeFile.path.startsWith(`${item}/`)
+      )
+    if (!fileRoot) return
+    const pendingTimer = autoSaveTimers.current.get(activeFile.path)
+    if (pendingTimer) window.clearTimeout(pendingTimer)
+    autoSaveTimers.current.delete(activeFile.path)
+    setSaveState(`正在用 ${fileEncodingLabel(encoding)} 重新打开`)
+    try {
+      const result = await window.localAgent.files.readDetailed(
+        fileRoot,
+        activeFile.path,
+        encoding
+      )
+      openFile({
+        ...activeFile,
+        content: result.content,
+        savedContent: result.content,
+        encoding: result.encoding
+      })
+      setFileEncoding(activeFile.path, result.encoding)
+      setSaveState(`当前编码：${fileEncodingLabel(result.encoding)}`)
+      window.setTimeout(() => setSaveState(''), 1600)
+    } catch (error) {
+      setSaveState(`编码切换失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -1023,6 +1129,17 @@ export function FileWorkspace(): React.JSX.Element {
         </div>
         <div className="toolbar-actions">
           {saveState && <span className="save-state">{saveState}</span>}
+          {activeFile && !isImage && (
+            <div className="editor-encoding-picker" title="按所选编码重新打开文件">
+              <MacSelect
+                value={activeFile.encoding}
+                menuMinWidth={190}
+                onChange={(value) => void reopenWithEncoding(value as FileEncoding)}
+                ariaLabel="文件编码"
+                groups={[{ options: fileEncodingOptions }]}
+              />
+            </div>
+          )}
           {activeFile && !isImage && (
             <div className="editor-theme-picker" title="切换编辑器主题">
               <Palette size={14} />

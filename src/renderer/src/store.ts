@@ -11,6 +11,7 @@ import type {
   ContextCompressionMemory,
   ConversationMode,
   FileNode,
+  FileEncoding,
   ModelConfig,
   PersistedConversation,
   SkillDefinition,
@@ -62,6 +63,7 @@ export type OpenFile = {
   name: string
   content: string
   savedContent: string
+  encoding: FileEncoding
   revealLine?: number
 }
 
@@ -133,6 +135,7 @@ type AppStore = {
   setEditorSelection: (selection: EditorSelection | null) => void
   setEditorTheme: (theme: EditorTheme) => void
   updateFileContent: (path: string, content: string) => void
+  setFileEncoding: (path: string, encoding: FileEncoding) => void
   markFileSaved: (path: string) => void
   renameOpenPath: (sourcePath: string, targetPath: string) => void
   removeOpenPath: (targetPath: string) => void
@@ -155,6 +158,7 @@ type AppStore = {
   updateComfyWorkflow: (id: string, patch: Partial<ComfyWorkflow>) => void
   createConversation: () => string
   setConversationMode: (id: string, mode: ConversationMode) => void
+  setConversationSkillIds: (id: string, skillIds: string[]) => void
   setConversationThinkingMode: (id: string, modelKey: string, mode: ThinkingMode) => void
   setConversationContextMemory: (id: string, memory: ContextCompressionMemory) => void
   setActiveConversation: (id: string) => void
@@ -177,6 +181,7 @@ const initialConversation: PersistedConversation = {
   title: '新会话',
   mode: 'chat',
   thinkingMode: 'auto',
+  skillIds: [],
   messages: [],
   createdAt: now,
   updatedAt: now
@@ -533,6 +538,12 @@ export const useAppStore = create<AppStore>()(
             file.path === filePath ? { ...file, content } : file
           )
         })),
+      setFileEncoding: (filePath, encoding) =>
+        set((state) => ({
+          openFiles: state.openFiles.map((file) =>
+            file.path === filePath ? { ...file, encoding } : file
+          )
+        })),
       markFileSaved: (filePath) =>
         set((state) => ({
           openFiles: state.openFiles.map((file) =>
@@ -584,7 +595,8 @@ export const useAppStore = create<AppStore>()(
               path: change.path,
               name: change.path.split(/[\\/]/).pop() ?? change.path,
               content: change.after,
-              savedContent: change.after
+              savedContent: change.after,
+              encoding: existingIndex >= 0 ? next[existingIndex].encoding : 'utf8'
             }
             if (existingIndex >= 0) next[existingIndex] = value
             else next.push(value)
@@ -693,6 +705,7 @@ export const useAppStore = create<AppStore>()(
           mode: 'chat',
           model: persistedModel(currentModel),
           thinkingMode: 'auto',
+          skillIds: [],
           messages: [],
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -708,6 +721,14 @@ export const useAppStore = create<AppStore>()(
           conversations: state.conversations.map((conversation) =>
             conversation.id === id
               ? { ...conversation, mode, updatedAt: Date.now() }
+              : conversation
+          )
+        })),
+      setConversationSkillIds: (id, skillIds) =>
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id
+              ? { ...conversation, skillIds: [...new Set(skillIds)], updatedAt: Date.now() }
               : conversation
           )
         })),

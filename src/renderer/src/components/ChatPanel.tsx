@@ -779,6 +779,21 @@ function AgentStepBlock({
           </i>
           <span>{title}</span>
           {block.completedAt && <small>{formatDuration(block.completedAt - block.startedAt)}</small>}
+          {block.toolName === 'run_command' && block.detail && (
+            <button
+              type="button"
+              className="ghost-copy-icon operation-copy"
+              title="复制完整命令与输出"
+              aria-label="复制完整命令与输出"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                void navigator.clipboard.writeText(`${title}\n\n${block.detail}`)
+              }}
+            >
+              <Copy size={13} />
+            </button>
+          )}
           <ChevronDown size={13} />
         </summary>
         {block.detail && <div className="agent-step-detail">{block.detail}</div>}
@@ -1533,6 +1548,7 @@ export function ChatPanel(): React.JSX.Element {
   const updateComfyWorkflow = useAppStore((state) => state.updateComfyWorkflow)
   const createConversation = useAppStore((state) => state.createConversation)
   const setConversationMode = useAppStore((state) => state.setConversationMode)
+  const setConversationSkillIds = useAppStore((state) => state.setConversationSkillIds)
   const setConversationThinkingMode = useAppStore(
     (state) => state.setConversationThinkingMode
   )
@@ -1550,6 +1566,7 @@ export function ChatPanel(): React.JSX.Element {
   const [discovering, setDiscovering] = useState(false)
   const [actionNotice, setActionNotice] = useState('')
   const [showSessions, setShowSessions] = useState(false)
+  const [showSkills, setShowSkills] = useState(false)
   const [expandedUserMessageIds, setExpandedUserMessageIds] = useState<Set<string>>(
     () => new Set()
   )
@@ -2294,6 +2311,10 @@ export function ChatPanel(): React.JSX.Element {
       useAppStore
         .getState()
         .conversations.find((item) => item.id === conversation.id) ?? conversation
+    const selectedSkillIds = new Set(requestConversation.skillIds ?? [])
+    const selectedSkills = skills
+      .filter((skill) => selectedSkillIds.has(skill.id))
+      .map((skill) => ({ ...skill, enabled: true }))
     addMessage(conversation.id, userMessage)
     addMessage(conversation.id, assistantMessage)
     registerPending(requestId, {
@@ -2328,7 +2349,7 @@ export function ChatPanel(): React.JSX.Element {
         objective: modelText,
         workspaceRoot,
         instructions: globalInstructions,
-        skills,
+        skills: selectedSkills,
         attachments: requestAttachments,
         permissionMode: agentPermissionMode,
         contextMessages: contextHistory.recent,
@@ -2339,6 +2360,7 @@ export function ChatPanel(): React.JSX.Element {
         requestId,
         model: requestModel,
         instructions: globalInstructions,
+        skills: selectedSkills,
         attachments: requestAttachments,
         webSearch: webToolsAvailable,
         forceWebSearch,
@@ -2789,6 +2811,44 @@ export function ChatPanel(): React.JSX.Element {
                   ? activeFilePath.split(/[\\/]/).pop()
                   : '当前文件'}
               </button>
+              <div className="composer-skill-picker">
+                <button
+                  className={`composer-tool ${(conversation?.skillIds?.length ?? 0) > 0 ? 'active' : ''}`}
+                  onClick={() => setShowSkills((value) => !value)}
+                  title="选择当前会话使用的 Skill"
+                >
+                  <Sparkles size={14} />
+                  Skill{conversation?.skillIds?.length ? ` · ${conversation.skillIds.length}` : ''}
+                </button>
+                {showSkills && (
+                  <div className="composer-skill-menu">
+                    <strong>当前会话 Skill</strong>
+                    {skills.length ? skills.map((skill) => {
+                      const selected = conversation?.skillIds?.includes(skill.id) ?? false
+                      return (
+                        <button
+                          type="button"
+                          className={selected ? 'selected' : ''}
+                          key={skill.id}
+                          onClick={() => {
+                            if (!conversation) return
+                            const current = conversation.skillIds ?? []
+                            setConversationSkillIds(
+                              conversation.id,
+                              selected
+                                ? current.filter((id) => id !== skill.id)
+                                : [...current, skill.id]
+                            )
+                          }}
+                        >
+                          <span>{skill.name}</span>
+                          {selected && <Check size={13} />}
+                        </button>
+                      )
+                    }) : <small>请先在设置中添加 Skill</small>}
+                  </div>
+                )}
+              </div>
             </>
           ) : (
             <>

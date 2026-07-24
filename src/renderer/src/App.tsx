@@ -509,12 +509,13 @@ export default function App(): React.JSX.Element {
       return
     }
     try {
-      const content = await window.localAgent.files.read(fileRoot, filePath)
+      const result = await window.localAgent.files.readDetailed(fileRoot, filePath)
       state.openFile({
         path: filePath,
         name: filePath.split(/[\\/]/).pop() ?? filePath,
-        content,
-        savedContent: content,
+        content: result.content,
+        savedContent: result.content,
+        encoding: result.encoding,
         revealLine: line
       })
     } catch (error) {
@@ -577,13 +578,17 @@ export default function App(): React.JSX.Element {
       )
       for (const file of cleanOpenFiles) {
         void window.localAgent.files
-          .read(payload.root, file.path)
-          .then((content) => {
+          .readDetailed(payload.root, file.path, file.encoding)
+          .then((result) => {
             const latest = useAppStore.getState()
             const current = latest.openFiles.find((item) => item.path === file.path)
             if (!current || current.content !== current.savedContent) return
-            if (current.content === content && current.savedContent === content) return
-            latest.updateFileContent(file.path, content)
+            if (
+              current.content === result.content &&
+              current.savedContent === result.content
+            ) return
+            latest.updateFileContent(file.path, result.content)
+            latest.setFileEncoding(file.path, result.encoding)
             latest.markFileSaved(file.path)
           })
           .catch(() => undefined)
@@ -1157,7 +1162,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.123</dd></div>
+                <div><dt>版本</dt><dd>0.7.125</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

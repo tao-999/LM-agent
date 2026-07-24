@@ -8,6 +8,7 @@ import type {
   CodeRunRequest,
   CommandEvent,
   CommandRequest,
+  FileEncoding,
   ModelConfig,
   ComfyWorkflow,
   ImageGenerationEvent,
@@ -79,11 +80,13 @@ const api = {
   },
   files: {
     read: (root: string, filePath: string) => ipcRenderer.invoke('files:read', root, filePath),
+    readDetailed: (root: string, filePath: string, encoding?: FileEncoding) =>
+      ipcRenderer.invoke('files:readDetailed', root, filePath, encoding),
     write: (
       root: string,
       filePath: string,
       content: string,
-      metadata?: { source?: 'user'; revision?: number }
+      metadata?: { source?: 'user'; revision?: number; encoding?: FileEncoding }
     ) => ipcRenderer.invoke('files:write', root, filePath, content, metadata),
     search: (root: string, query: string) => ipcRenderer.invoke('files:search', root, query),
     rename: (root: string, filePath: string, nextName: string) =>
@@ -102,27 +105,31 @@ const api = {
       sourceRoot: string,
       sourcePath: string,
       targetRoot: string,
-      targetDirectory: string
+      targetDirectory: string,
+      overwrite = false
     ) =>
       ipcRenderer.invoke(
         'files:copyToDirectory',
         sourceRoot,
         sourcePath,
         targetRoot,
-        targetDirectory
+        targetDirectory,
+        overwrite
       ) as Promise<string>,
     moveToDirectory: (
       sourceRoot: string,
       sourcePath: string,
       targetRoot: string,
-      targetDirectory: string
+      targetDirectory: string,
+      overwrite = false
     ) =>
       ipcRenderer.invoke(
         'files:moveToDirectory',
         sourceRoot,
         sourcePath,
         targetRoot,
-        targetDirectory
+        targetDirectory,
+        overwrite
       ) as Promise<string>,
     reveal: (filePath: string) => ipcRenderer.invoke('files:reveal', filePath),
     openExternal: (filePath: string) => ipcRenderer.invoke('files:openExternal', filePath)

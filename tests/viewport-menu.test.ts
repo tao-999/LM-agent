@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { placeViewportMenu } from '../src/renderer/src/utils/viewport-menu.ts'
+import {
+  placeViewportMenu,
+  placeViewportMenuBesideRect
+} from '../src/renderer/src/utils/viewport-menu.ts'
 
 test('菜单空间充足时从鼠标位置向右下展开', () => {
   assert.deepEqual(
@@ -69,5 +72,37 @@ test('窗口小于菜单时仍将菜单夹紧在安全边距内', () => {
       viewportHeight: 240
     }),
     { left: 8, top: 8, horizontal: 'left', vertical: 'up' }
+  )
+})
+
+test('资源菜单贴着条目右侧展开且不遮挡条目', () => {
+  assert.deepEqual(
+    placeViewportMenuBesideRect({
+      anchorLeft: 20,
+      anchorRight: 300,
+      anchorTop: 100,
+      anchorBottom: 132,
+      menuWidth: 220,
+      menuHeight: 260,
+      viewportWidth: 1000,
+      viewportHeight: 720
+    }),
+    { left: 304, top: 100, horizontal: 'right', vertical: 'down' }
+  )
+})
+
+test('资源菜单靠近右边缘时贴着条目左侧展开', () => {
+  assert.deepEqual(
+    placeViewportMenuBesideRect({
+      anchorLeft: 700,
+      anchorRight: 980,
+      anchorTop: 100,
+      anchorBottom: 132,
+      menuWidth: 220,
+      menuHeight: 260,
+      viewportWidth: 1000,
+      viewportHeight: 720
+    }),
+    { left: 476, top: 100, horizontal: 'left', vertical: 'down' }
   )
 })

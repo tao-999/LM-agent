@@ -139,8 +139,19 @@ function selectedCodeLineRanges(value: string): LineRange[] {
 }
 
 function stringifyResult(value: unknown): string {
-  const output = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-  return output.length > 24000 ? `${output.slice(0, 24000)}\n\n[结果已截断]` : output
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+}
+
+function toolResultForModel(result: string): string {
+  const limit = 24000
+  if (result.length <= limit) return result
+  const headLength = 6000
+  const tailLength = limit - headLength
+  return `${result.slice(0, headLength)}
+
+[模型上下文已压缩；完整工具输出仍保存在当前会话模块]
+
+${result.slice(-tailLength)}`
 }
 
 function assertCommandWithinWorkspace(command: string): void {
@@ -601,6 +612,32 @@ async function systemWebSession(): Promise<Session> {
     })
   }
   return systemWebSessionPromise
+}
+
+async function commandEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const environment = { ...process.env }
+  if (environment.HTTP_PROXY || environment.HTTPS_PROXY || environment.ALL_PROXY) {
+    return environment
+  }
+  try {
+    const webSession = await systemWebSession()
+    const route = await webSession.resolveProxy('https://download.pytorch.org/')
+    const proxy = route
+      .split(';')
+      .map((item) => item.trim())
+      .find((item) => /^(?:PROXY|HTTPS?)\s+/i.test(item))
+    if (!proxy) return environment
+    const address = proxy.replace(/^(?:PROXY|HTTPS?)\s+/i, '').trim()
+    if (!address) return environment
+    const proxyUrl = `http://${address}`
+    environment.HTTP_PROXY = proxyUrl
+    environment.HTTPS_PROXY = proxyUrl
+    environment.http_proxy = proxyUrl
+    environment.https_proxy = proxyUrl
+  } catch {
+    // Commands keep the inherited environment when proxy resolution is unavailable.
+  }
+  return environment
 }
 
 async function fetchPublicPage(value: string, signal: AbortSignal): Promise<Response> {
@@ -1624,8 +1661,7 @@ function webInfrastructureFailed(result: string): boolean {
 }
 
 function toolResultPreview(result: string): string {
-  const limit = webToolFailed(result) ? 6000 : 2000
-  return result.length > limit ? `${result.slice(0, limit)}\n\n[结果已截断]` : result
+  return result
 }
 
 function hostRuntimeContext(currentTime: string): string {
@@ -3512,13 +3548,32 @@ export async function runAgent(
     execute: async (args) => {
       const command = text(args.command)
       assertCommandWithinWorkspace(command)
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: request.workspaceRoot,
-        timeout: 120000,
-        maxBuffer: 4 * 1024 * 1024,
-        windowsHide: true
-      })
-      return stringifyResult({ stdout, stderr })
+      try {
+        const { stdout, stderr } = await execAsync(command, {
+          cwd: request.workspaceRoot,
+          timeout: 120000,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+          env: await commandEnvironment()
+        })
+        return stringifyResult({ exitCode: 0, stdout, stderr })
+      } catch (error) {
+        const commandError = error as Error & {
+          code?: number | string
+          killed?: boolean
+          signal?: string
+          stdout?: string
+          stderr?: string
+        }
+        return stringifyResult({
+          exitCode: commandError.code ?? -1,
+          killed: Boolean(commandError.killed),
+          signal: commandError.signal ?? null,
+          error: commandError.message,
+          stdout: commandError.stdout ?? '',
+          stderr: commandError.stderr ?? ''
+        })
+      }
     }
   })
 
@@ -4524,11 +4579,11 @@ export async function runAgent(
           agentHistorySearchExhausted = true
         }
       }
-      if (result.startsWith('工具执行失败：')) {
+      if (result.startsWith('工具执行失败：') && call.name !== 'run_command') {
         consecutiveToolFailures += 1
         recentToolFailures.push(`${call.name}：${result.slice('工具执行失败：'.length)}`)
         if (recentToolFailures.length > 3) recentToolFailures.shift()
-      } else if (toolSucceeded) {
+      } else if (toolSucceeded && call.name !== 'run_command') {
         consecutiveToolFailures = 0
         recentToolFailures.length = 0
         invalidToolArgumentRetries = 0
@@ -4680,7 +4735,7 @@ export async function runAgent(
       }
       messages.push({
         role: 'tool',
-        content: result,
+        content: toolResultForModel(result),
         tool_call_id: call.id
       })
       if (historyReturnedNoEvidence || duplicateHistorySearchBlocked) {

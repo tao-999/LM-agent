@@ -1,6 +1,12 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { FileNode, SearchResult } from '../shared/types'
+import iconv from 'iconv-lite'
+import type {
+  FileEncoding,
+  FileNode,
+  SearchResult,
+  TextFileReadResult
+} from '../shared/types'
 
 const ignoredNames = new Set([
   '.git',
@@ -96,18 +102,104 @@ export async function buildFileTree(root: string, maxDepth = 7): Promise<FileNod
   return walk(path.resolve(root), 0)
 }
 
-export async function readTextFile(root: string, filePath: string): Promise<string> {
+function hasUtf8Bom(buffer: Buffer): boolean {
+  return buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+}
+
+function hasUtf16LeBom(buffer: Buffer): boolean {
+  return buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe
+}
+
+function hasUtf16BeBom(buffer: Buffer): boolean {
+  return buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff
+}
+
+function looksLikeUtf16(buffer: Buffer): FileEncoding | null {
+  const sampleLength = Math.min(buffer.length, 4096)
+  if (sampleLength < 4) return null
+  let evenZeros = 0
+  let oddZeros = 0
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (buffer[index] !== 0) continue
+    if (index % 2 === 0) evenZeros += 1
+    else oddZeros += 1
+  }
+  const pairs = Math.floor(sampleLength / 2)
+  if (oddZeros / pairs > 0.25 && evenZeros / pairs < 0.08) return 'utf16le'
+  if (evenZeros / pairs > 0.25 && oddZeros / pairs < 0.08) return 'utf16be'
+  return null
+}
+
+function isValidUtf8(buffer: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function detectTextEncoding(buffer: Buffer): FileEncoding {
+  if (hasUtf8Bom(buffer)) return 'utf8bom'
+  if (hasUtf16LeBom(buffer)) return 'utf16le'
+  if (hasUtf16BeBom(buffer)) return 'utf16be'
+  const utf16 = looksLikeUtf16(buffer)
+  if (utf16) return utf16
+  if (isValidUtf8(buffer)) return 'utf8'
+  // GB18030 is a strict superset of GBK and is the safest automatic fallback
+  // for legacy Simplified Chinese text. Users can manually reopen as Big5.
+  return 'gb18030'
+}
+
+function decodeText(buffer: Buffer, encoding: FileEncoding): string {
+  if (encoding === 'utf8bom') return iconv.decode(buffer, 'utf8')
+  return iconv.decode(buffer, encoding)
+}
+
+function encodeText(content: string, encoding: FileEncoding): Buffer {
+  if (encoding === 'utf8bom') return iconv.encode(content, 'utf8', { addBOM: true })
+  return iconv.encode(content, encoding)
+}
+
+export async function readTextFileDetailed(
+  root: string,
+  filePath: string,
+  requestedEncoding?: FileEncoding
+): Promise<TextFileReadResult> {
   const absolute = await resolveSecurelyInWorkspace(root, filePath)
   const stat = await fs.stat(absolute)
   if (stat.size > 8 * 1024 * 1024) throw new Error('文件超过 8MB，请使用外部程序打开')
-  return fs.readFile(absolute, 'utf8')
+  const buffer = await fs.readFile(absolute)
+  const encoding = requestedEncoding ?? detectTextEncoding(buffer)
+  return {
+    content: decodeText(buffer, encoding),
+    encoding
+  }
 }
 
-export async function writeTextFile(root: string, filePath: string, content: string): Promise<void> {
+export async function readTextFile(root: string, filePath: string): Promise<string> {
+  return (await readTextFileDetailed(root, filePath)).content
+}
+
+export async function writeTextFile(
+  root: string,
+  filePath: string,
+  content: string,
+  requestedEncoding?: FileEncoding
+): Promise<void> {
   const absolute = await resolveSecurelyInWorkspace(root, filePath, true)
   await fs.mkdir(path.dirname(absolute), { recursive: true })
+  let encoding = requestedEncoding
+  if (!encoding) {
+    try {
+      encoding = detectTextEncoding(await fs.readFile(absolute))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      encoding = 'utf8'
+    }
+  }
   const temporary = `${absolute}.local-agent-${Date.now()}.tmp`
-  await fs.writeFile(temporary, content, 'utf8')
+  await fs.writeFile(temporary, encodeText(content, encoding))
   await fs.rename(temporary, absolute)
 }
 
@@ -225,8 +317,9 @@ async function resolveWorkspaceTransfer(
   sourceRoot: string,
   sourcePath: string,
   targetRoot: string,
-  targetDirectory: string
-): Promise<{ source: string; target: string }> {
+  targetDirectory: string,
+  overwrite = false
+): Promise<{ source: string; target: string; targetExists: boolean }> {
   const source = await resolveSecurelyInWorkspace(sourceRoot, sourcePath)
   const directory = await resolveSecurelyInWorkspace(targetRoot, targetDirectory)
   const directoryStat = await fs.stat(directory)
@@ -248,28 +341,35 @@ async function resolveWorkspaceTransfer(
   if (path.resolve(source) === path.resolve(target)) {
     throw new Error('来源与目标位置相同')
   }
+  let targetExists = false
   try {
     await fs.access(target)
-    throw new Error(`目标目录已存在“${path.basename(source)}”`)
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('目标目录已存在')) throw error
+    targetExists = true
+  } catch {
+    targetExists = false
   }
-  return { source, target }
+  if (targetExists && !overwrite) {
+    throw new Error(`目标目录已存在“${path.basename(source)}”`)
+  }
+  return { source, target, targetExists }
 }
 
 export async function copyWorkspaceEntryToDirectory(
   sourceRoot: string,
   sourcePath: string,
   targetRoot: string,
-  targetDirectory: string
+  targetDirectory: string,
+  overwrite = false
 ): Promise<string> {
-  const { source, target } = await resolveWorkspaceTransfer(
+  const { source, target, targetExists } = await resolveWorkspaceTransfer(
     sourceRoot,
     sourcePath,
     targetRoot,
-    targetDirectory
+    targetDirectory,
+    overwrite
   )
-  await fs.cp(source, target, { recursive: true, errorOnExist: true })
+  if (targetExists) await fs.rm(target, { recursive: true, force: false })
+  await fs.cp(source, target, { recursive: true, errorOnExist: true, force: false })
   return target
 }
 
@@ -277,21 +377,24 @@ export async function moveWorkspaceEntryToDirectory(
   sourceRoot: string,
   sourcePath: string,
   targetRoot: string,
-  targetDirectory: string
+  targetDirectory: string,
+  overwrite = false
 ): Promise<string> {
-  const { source, target } = await resolveWorkspaceTransfer(
+  const { source, target, targetExists } = await resolveWorkspaceTransfer(
     sourceRoot,
     sourcePath,
     targetRoot,
-    targetDirectory
+    targetDirectory,
+    overwrite
   )
+  if (targetExists) await fs.rm(target, { recursive: true, force: false })
   try {
     await fs.rename(source, target)
   } catch (error) {
     if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EXDEV')) {
       throw error
     }
-    await fs.cp(source, target, { recursive: true, errorOnExist: true })
+    await fs.cp(source, target, { recursive: true, errorOnExist: true, force: false })
     await fs.rm(source, { recursive: true })
   }
   return target
@@ -338,7 +441,8 @@ export async function searchWorkspace(
     if (stat.size > 8 * 1024 * 1024) return
     let content: string
     try {
-      content = await fs.readFile(fullPath, 'utf8')
+      const buffer = await fs.readFile(fullPath)
+      content = decodeText(buffer, detectTextEncoding(buffer))
     } catch {
       return
     }

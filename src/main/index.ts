@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, session, shell } from 'electron'
 import {
   spawn,
   type ChildProcess,
@@ -16,6 +16,7 @@ import {
   duplicateWorkspaceEntry,
   moveWorkspaceEntryToDirectory,
   readTextFile,
+  readTextFileDetailed,
   renameWorkspaceEntry,
   renameWorkspaceRoot,
   searchWorkspace,
@@ -57,6 +58,7 @@ import type {
   CommandRequest,
   ComfyWorkflow,
   ImageGenerationRequest,
+  FileEncoding,
   ModelConfig,
   TokenUsage,
   TerminalCreateRequest
@@ -83,6 +85,31 @@ let lastRequestedModel: ModelConfig | null = null
 const imageQueue: ImageGenerationRequest[] = []
 let activeImageRequest: ImageGenerationRequest | null = null
 let imageQueueProcessing = false
+
+async function shellEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const environment = { ...process.env }
+  if (environment.HTTP_PROXY || environment.HTTPS_PROXY || environment.ALL_PROXY) {
+    return environment
+  }
+  try {
+    const route = await session.defaultSession.resolveProxy('https://download.pytorch.org/')
+    const proxy = route
+      .split(';')
+      .map((item) => item.trim())
+      .find((item) => /^(?:PROXY|HTTPS?)\s+/i.test(item))
+    if (!proxy) return environment
+    const address = proxy.replace(/^(?:PROXY|HTTPS?)\s+/i, '').trim()
+    if (!address) return environment
+    const proxyUrl = `http://${address}`
+    environment.HTTP_PROXY = proxyUrl
+    environment.HTTPS_PROXY = proxyUrl
+    environment.http_proxy = proxyUrl
+    environment.https_proxy = proxyUrl
+  } catch {
+    // Keep the inherited environment when the system proxy cannot be resolved.
+  }
+  return environment
+}
 
 type SecureCredentials = {
   kimiCodeApiKey?: string
@@ -688,15 +715,20 @@ function registerIpc(): void {
     readTextFile(root, filePath)
   )
   ipcMain.handle(
+    'files:readDetailed',
+    async (_event, root: string, filePath: string, encoding?: FileEncoding) =>
+      readTextFileDetailed(root, filePath, encoding)
+  )
+  ipcMain.handle(
     'files:write',
     async (
       _event,
       root: string,
       filePath: string,
       content: string,
-      metadata?: { source?: 'user'; revision?: number }
+      metadata?: { source?: 'user'; revision?: number; encoding?: FileEncoding }
     ) => {
-      await writeTextFile(root, filePath, content)
+      await writeTextFile(root, filePath, content, metadata?.encoding)
       if (
         metadata?.source === 'user' &&
         Number.isSafeInteger(metadata.revision) &&
@@ -739,8 +771,9 @@ function registerIpc(): void {
       sourceRoot: string,
       sourcePath: string,
       targetRoot: string,
-      targetDirectory: string
-    ) => copyWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory)
+      targetDirectory: string,
+      overwrite = false
+    ) => copyWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory, overwrite)
   )
   ipcMain.handle(
     'files:moveToDirectory',
@@ -749,8 +782,9 @@ function registerIpc(): void {
       sourceRoot: string,
       sourcePath: string,
       targetRoot: string,
-      targetDirectory: string
-    ) => moveWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory)
+      targetDirectory: string,
+      overwrite = false
+    ) => moveWorkspaceEntryToDirectory(sourceRoot, sourcePath, targetRoot, targetDirectory, overwrite)
   )
   ipcMain.handle('files:reveal', (_event, filePath: string) => {
     shell.showItemInFolder(filePath)
@@ -859,8 +893,14 @@ function registerIpc(): void {
     const controller = new AbortController()
     chatControllers.set(request.requestId, controller)
     const messages: LlmMessage[] = []
-    if (request.instructions.trim()) {
-      messages.push({ role: 'system', content: request.instructions })
+    const selectedSkillInstructions = request.skills
+      .map((skill) => `Skill：${skill.name}\n${skill.description}\n${skill.instructions}`)
+      .join('\n\n')
+    const chatInstructions = [request.instructions.trim(), selectedSkillInstructions]
+      .filter(Boolean)
+      .join('\n\n')
+    if (chatInstructions) {
+      messages.push({ role: 'system', content: chatInstructions })
     }
     if (request.contextMemory?.trim()) {
       messages.push({
@@ -1113,11 +1153,12 @@ function registerIpc(): void {
   )
 
   ipcMain.handle('command:run', async (_event, request: CommandRequest) => {
+    const env = await shellEnvironment()
     const child = spawn(request.command, {
       cwd: request.cwd,
       shell: true,
       windowsHide: true,
-      env: process.env
+      env
     })
     commandProcesses.set(request.id, child)
     child.stdout?.on('data', (chunk) =>
@@ -1178,13 +1219,14 @@ function registerIpc(): void {
     const runner = runners[language]
     if (!runner) throw new Error(`暂不支持直接运行 ${request.language || '未知'} 代码`)
     if (request.code.length > 200000) throw new Error('代码块超过 200000 字符，已拒绝运行')
+    const env = await shellEnvironment()
 
     return new Promise((resolve) => {
       const child = spawn(runner.command, runner.args, {
         cwd: request.cwd || os.homedir(),
         windowsHide: true,
         stdio: 'pipe',
-        env: process.env
+        env
       })
       let stdout = ''
       let stderr = ''
@@ -1220,20 +1262,21 @@ function registerIpc(): void {
     })
   })
 
-  ipcMain.handle('terminal:create', (_event, request: TerminalCreateRequest) => {
+  ipcMain.handle('terminal:create', async (_event, request: TerminalCreateRequest) => {
     terminalProcesses.get(request.id)?.kill()
+    const env = await shellEnvironment()
     const terminal =
       process.platform === 'win32'
         ? spawn('cmd.exe', ['/Q', '/K', 'chcp 65001>nul'], {
             cwd: request.cwd || os.homedir(),
             windowsHide: true,
             stdio: 'pipe',
-            env: process.env
+            env
           })
         : spawn(process.env.SHELL || '/bin/bash', ['-i'], {
             cwd: request.cwd || os.homedir(),
             stdio: 'pipe',
-            env: process.env
+            env
           })
     terminalProcesses.set(request.id, terminal)
     terminal.stdout.on('data', (chunk) =>

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ChevronDown,
   ChevronRight,
@@ -20,11 +21,13 @@ import {
 } from 'lucide-react'
 import type { FileNode } from '../../../shared/types'
 import { useAppStore } from '../store'
-import { placeViewportMenu } from '../utils/viewport-menu'
+import { placeViewportMenuBesideRect } from '../utils/viewport-menu'
 
 type ContextMenuState = {
-  anchorX: number
-  anchorY: number
+  anchorLeft: number
+  anchorRight: number
+  anchorTop: number
+  anchorBottom: number
   left: number
   top: number
   horizontal: 'right' | 'left'
@@ -266,6 +269,7 @@ export function ProjectSidebar({
   const [dragSource, setDragSource] = useState<FileClipboardState | null>(null)
   const [dropTargetPath, setDropTargetPath] = useState('')
   const contextMenuRef = useRef<HTMLDivElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
 
   const openWorkspace = async (): Promise<void> => {
     const result = await window.localAgent.workspace.open()
@@ -375,20 +379,36 @@ export function ProjectSidebar({
     setLoadError('')
     setLoading(true)
     try {
-      const nextPath =
+      const executeTransfer = (overwrite = false): Promise<string> =>
         mode === 'copy'
-          ? await window.localAgent.files.copyToDirectory(
+          ? window.localAgent.files.copyToDirectory(
               source.root,
               source.node.path,
               targetRoot,
-              target.path
+              target.path,
+              overwrite
             )
-          : await window.localAgent.files.moveToDirectory(
+          : window.localAgent.files.moveToDirectory(
               source.root,
               source.node.path,
               targetRoot,
-              target.path
+              target.path,
+              overwrite
             )
+      let nextPath: string
+      try {
+        nextPath = await executeTransfer()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!message.includes('目标目录已存在')) throw error
+        const accepted = window.confirm(
+          `目标位置已存在“${source.node.name}”，是否替换？${
+            source.node.kind === 'directory' ? '\n替换会移除目标文件夹中的旧内容。' : ''
+          }`
+        )
+        if (!accepted) return
+        nextPath = await executeTransfer(true)
+      }
       if (mode === 'move') {
         renameOpenPath(source.node.path, nextPath)
         setSelectedNode({ ...source.node, path: nextPath })
@@ -496,9 +516,11 @@ export function ProjectSidebar({
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return
     const menu = contextMenuRef.current
-    const placement = placeViewportMenu({
-      anchorX: contextMenu.anchorX,
-      anchorY: contextMenu.anchorY,
+    const placement = placeViewportMenuBesideRect({
+      anchorLeft: contextMenu.anchorLeft,
+      anchorRight: contextMenu.anchorRight,
+      anchorTop: contextMenu.anchorTop,
+      anchorBottom: contextMenu.anchorBottom,
       menuWidth: menu.offsetWidth,
       menuHeight: menu.offsetHeight,
       viewportWidth: window.innerWidth,
@@ -517,10 +539,16 @@ export function ProjectSidebar({
 
   useEffect(() => {
     const handleKeys = (event: KeyboardEvent): void => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement ||
+        (event.target instanceof HTMLElement && event.target.isContentEditable)
+      ) return
+      if (!sidebarRef.current?.contains(document.activeElement)) return
       const selectedRoot = selectedNode ? findRoot(selectedNode.path) : ''
       const modifier = event.ctrlKey || event.metaKey
       if (modifier && event.key.toLocaleLowerCase() === 'c' && selectedNode) {
+        if (window.getSelection()?.toString()) return
         event.preventDefault()
         copyNode(selectedNode)
         return
@@ -557,12 +585,16 @@ export function ProjectSidebar({
     node: FileNode
   ): void => {
     event.preventDefault()
+    event.stopPropagation()
+    const anchor = event.currentTarget.getBoundingClientRect()
     setSelectedNode(node)
     setContextMenu({
-      anchorX: event.clientX,
-      anchorY: event.clientY,
-      left: event.clientX,
-      top: event.clientY,
+      anchorLeft: anchor.left,
+      anchorRight: anchor.right,
+      anchorTop: anchor.top,
+      anchorBottom: anchor.bottom,
+      left: anchor.right + 4,
+      top: anchor.top,
       horizontal: 'right',
       vertical: 'down',
       node
@@ -572,7 +604,7 @@ export function ProjectSidebar({
   const contextIsRoot = Boolean(contextMenu && contextMenu.node.path === contextRoot)
 
   return (
-    <section className="project-sidebar">
+    <section ref={sidebarRef} className="project-sidebar">
       <header className="project-sidebar-head">
         <div>
           <span>资源管理器</span>
@@ -645,7 +677,7 @@ export function ProjectSidebar({
         )}
       </div>
 
-      {contextMenu && (
+      {contextMenu && createPortal(
         <div
           ref={contextMenuRef}
           className="project-context-menu"
@@ -776,7 +808,8 @@ export function ProjectSidebar({
               </button>
             </>
           )}
-        </div>
+        </div>,
+        document.body
       )}
 
       {creating && (

@@ -14,6 +14,20 @@ export type SearchResult = {
   matches?: string[]
 }
 
+export type FileEncoding =
+  | 'utf8'
+  | 'utf8bom'
+  | 'gbk'
+  | 'gb18030'
+  | 'big5'
+  | 'utf16le'
+  | 'utf16be'
+
+export type TextFileReadResult = {
+  content: string
+  encoding: FileEncoding
+}
+
 export type ModelProvider = 'ollama' | 'openai'
 
 export type ModelPreset = 'kimi-code'
@@ -279,6 +293,7 @@ export type ChatStartRequest = {
   requestId: string
   model: ModelConfig
   instructions: string
+  skills: SkillDefinition[]
   attachments: ChatAttachment[]
   webSearch: boolean
   forceWebSearch?: boolean
@@ -411,6 +426,7 @@ export type PersistedConversation = {
   mode: ConversationMode
   model?: ModelConfig
   thinkingMode?: ThinkingMode
+  skillIds?: string[]
   messages: ChatMessage[]
   contextMemory?: {
     summary: string
