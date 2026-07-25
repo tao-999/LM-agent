@@ -21,13 +21,15 @@ import {
 } from 'lucide-react'
 import type { FileNode } from '../../../shared/types'
 import { useAppStore } from '../store'
-import { placeViewportMenuBesideRect } from '../utils/viewport-menu'
+import { placeViewportMenu } from '../utils/viewport-menu'
+import {
+  isWorkspacePathExpanded,
+  type WorkspaceExpandedPaths
+} from '../utils/project-tree-state'
 
 type ContextMenuState = {
-  anchorLeft: number
-  anchorRight: number
-  anchorTop: number
-  anchorBottom: number
+  anchorX: number
+  anchorY: number
   left: number
   top: number
   horizontal: 'right' | 'left'
@@ -128,7 +130,9 @@ function ProjectTreeNode({
   onDragEnd,
   onDragOver,
   onDragLeave,
-  onDrop
+  onDrop,
+  expandedPaths,
+  onExpandedChange
 }: {
   node: FileNode
   depth: number
@@ -146,8 +150,10 @@ function ProjectTreeNode({
   onDragOver: (event: React.DragEvent<HTMLButtonElement>, node: FileNode) => boolean
   onDragLeave: (event: React.DragEvent<HTMLButtonElement>, node: FileNode) => void
   onDrop: (event: React.DragEvent<HTMLButtonElement>, node: FileNode) => void
+  expandedPaths: WorkspaceExpandedPaths
+  onExpandedChange: (path: string, expanded: boolean) => void
 }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(depth < 1)
+  const expanded = isWorkspacePathExpanded(expandedPaths, node.path, depth < 1)
   const selected = selectedPath === node.path
   const renaming = renamingPath === node.path
 
@@ -162,13 +168,13 @@ function ProjectTreeNode({
           draggable={!renaming && depth > 0}
           onClick={() => {
             onSelect(node)
-            setExpanded((value) => !value)
+            onExpandedChange(node.path, !expanded)
           }}
           onContextMenu={(event) => onContextMenu(event, node)}
           onDragStart={(event) => onDragStart(event, node)}
           onDragEnd={onDragEnd}
           onDragEnter={(event) => {
-            if (onDragOver(event, node)) setExpanded(true)
+            if (onDragOver(event, node)) onExpandedChange(node.path, true)
           }}
           onDragOver={(event) => onDragOver(event, node)}
           onDragLeave={(event) => onDragLeave(event, node)}
@@ -207,6 +213,8 @@ function ProjectTreeNode({
               onDragOver={onDragOver}
               onDragLeave={onDragLeave}
               onDrop={onDrop}
+              expandedPaths={expandedPaths}
+              onExpandedChange={onExpandedChange}
             />
           ))}
       </div>
@@ -253,6 +261,8 @@ export function ProjectSidebar({
   const workspaceTrees = useAppStore((state) => state.workspaceTrees)
   const setWorkspace = useAppStore((state) => state.setWorkspace)
   const setFileTreeForRoot = useAppStore((state) => state.setFileTreeForRoot)
+  const expandedWorkspacePaths = useAppStore((state) => state.expandedWorkspacePaths)
+  const setWorkspacePathExpanded = useAppStore((state) => state.setWorkspacePathExpanded)
   const setActiveWorkspace = useAppStore((state) => state.setActiveWorkspace)
   const renameWorkspaceRoot = useAppStore((state) => state.renameWorkspaceRoot)
   const closeWorkspace = useAppStore((state) => state.closeWorkspace)
@@ -516,11 +526,9 @@ export function ProjectSidebar({
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return
     const menu = contextMenuRef.current
-    const placement = placeViewportMenuBesideRect({
-      anchorLeft: contextMenu.anchorLeft,
-      anchorRight: contextMenu.anchorRight,
-      anchorTop: contextMenu.anchorTop,
-      anchorBottom: contextMenu.anchorBottom,
+    const placement = placeViewportMenu({
+      anchorX: contextMenu.anchorX,
+      anchorY: contextMenu.anchorY,
       menuWidth: menu.offsetWidth,
       menuHeight: menu.offsetHeight,
       viewportWidth: window.innerWidth,
@@ -586,15 +594,12 @@ export function ProjectSidebar({
   ): void => {
     event.preventDefault()
     event.stopPropagation()
-    const anchor = event.currentTarget.getBoundingClientRect()
     setSelectedNode(node)
     setContextMenu({
-      anchorLeft: anchor.left,
-      anchorRight: anchor.right,
-      anchorTop: anchor.top,
-      anchorBottom: anchor.bottom,
-      left: anchor.right + 4,
-      top: anchor.top,
+      anchorX: event.clientX,
+      anchorY: event.clientY,
+      left: event.clientX,
+      top: event.clientY,
       horizontal: 'right',
       vertical: 'down',
       node
@@ -662,6 +667,8 @@ export function ProjectSidebar({
                   onDragOver={dragOverDirectory}
                   onDragLeave={leaveDropTarget}
                   onDrop={dropIntoDirectory}
+                  expandedPaths={expandedWorkspacePaths}
+                  onExpandedChange={setWorkspacePathExpanded}
                 />
                 {rootNode.path === root && <span className="cwd-badge">CWD</span>}
               </div>

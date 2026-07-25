@@ -19,6 +19,12 @@ import type {
   TokenUsageRecord
 } from '../../shared/types'
 import type { EditorTheme } from './editorThemes'
+import {
+  remapWorkspaceExpandedPaths,
+  removeWorkspaceExpandedPaths,
+  updateWorkspacePathExpanded,
+  type WorkspaceExpandedPaths
+} from './utils/project-tree-state'
 
 const pendingStorageWrites = new Map<string, StorageValue<unknown>>()
 let storageWriteTimer: number | undefined
@@ -96,6 +102,7 @@ type AppStore = {
   workspaceRoot: string
   workspaceRoots: string[]
   workspaceTrees: Record<string, FileNode[]>
+  expandedWorkspacePaths: WorkspaceExpandedPaths
   fileTree: FileNode[]
   openFiles: OpenFile[]
   activeFilePath: string
@@ -126,6 +133,7 @@ type AppStore = {
   closeWorkspace: (root: string) => void
   setFileTree: (tree: FileNode[]) => void
   setFileTreeForRoot: (root: string, tree: FileNode[]) => void
+  setWorkspacePathExpanded: (path: string, expanded: boolean) => void
   openFile: (file: OpenFile) => void
   closeFile: (path: string) => void
   closeOtherFiles: (path: string) => void
@@ -376,6 +384,7 @@ export const useAppStore = create<AppStore>()(
       workspaceRoot: '',
       workspaceRoots: [],
       workspaceTrees: {},
+      expandedWorkspacePaths: {},
       fileTree: [],
       openFiles: [],
       activeFilePath: '',
@@ -437,6 +446,11 @@ export const useAppStore = create<AppStore>()(
               item === sourceRoot ? targetRoot : item
             ),
             workspaceTrees,
+            expandedWorkspacePaths: remapWorkspaceExpandedPaths(
+              state.expandedWorkspacePaths,
+              sourceRoot,
+              targetRoot
+            ),
             workspaceRoot,
             fileTree: workspaceRoot === targetRoot ? tree : state.fileTree,
             openFiles: state.openFiles.map((file) => {
@@ -473,6 +487,10 @@ export const useAppStore = create<AppStore>()(
           return {
             workspaceRoots,
             workspaceTrees,
+            expandedWorkspacePaths: removeWorkspaceExpandedPaths(
+              state.expandedWorkspacePaths,
+              root
+            ),
             workspaceRoot,
             fileTree: workspaceTrees[workspaceRoot] ?? [],
             openFiles,
@@ -492,6 +510,14 @@ export const useAppStore = create<AppStore>()(
         set((state) => ({
           workspaceTrees: { ...state.workspaceTrees, [root]: tree },
           fileTree: state.workspaceRoot === root ? tree : state.fileTree
+        })),
+      setWorkspacePathExpanded: (path, expanded) =>
+        set((state) => ({
+          expandedWorkspacePaths: updateWorkspacePathExpanded(
+            state.expandedWorkspacePaths,
+            path,
+            expanded
+          )
         })),
       openFile: (file) =>
         set((state) => {
@@ -565,6 +591,11 @@ export const useAppStore = create<AppStore>()(
                 name: nextPath.split(/[\\/]/).pop() ?? file.name
               }
             }),
+            expandedWorkspacePaths: remapWorkspaceExpandedPaths(
+              state.expandedWorkspacePaths,
+              sourcePath,
+              targetPath
+            ),
             activeFilePath: replacePath(state.activeFilePath)
           }
         }),
@@ -577,6 +608,10 @@ export const useAppStore = create<AppStore>()(
           const openFiles = state.openFiles.filter((file) => !removed(file.path))
           return {
             openFiles,
+            expandedWorkspacePaths: removeWorkspaceExpandedPaths(
+              state.expandedWorkspacePaths,
+              targetPath
+            ),
             activeFilePath: removed(state.activeFilePath)
               ? openFiles.at(-1)?.path ?? ''
               : state.activeFilePath
@@ -849,7 +884,7 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 17,
+      version: 18,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -872,6 +907,7 @@ export const useAppStore = create<AppStore>()(
         if (typeof state.confirmCreateDelete !== 'boolean') state.confirmCreateDelete = true
         if (!state.customModels) state.customModels = []
         if (!state.modelThinkingModes) state.modelThinkingModes = {}
+        if (!state.expandedWorkspacePaths) state.expandedWorkspacePaths = {}
         if (!state.tokenUsageRecords) state.tokenUsageRecords = []
         if (!state.comfyBaseUrl) state.comfyBaseUrl = 'http://127.0.0.1:8188'
         if (!state.comfyWorkflows) state.comfyWorkflows = []
@@ -893,6 +929,7 @@ export const useAppStore = create<AppStore>()(
       partialize: (state) => ({
         workspaceRoot: state.workspaceRoot,
         workspaceRoots: state.workspaceRoots,
+        expandedWorkspacePaths: state.expandedWorkspacePaths,
         editorTheme: state.editorTheme,
         model: { ...state.model, apiKey: undefined },
         customModels: state.customModels.map((item) => ({ ...item, apiKey: undefined })),
