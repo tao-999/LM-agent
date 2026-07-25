@@ -1568,7 +1568,11 @@ export function ChatPanel(): React.JSX.Element {
   const [actionNotice, setActionNotice] = useState('')
   const [showSessions, setShowSessions] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
-  const [skillMenuPosition, setSkillMenuPosition] = useState<{ left: number; top: number } | null>(null)
+  const [skillMenuPosition, setSkillMenuPosition] = useState<{
+    left: number
+    top?: number
+    bottom?: number
+  } | null>(null)
   const [expandedUserMessageIds, setExpandedUserMessageIds] = useState<Set<string>>(
     () => new Set()
   )
@@ -1595,6 +1599,7 @@ export function ChatPanel(): React.JSX.Element {
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const comfyScanStartedRef = useRef(false)
   const skillButtonRef = useRef<HTMLButtonElement>(null)
+  const skillMenuRef = useRef<HTMLDivElement>(null)
 
   const conversation =
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
@@ -1840,6 +1845,39 @@ export function ChatPanel(): React.JSX.Element {
     window.addEventListener('pointerdown', close)
     return () => window.removeEventListener('pointerdown', close)
   }, [showSessions])
+
+  useEffect(() => {
+    if (!showSkills) return
+    const close = (event?: Event): void => {
+      const target = event?.target
+      if (
+        target instanceof Node &&
+        (skillButtonRef.current?.contains(target) || skillMenuRef.current?.contains(target))
+      ) {
+        return
+      }
+      setShowSkills(false)
+      setSkillMenuPosition(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') close()
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [showSkills])
+
+  useEffect(() => {
+    setShowSkills(false)
+    setSkillMenuPosition(null)
+  }, [activeConversationId, mode])
 
   useEffect(() => {
     if (!previewImage) return
@@ -2825,7 +2863,22 @@ export function ChatPanel(): React.JSX.Element {
                     } else {
                       const rect = skillButtonRef.current?.getBoundingClientRect()
                       if (rect) {
-                        setSkillMenuPosition({ left: rect.left, top: rect.top })
+                        const menuWidth = 248
+                        const safeGap = 8
+                        const estimatedHeight = Math.min(300, Math.max(48, skills.length * 36 + 12))
+                        const roomAbove = rect.top - safeGap
+                        const roomBelow = window.innerHeight - rect.bottom - safeGap
+                        const opensAbove =
+                          roomAbove >= Math.min(estimatedHeight, 160) || roomAbove > roomBelow
+                        setSkillMenuPosition({
+                          left: Math.max(
+                            safeGap,
+                            Math.min(rect.left, window.innerWidth - menuWidth - safeGap)
+                          ),
+                          ...(opensAbove
+                            ? { bottom: window.innerHeight - rect.top + 6 }
+                            : { top: rect.bottom + 6 })
+                        })
                       }
                       setShowSkills(true)
                     }
@@ -3452,11 +3505,15 @@ export function ChatPanel(): React.JSX.Element {
       )}
       {showSkills && skillMenuPosition && createPortal(
         <div
+          ref={skillMenuRef}
           className="composer-skill-menu"
-          style={{ left: skillMenuPosition.left, bottom: window.innerHeight - skillMenuPosition.top + 8 }}
+          style={{
+            left: skillMenuPosition.left,
+            top: skillMenuPosition.top,
+            bottom: skillMenuPosition.bottom
+          }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <strong>当前会话 Skill</strong>
           {skills.length ? skills.map((skill) => {
             const selected = conversation?.skillIds?.includes(skill.id) ?? false
             return (
@@ -3485,18 +3542,6 @@ export function ChatPanel(): React.JSX.Element {
       )}
     </section>
   )
-
-  // Close skill menu when clicking outside
-  useEffect(() => {
-    if (!showSkills) return
-    const handleClick = () => {
-      setShowSkills(false)
-      setSkillMenuPosition(null)
-    }
-    document.addEventListener('pointerdown', handleClick, true)
-    return () => document.removeEventListener('pointerdown', handleClick, true)
-  }, [showSkills])
-
 }
 
 function FileTextIcon(): React.JSX.Element {
