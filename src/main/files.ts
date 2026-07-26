@@ -1,5 +1,7 @@
 import { promises as fs } from 'node:fs'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
+import { rgPath } from '@vscode/ripgrep'
 import iconv from 'iconv-lite'
 import type {
   FileEncoding,
@@ -415,14 +417,8 @@ export async function workspaceEntryInfo(
   }
 }
 
-export async function searchWorkspace(
-  root: string,
-  query: string,
-  scopePath = '',
-  limit = 160
-): Promise<SearchResult[]> {
-  const results: SearchResult[] = []
-  const groups = query
+function parseSearchGroups(query: string): string[][] {
+  return query
     .split('|')
     .map((group) =>
       group
@@ -431,6 +427,16 @@ export async function searchWorkspace(
         .filter(Boolean)
     )
     .filter((group) => group.length > 0)
+}
+
+async function searchWorkspaceFallback(
+  root: string,
+  query: string,
+  scopePath = '',
+  limit = 160
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = []
+  const groups = parseSearchGroups(query)
   if (!groups.length) return results
   let scanned = 0
 
@@ -493,4 +499,141 @@ export async function searchWorkspace(
   else if (targetStat.isDirectory()) await walk(target)
   else throw new Error(`检索路径既非文件也非目录：${scopePath}`)
   return results
+}
+
+type RipgrepJsonMatch = {
+  type?: string
+  data?: {
+    path?: { text?: string }
+    lines?: { text?: string }
+    line_number?: number
+  }
+}
+
+async function searchWorkspaceWithRipgrep(
+  root: string,
+  query: string,
+  scopePath = '',
+  limit = 160
+): Promise<SearchResult[]> {
+  const groups = parseSearchGroups(query)
+  if (!groups.length) return []
+  const terms = [...new Set(groups.flat())]
+  const target = scopePath.trim()
+    ? await resolveSecurelyInWorkspace(root, scopePath.trim())
+    : await resolveSecurelyInWorkspace(root, '.')
+  const targetStat = await fs.stat(target)
+  if (!targetStat.isFile() && !targetStat.isDirectory()) {
+    throw new Error(`检索路径既非文件也非目录：${scopePath}`)
+  }
+
+  const args = [
+    '--json',
+    '--line-number',
+    '--with-filename',
+    '--ignore-case',
+    '--fixed-strings',
+    '--hidden',
+    '--no-messages',
+    '--max-filesize',
+    '8M'
+  ]
+  for (const ignoredName of ignoredNames) {
+    args.push('--glob', `!${ignoredName}/**`)
+  }
+  for (const term of terms) args.push('-e', term)
+  args.push(target)
+
+  const matchesByFile = new Map<
+    string,
+    { terms: Set<string>; lines: Map<number, { preview: string; matches: Set<string> }> }
+  >()
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(rgPath, args, {
+      cwd: root,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let stdoutBuffer = ''
+    let stderr = ''
+    const consumeLine = (rawLine: string): void => {
+      if (!rawLine.trim()) return
+      let event: RipgrepJsonMatch
+      try {
+        event = JSON.parse(rawLine) as RipgrepJsonMatch
+      } catch {
+        return
+      }
+      if (event.type !== 'match') return
+      const rawPath = event.data?.path?.text
+      const lineNumber = Number(event.data?.line_number)
+      const lineText = event.data?.lines?.text ?? ''
+      if (!rawPath || !Number.isSafeInteger(lineNumber) || lineNumber < 1) return
+      const fullPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(root, rawPath)
+      const loweredLine = lineText.toLocaleLowerCase()
+      const lineMatches = terms.filter((term) => loweredLine.includes(term))
+      if (!lineMatches.length) return
+      const fileEntry = matchesByFile.get(fullPath) ?? {
+        terms: new Set<string>(),
+        lines: new Map<number, { preview: string; matches: Set<string> }>()
+      }
+      const lineEntry = fileEntry.lines.get(lineNumber) ?? {
+        preview: lineText.trim().slice(0, 220),
+        matches: new Set<string>()
+      }
+      for (const term of lineMatches) {
+        fileEntry.terms.add(term)
+        lineEntry.matches.add(term)
+      }
+      fileEntry.lines.set(lineNumber, lineEntry)
+      matchesByFile.set(fullPath, fileEntry)
+    }
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      stdoutBuffer += chunk
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() ?? ''
+      for (const line of lines) consumeLine(line)
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      consumeLine(stdoutBuffer)
+      if (code === 0 || code === 1) resolve()
+      else reject(new Error(`ripgrep 执行失败（退出码 ${String(code)}）：${stderr.trim()}`))
+    })
+  })
+
+  const results: SearchResult[] = []
+  for (const [fullPath, fileEntry] of matchesByFile) {
+    const matchedGroups = groups.filter((group) => group.every((term) => fileEntry.terms.has(term)))
+    if (!matchedGroups.length) continue
+    const activeTerms = new Set(matchedGroups.flat())
+    for (const [line, lineEntry] of [...fileEntry.lines].sort((left, right) => left[0] - right[0])) {
+      const matches = [...lineEntry.matches].filter((term) => activeTerms.has(term))
+      if (!matches.length) continue
+      results.push({ path: fullPath, line, preview: lineEntry.preview, matches })
+      if (results.length >= limit) return results
+    }
+  }
+  return results
+}
+
+export async function searchWorkspace(
+  root: string,
+  query: string,
+  scopePath = '',
+  limit = 160
+): Promise<SearchResult[]> {
+  try {
+    const results = await searchWorkspaceWithRipgrep(root, query, scopePath, limit)
+    if (results.length) return results
+  } catch {
+    // 安装包缺少平台二进制、进程启动失败或输出异常时，继续使用内置文本扫描兜底。
+  }
+  // ripgrep 以 UTF-8 为主；GBK、GB18030、Big5 等文本由编码感知扫描补齐。
+  return searchWorkspaceFallback(root, query, scopePath, limit)
 }

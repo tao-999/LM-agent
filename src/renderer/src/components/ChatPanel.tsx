@@ -73,6 +73,10 @@ import {
 import { MacSelect } from './MacSelect'
 import { markdownKatexOptions, normalizeMarkdownMath } from '../markdown'
 import { useAppStore } from '../store'
+import {
+  enabledSkills as filterEnabledSkills,
+  selectedEnabledSkills
+} from '../utils/skill-selection'
 
 const uid = (): string => crypto.randomUUID()
 const HISTORY_ARCHIVE_MESSAGE_LIMIT = 200
@@ -1605,6 +1609,11 @@ export function ChatPanel(): React.JSX.Element {
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
   const messages = conversation?.messages ?? []
   const mode = conversation?.mode ?? 'chat'
+  const enabledSkills = useMemo(() => filterEnabledSkills(skills), [skills])
+  const enabledSelectedSkillIds = useMemo(
+    () => selectedEnabledSkills(skills, conversation?.skillIds).map((skill) => skill.id),
+    [skills, conversation?.skillIds]
+  )
   const thinkingMode = conversation?.thinkingMode ?? 'auto'
   const thinkingCapability = inferThinkingCapability(model)
   const requestModel = { ...model, thinkingMode }
@@ -2352,10 +2361,7 @@ export function ChatPanel(): React.JSX.Element {
       useAppStore
         .getState()
         .conversations.find((item) => item.id === conversation.id) ?? conversation
-    const selectedSkillIds = new Set(requestConversation.skillIds ?? [])
-    const selectedSkills = skills
-      .filter((skill) => selectedSkillIds.has(skill.id))
-      .map((skill) => ({ ...skill, enabled: true }))
+    const selectedSkills = selectedEnabledSkills(skills, requestConversation.skillIds)
     addMessage(conversation.id, userMessage)
     addMessage(conversation.id, assistantMessage)
     registerPending(requestId, {
@@ -2855,7 +2861,7 @@ export function ChatPanel(): React.JSX.Element {
               <div className="composer-skill-picker">
                 <button
                   ref={skillButtonRef}
-                  className={`composer-tool ${(conversation?.skillIds?.length ?? 0) > 0 ? 'active' : ''}`}
+                  className={`composer-tool ${enabledSelectedSkillIds.length > 0 ? 'active' : ''}`}
                   onClick={() => {
                     if (showSkills) {
                       setShowSkills(false)
@@ -2865,7 +2871,10 @@ export function ChatPanel(): React.JSX.Element {
                       if (rect) {
                         const menuWidth = 248
                         const safeGap = 8
-                        const estimatedHeight = Math.min(300, Math.max(48, skills.length * 36 + 12))
+                        const estimatedHeight = Math.min(
+                          300,
+                          Math.max(48, enabledSkills.length * 36 + 12)
+                        )
                         const roomAbove = rect.top - safeGap
                         const roomBelow = window.innerHeight - rect.bottom - safeGap
                         const opensAbove =
@@ -2886,7 +2895,7 @@ export function ChatPanel(): React.JSX.Element {
                   title="选择当前会话使用的 Skill"
                 >
                   <Sparkles size={14} />
-                  Skill{conversation?.skillIds?.length ? ` · ${conversation.skillIds.length}` : ''}
+                  Skill{enabledSelectedSkillIds.length ? ` · ${enabledSelectedSkillIds.length}` : ''}
                 </button>
               </div>
             </>
@@ -3514,7 +3523,7 @@ export function ChatPanel(): React.JSX.Element {
           }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          {skills.length ? skills.map((skill) => {
+          {enabledSkills.length ? enabledSkills.map((skill) => {
             const selected = conversation?.skillIds?.includes(skill.id) ?? false
             return (
               <button
@@ -3536,7 +3545,7 @@ export function ChatPanel(): React.JSX.Element {
                 {selected && <Check size={13} />}
               </button>
             )
-          }) : <small>请先在设置中添加 Skill</small>}
+          }) : <small>请先在设置中启用 Skill</small>}
         </div>,
         document.body
       )}

@@ -202,7 +202,7 @@ function stripHistoryTags(value: string): string {
 function historySearchTerms(query: string): string[] {
   const terms = query
     .toLocaleLowerCase()
-    .split(/[\s,，。、“”"'：:；;！？!?（）()【】[\]\n\r]+/)
+    .split(/[\s|&,，。、“”"'：:；;！？!?（）()【】[\]\n\r]+/)
     .map((term) => term.trim())
     .filter(
       (term) =>
@@ -293,6 +293,10 @@ function describeToolCall(
     search_files: {
       title: `search_files · ${pathValue || '全部工作区'} · ${text(args.query) || '未指定关键词'}`,
       detail: `正在${pathValue ? `限定 ${pathValue}` : '全局'}搜索“${text(args.query)}”`
+    },
+    grep: {
+      title: `grep · ${pathValue || 'CWD + 会话历史'} · ${text(args.query) || '未指定关键词'}`,
+      detail: `正在${pathValue ? `检索 ${pathValue}` : '检索当前 CWD 全部文件与本地会话历史'}中的“${text(args.query)}”`
     },
     search_conversation_history: {
       title: `search_conversation_history · ${text(args.query) || '未指定关键词'}`,
@@ -440,6 +444,7 @@ function validateToolCallArguments(name: string, args: Record<string, unknown>):
       requireText('source')
       requireText('target')
       break
+    case 'grep':
     case 'search_files':
     case 'search_conversation_history':
     case 'search_web':
@@ -2904,7 +2909,7 @@ export async function runAgent(
       function: {
         name: 'read_file',
         description:
-          '按行读取工作区内的 UTF-8 文本文件并返回行号。默认优先提供 start_line+end_line，或 around_line+context_lines 精准读取区间；位置未知时先调用 search_files 定位。用户明确要求通读、总结、审查、重构全文，或文件估算 Token 不超过当前模型上下文窗口的 50% 时，可以省略区间读取全文；工具层不限制用户明确要求的读取行数。',
+          '按行读取工作区内的文本文件并返回行号。默认优先提供 start_line+end_line，或 around_line+context_lines 精准读取区间；位置未知时先调用 grep 定位。用户明确要求通读、总结、审查、重构全文，或文件估算 Token 不超过当前模型上下文窗口的 50% 时，可以省略区间读取全文；工具层不限制用户明确要求的读取行数。',
         parameters: {
           type: 'object',
           required: ['path'],
@@ -2979,7 +2984,7 @@ export async function runAgent(
         throw new Error(
           [
             `read_file 缺少准确读取区间：${relative} 当前共 ${lines.length} 行，估算 ${estimatedFileTokens.toLocaleString()} Token，超过当前上下文窗口 50% 阈值 ${wholeFileThreshold.toLocaleString()} Token，已阻止默认读取全文。`,
-            '位置未知时先调用 search_files 定位关键词行号，再用 around_line 与 context_lines（默认上下各 50 行）读取上下文。',
+            '位置未知时先调用 grep 定位关键词行号，再用 around_line 与 context_lines（默认上下各 50 行）读取上下文。',
             '已有用户选区、明确行号或其他可靠区间时，提供 start_line 与 end_line。当前任务明确要求全文处理时也可省略区间。'
           ].join('\n')
         )
@@ -3010,7 +3015,7 @@ export async function runAgent(
       function: {
         name: 'search_files',
         description:
-          '像 grep 一样在文件内容中定位关键词与行号。已知目标文件或目录时必须传 path 限定范围；需要跨文件查找或目标未知时省略 path，搜索全部工作区。由你根据当前任务自主选择范围。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词；混合表达式按 OR 分组、组内 AND 处理。',
+          '兼容旧模型的文件搜索别名，仅检索工作区文件。新任务优先调用 grep：grep 默认覆盖当前 CWD 全部文件与本地会话历史。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。',
         parameters: {
           type: 'object',
           required: ['query'],
@@ -3037,6 +3042,62 @@ export async function runAgent(
           }))
         }
       )
+    }
+  })
+
+  tools.set('grep', {
+    risk: 'read',
+    definition: {
+      type: 'function',
+      function: {
+        name: 'grep',
+        description:
+          '使用应用内置 ripgrep 检索。默认搜索当前 CWD 下的全部项目文件，并同时检索本地会话历史资料库；传入 path 时仅收窄项目文件范围，会话历史默认不附加，可用 include_history 显式开启。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。位置未知、跨文件查找、检索项目资料或历史事实时优先使用本工具。',
+        parameters: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', description: '关键词表达式，支持 | 与 &' },
+            path: {
+              type: 'string',
+              description: '可选的 CWD 相对文件或目录；省略时检索整个 CWD'
+            },
+            include_history: {
+              type: 'boolean',
+              description: '是否同时检索本地会话历史；全局检索默认 true，指定 path 时默认 false'
+            },
+            max_history_results: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 12,
+              description: '会话历史最多返回多少条，默认 6'
+            }
+          }
+        }
+      }
+    },
+    execute: async (args) => {
+      const scopePath = text(args.path).trim()
+      const query = text(args.query)
+      const includeHistory =
+        typeof args.include_history === 'boolean' ? args.include_history : !scopePath
+      const results = await searchWorkspace(request.workspaceRoot, query, scopePath)
+      return stringifyResult({
+        engine: 'ripgrep',
+        scope: scopePath || '当前 CWD 全部文件',
+        query,
+        workspaceMatches: results.map((result) => ({
+          ...result,
+          path: path.relative(request.workspaceRoot, result.path)
+        })),
+        conversationHistory: includeHistory
+          ? searchConversationHistoryArchive(
+              request.historyArchive ?? [],
+              query,
+              Number(args.max_history_results) || 6
+            )
+          : '未启用会话历史检索'
+      })
     }
   })
 
@@ -3665,12 +3726,12 @@ export async function runAgent(
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
-    '资料检索优先规则：search_files 相当于 grep。已知目标文件或目录时传 path 限定范围；目标未知、需要查人物设定或跨文件关系时省略 path 进行全局搜索，由你根据任务自主决定。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。命中后调用 read_file 并传 around_line 与 context_lines 精准读取。已有用户选区、明确行号或可靠命中区间时，可直接 read_file 读取该区间上下文，但仍可继续检索。只有用户明确要求通读、总结、审查或重构全文，或局部区间无法满足任务时，才读取全文。',
-    '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 search_files 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
+    '资料检索优先规则：grep 是默认本地检索工具。省略 path 时检索当前 CWD 全部项目文件并同时检索本地会话历史；已知目标文件或目录时可传 path 收窄文件范围。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。命中后调用 read_file 并传 around_line 与 context_lines 精准读取。search_files 仅作为旧模型兼容别名。已有用户选区、明确行号或可靠命中区间时，可直接 read_file 读取该区间上下文，也可继续 grep 检索其他资料。',
+    '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 grep 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
     requiresWritingLoreResearch
-      ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 search_files 检索本地项目资料；命中后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
+      ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 grep 检索当前 CWD 与本地会话历史；命中项目文件后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
       : '',
-    '未知知识检索规则：该规则同样适用于代码与普通问答。遇到模型训练资料中可能不存在、版本可能变化、记忆不确定、项目专有、第三方库或 API 行为不明确的事实，严禁凭印象猜测。先调用 search_files 检索本地项目文档、源码与配置；本地资料缺失或不足时必须调用 search_web。只有现有上下文已经给出可靠依据时才可跳过检索。',
+    '未知知识检索规则：该规则同样适用于代码与普通问答。遇到模型训练资料中可能不存在、版本可能变化、记忆不确定、项目专有、第三方库或 API 行为不明确的事实，严禁凭印象猜测。先调用 grep 检索当前 CWD 全部项目文件与本地会话历史；本地资料缺失或不足时必须调用 search_web。只有现有上下文已经给出可靠依据时才可跳过检索。',
     '创建与删除权限最高优先级：严禁根据用户措辞或安全关键词隐藏创建、复制或删除工具。创建、复制与普通写入跟随当前读写权限模式；删除工具始终显示独立确认模块并等待用户允许。',
     '专用工具规则：单项创建优先使用 create_file/create_directory，复制使用 copy_path，删除使用 delete_path。允许 run_command 运行工作区脚本；命令或脚本包含删除操作时始终要求用户确认。',
     'CWD 硬边界规则：全部文件工具只允许读取或操作当前工作区内部路径；绝对外部路径、父级穿越和借助符号链接越界都会由工具层拒绝。run_command 禁止切换出当前工作区，也禁止引用外部绝对路径、父级路径或用户目录变量。',
@@ -3692,7 +3753,7 @@ export async function runAgent(
     '咨询解释任务：可直接回答；需要项目事实时只使用读取与搜索工具，禁止修改文件。',
     '搜索定位与代码审查任务：读取、搜索并给出结论；除非用户明确要求修复，否则禁止修改文件。',
     '运行验证任务：仅执行与目标直接相关的检查或测试，禁止顺手修改无关内容。',
-    '文件修改任务：位置未知时先 search_files 定位行号，再调用 read_file 读取命中区间上下文；已有选区、明确行号或可靠命中位置时直接读取该区间上下文。读取后仍需判断是否检索其他文件或网页资料。已有非空文件默认先使用 replace_in_file 精准替换，搜索文本不唯一或已知行号时使用 replace_lines，仅新增片段时使用 insert_lines。简单修改直接执行，禁止先输出冗长计划。',
+    '文件修改任务：位置未知时先 grep 定位行号，再调用 read_file 读取命中区间上下文；已有选区、明确行号或可靠命中位置时直接读取该区间上下文。读取后仍需判断是否检索其他文件、会话历史或网页资料。已有非空文件默认先使用 replace_in_file 精准替换，搜索文本不唯一或已知行号时使用 replace_lines，仅新增片段时使用 insert_lines。简单修改直接执行，禁止先输出冗长计划。',
     '中文文稿规范化任务：若目标是修复英文双引号或英文单引号，先调用 read_file，再调用 normalize_chinese_quotes；该工具会跳过 Markdown 代码块、行内代码和英文单词撇号，禁止慢慢手工替换。',
     '用户没有表达创建、修改、修复、删除、移动或重命名意图时，不得调用任何写入类工具。',
     '工具只为完成目标服务，禁止为了展示流程而调用工具，禁止为了显得完整而强行编辑。',
@@ -3917,14 +3978,15 @@ export async function runAgent(
       replacement: text(args.replacement)
     })
   const toolPriority = new Map([
-    ['search_files', 0],
-    ['read_file', 1],
-    ['replace_in_file', 2],
-    ['replace_lines', 3],
-    ['insert_lines', 4],
-    ['normalize_chinese_quotes', 5],
-    ['file_info', 6],
-    ['search_conversation_history', 7],
+    ['grep', 0],
+    ['search_files', 1],
+    ['read_file', 2],
+    ['replace_in_file', 3],
+    ['replace_lines', 4],
+    ['insert_lines', 5],
+    ['normalize_chinese_quotes', 6],
+    ['file_info', 7],
+    ['search_conversation_history', 8],
     ['create_file', 90]
   ])
   const pendingAnchorDescription = (): string =>
@@ -3981,7 +4043,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                `编辑工具前置条件：${modelToolScopeInstruction} 修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。search_files 始终可用且检索优先级高于 read_file；优先像 grep 一样定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件或网页资料。`
+                `编辑工具前置条件：${modelToolScopeInstruction} 修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。grep 始终可用且检索优先级高于 read_file；优先定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件、会话历史或网页资料。`
             }
           ]
         : []),
@@ -3992,7 +4054,7 @@ export async function runAgent(
         ? [
             {
               role: 'system' as const,
-                content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。${modelToolScopeInstruction} 建议先用 search_files 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
+              content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。${modelToolScopeInstruction} 建议先用 grep 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
             }
           ]
         : replaceLinesFallbackPath
@@ -4011,11 +4073,11 @@ export async function runAgent(
               role: 'system' as const,
               content:
                 knowledgeResearchStage === 'anchor-read'
-                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。${modelToolScopeInstruction} 需要定位关键词、同义表达或跨文件资料时优先 search_files，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具。`
+                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。${modelToolScopeInstruction} 需要定位关键词、同义表达、跨文件资料或会话历史时优先 grep，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具。`
                   : knowledgeResearchStage === 'local-search'
-                  ? `当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 search_files 检索本地项目资料。${modelToolScopeInstruction} 请根据当前子任务自主选择。`
+                    ? `当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 grep 检索当前 CWD 与本地会话历史。${modelToolScopeInstruction} 请根据当前子任务自主选择。`
                   : knowledgeResearchStage === 'local-read'
-                    ? `当前资料建议：优先用 read_file 读取 search_files 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 search_files，也可根据当前子任务调用其他工具。${modelToolScopeInstruction}`
+                    ? `当前资料建议：优先用 read_file 读取 grep 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 grep，也可根据当前子任务调用其他工具。${modelToolScopeInstruction}`
                     : `本地资料未命中。若任务仍依赖外部人物、武学或既有设定，建议调用 search_web 并带上准确名称与作品名；${modelToolScopeInstruction}`
             }
           ]
@@ -4785,25 +4847,30 @@ export async function runAgent(
           messages.push({
             role: 'user',
             content:
-              '<runtime_anchor_context complete="true">用户选区上下文已读取。选区只是当前问题锚点；本轮属于写作或设定修正，下一步继续调用 search_files 检索本地人物、武学、关系、情节或其他相关设定，禁止直接编辑或联网。若本地资料不足，读取命中上下文后再决定 search_web。</runtime_anchor_context>'
+              '<runtime_anchor_context complete="true">用户选区上下文已读取。选区只是当前问题锚点；本轮属于写作或设定修正，下一步继续调用 grep 检索当前 CWD 与本地会话历史，禁止直接编辑或联网。若本地资料不足，读取命中上下文后再决定 search_web。</runtime_anchor_context>'
           })
         } else {
           knowledgeResearchStage = 'complete'
           messages.push({
             role: 'user',
             content:
-              '<runtime_anchor_context complete="true">用户选区上下文已读取。现在根据任务真实信息缺口自主决策：上下文充分时继续完成目标；需要跨文件关系、项目专有资料或同类实现时调用 search_files；涉及外部事实、最新信息、陌生技术或本地资料不足时调用 search_web。严禁把选区视为禁止检索。</runtime_anchor_context>'
+              '<runtime_anchor_context complete="true">用户选区上下文已读取。现在根据任务真实信息缺口自主决策：上下文充分时继续完成目标；需要跨文件关系、项目专有资料、会话历史或同类实现时调用 grep；涉及外部事实、最新信息、陌生技术或本地资料不足时调用 search_web。严禁把选区视为禁止检索。</runtime_anchor_context>'
           })
         }
       } else if (
         toolSucceeded &&
         knowledgeResearchStage === 'local-search' &&
-        call.name === 'search_files'
+        (call.name === 'grep' || call.name === 'search_files')
       ) {
-        if (
+        const workspaceHasNoMatches =
           result.trim() === '[]' ||
-          /"matches"\s*:\s*\[\s*\]/.test(result)
-        ) {
+          /"matches"\s*:\s*\[\s*\]/.test(result) ||
+          /"workspaceMatches"\s*:\s*\[\s*\]/.test(result)
+        const historyHasNoMatches =
+          call.name === 'search_files' ||
+          /returned=\\?"0\\?"/.test(result) ||
+          /会话历史资料库为空/.test(result)
+        if (workspaceHasNoMatches && historyHasNoMatches) {
           knowledgeResearchStage = 'web-search'
           forceToolNext = true
           messages.push({
