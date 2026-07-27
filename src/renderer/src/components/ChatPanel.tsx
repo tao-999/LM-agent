@@ -1522,6 +1522,29 @@ async function attachmentFromFile(file: globalThis.File): Promise<ChatAttachment
   return { name: file.name, kind: 'file', mimeType, size: file.size }
 }
 
+function ComposerAttachmentStrip({
+  hasAttachments,
+  children
+}: {
+  hasAttachments: boolean
+  children: React.ReactNode
+}): React.JSX.Element | null {
+  const editorSelection = useAppStore((state) => state.editorSelection)
+  if (!hasAttachments && !editorSelection?.text) return null
+  return (
+    <div className="attachment-strip">
+      {editorSelection?.text && (
+        <span className="selection-chip">
+          <Code2 size={12} />
+          {editorSelection.path.split(/[\\/]/).pop()}：第 {editorSelection.startLine}-
+          {editorSelection.endLine} 行
+        </span>
+      )}
+      {children}
+    </div>
+  )
+}
+
 export function ChatPanel(): React.JSX.Element {
   const model = useAppStore((state) => state.model)
   const setModel = useAppStore((state) => state.setModel)
@@ -1537,7 +1560,6 @@ export function ChatPanel(): React.JSX.Element {
   const workspaceRoots = useAppStore((state) => state.workspaceRoots)
   const workspaceTrees = useAppStore((state) => state.workspaceTrees)
   const activeFilePath = useAppStore((state) => state.activeFilePath)
-  const editorSelection = useAppStore((state) => state.editorSelection)
   const openFiles = useAppStore((state) => state.openFiles)
   const conversations = useAppStore((state) => state.conversations)
   const activeConversationId = useAppStore((state) => state.activeConversationId)
@@ -2181,6 +2203,7 @@ export function ChatPanel(): React.JSX.Element {
 
   const sendMessage = async (): Promise<void> => {
     const visibleText = input.trim()
+    const currentEditorSelection = useAppStore.getState().editorSelection
     if ((!visibleText && (mode === 'image' || !attachments.length)) || !conversation) return
     if (running && mode !== 'image') {
       if (!activePending || activePending[1].kind !== 'agent') return
@@ -2191,8 +2214,8 @@ export function ChatPanel(): React.JSX.Element {
           guidanceContent += localFileContextBlock('current_file', file.path, file.content)
         }
       }
-      if (editorSelection?.text) {
-        guidanceContent += `\n\n<selected_code path="${editorSelection.path}" lines="${editorSelection.startLine}-${editorSelection.endLine}">\n${editorSelection.text}\n</selected_code>`
+      if (currentEditorSelection?.text) {
+        guidanceContent += `\n\n<selected_code path="${currentEditorSelection.path}" lines="${currentEditorSelection.startLine}-${currentEditorSelection.endLine}">\n${currentEditorSelection.text}\n</selected_code>`
       }
       await window.localAgent.agent.guide({
         requestId: activePending[0],
@@ -2313,8 +2336,8 @@ export function ChatPanel(): React.JSX.Element {
         modelText += localFileContextBlock('current_file', file.path, file.content)
       }
     }
-    if (editorSelection?.text) {
-      modelText += `\n\n<selected_code path="${editorSelection.path}" lines="${editorSelection.startLine}-${editorSelection.endLine}">\n${editorSelection.text}\n</selected_code>`
+    if (currentEditorSelection?.text) {
+      modelText += `\n\n<selected_code path="${currentEditorSelection.path}" lines="${currentEditorSelection.startLine}-${currentEditorSelection.endLine}">\n${currentEditorSelection.text}\n</selected_code>`
     }
 
     const requestAttachments = [...attachments]
@@ -2338,8 +2361,8 @@ export function ChatPanel(): React.JSX.Element {
       })),
       meta: forceWebSearch
         ? '已要求联网搜索与多来源核验'
-        : editorSelection?.text
-        ? `已携带 ${editorSelection.path.split(/[\\/]/).pop()} 第 ${editorSelection.startLine}-${editorSelection.endLine} 行`
+        : currentEditorSelection?.text
+        ? `已携带 ${currentEditorSelection.path.split(/[\\/]/).pop()} 第 ${currentEditorSelection.startLine}-${currentEditorSelection.endLine} 行`
         : attachCurrent && activeFilePath
           ? `已引用 ${activeFilePath.split(/[\\/]/).pop()}`
           : undefined
@@ -2773,15 +2796,8 @@ export function ChatPanel(): React.JSX.Element {
           </section>
         )}
 
-        {mode !== 'image' && (attachments.length > 0 || editorSelection?.text) && (
-          <div className="attachment-strip">
-            {editorSelection?.text && (
-              <span className="selection-chip">
-                <Code2 size={12} />
-                {editorSelection.path.split(/[\\/]/).pop()}：第 {editorSelection.startLine}-
-                {editorSelection.endLine} 行
-              </span>
-            )}
+        {mode !== 'image' && (
+          <ComposerAttachmentStrip hasAttachments={attachments.length > 0}>
             {attachments.map((attachment, index) => (
               attachment.kind === 'image' && attachment.thumbnail ? (
                 <figure
@@ -2838,7 +2854,7 @@ export function ChatPanel(): React.JSX.Element {
                 </span>
               )
             ))}
-          </div>
+          </ComposerAttachmentStrip>
         )}
 
         <div className="composer-tools">

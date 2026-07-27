@@ -442,10 +442,25 @@ function LeftPanel({
   return <ProjectSidebar onOpenFile={onOpenFile} />
 }
 
+function SettingsModalGate(): React.JSX.Element | null {
+  const settingsOpen = useAppStore((state) => state.settingsOpen)
+  if (!settingsOpen) return null
+  const close = (): void => useAppStore.getState().setSettingsOpen(false)
+  return (
+    <div
+      className="settings-modal-backdrop"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) close()
+      }}
+    >
+      <SettingsPanel onClose={close} />
+    </div>
+  )
+}
+
 export default function App(): React.JSX.Element {
   const workspaceRoot = useAppStore((state) => state.workspaceRoot)
   const workspaceRoots = useAppStore((state) => state.workspaceRoots)
-  const settingsOpen = useAppStore((state) => state.settingsOpen)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [projectWidth, setProjectWidth] = useState(() =>
     Number(localStorage.getItem('layout-project-width') || 260)
@@ -1130,18 +1145,7 @@ export default function App(): React.JSX.Element {
         </span>
         <span className="status-item">数据仅保存在本机</span>
       </footer>
-      {settingsOpen && (
-        <div
-          className="settings-modal-backdrop"
-          onPointerDown={(event) => {
-            if (event.target === event.currentTarget) {
-              useAppStore.getState().setSettingsOpen(false)
-            }
-          }}
-        >
-          <SettingsPanel onClose={() => useAppStore.getState().setSettingsOpen(false)} />
-        </div>
-      )}
+      <SettingsModalGate />
       {aboutOpen && (
         <div
           className="about-modal-backdrop"
@@ -1162,7 +1166,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.131</dd></div>
+                <div><dt>版本</dt><dd>0.7.132</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

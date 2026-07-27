@@ -766,7 +766,6 @@ export function FileWorkspace(): React.JSX.Element {
   const setWorkspace = useAppStore((state) => state.setWorkspace)
   const setActiveFile = useAppStore((state) => state.setActiveFile)
   const openFile = useAppStore((state) => state.openFile)
-  const setEditorSelection = useAppStore((state) => state.setEditorSelection)
   const closeFile = useAppStore((state) => state.closeFile)
   const closeOtherFiles = useAppStore((state) => state.closeOtherFiles)
   const closeAllFiles = useAppStore((state) => state.closeAllFiles)
@@ -1091,19 +1090,38 @@ export function FileWorkspace(): React.JSX.Element {
       editor.revealLineInCenter(activeFile.revealLine)
       editor.setPosition({ lineNumber: activeFile.revealLine, column: 1 })
     }
+    let selectionFrame = 0
     editor.onDidChangeCursorSelection((event) => {
-      const model = editor.getModel()
-      const currentPath = useAppStore.getState().activeFilePath
-      if (!model || !currentPath || event.selection.isEmpty()) {
-        setEditorSelection(null)
-        return
-      }
-      setEditorSelection({
-        path: currentPath,
-        text: model.getValueInRange(event.selection),
-        startLine: event.selection.startLineNumber,
-        endLine: event.selection.endLineNumber
+      if (selectionFrame) window.cancelAnimationFrame(selectionFrame)
+      const selection = event.selection
+      selectionFrame = window.requestAnimationFrame(() => {
+        selectionFrame = 0
+        const state = useAppStore.getState()
+        const model = editor.getModel()
+        const currentPath = state.activeFilePath
+        const nextSelection =
+          model && currentPath && !selection.isEmpty()
+            ? {
+                path: currentPath,
+                text: model.getValueInRange(selection),
+                startLine: selection.startLineNumber,
+                endLine: selection.endLineNumber
+              }
+            : null
+        const current = state.editorSelection
+        if (
+          current?.path === nextSelection?.path &&
+          current?.text === nextSelection?.text &&
+          current?.startLine === nextSelection?.startLine &&
+          current?.endLine === nextSelection?.endLine
+        ) {
+          return
+        }
+        state.setEditorSelection(nextSelection)
       })
+    })
+    editor.onDidDispose(() => {
+      if (selectionFrame) window.cancelAnimationFrame(selectionFrame)
     })
   }
 

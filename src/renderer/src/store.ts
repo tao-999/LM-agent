@@ -25,8 +25,10 @@ import {
   updateWorkspacePathExpanded,
   type WorkspaceExpandedPaths
 } from './utils/project-tree-state'
+import { createReferenceMemoizedProjection } from './utils/reference-memo'
 
 const pendingStorageWrites = new Map<string, StorageValue<unknown>>()
+const latestPersistedStateByName = new Map<string, unknown>()
 let storageWriteTimer: number | undefined
 
 function flushStorageWrites(): void {
@@ -46,18 +48,23 @@ const bufferedPersistStorage: PersistStorage<unknown> = {
     const value = window.localStorage.getItem(name)
     if (!value) return null
     try {
-      return JSON.parse(value) as StorageValue<unknown>
+      const parsed = JSON.parse(value) as StorageValue<unknown>
+      latestPersistedStateByName.set(name, parsed.state)
+      return parsed
     } catch {
       return null
     }
   },
   setItem: (name, value) => {
+    if (latestPersistedStateByName.get(name) === value.state) return
+    latestPersistedStateByName.set(name, value.state)
     pendingStorageWrites.set(name, value)
     if (storageWriteTimer !== undefined) window.clearTimeout(storageWriteTimer)
     storageWriteTimer = window.setTimeout(flushStorageWrites, 800)
   },
   removeItem: (name) => {
     pendingStorageWrites.delete(name)
+    latestPersistedStateByName.delete(name)
     window.localStorage.removeItem(name)
   }
 }
@@ -194,6 +201,50 @@ const initialConversation: PersistedConversation = {
   createdAt: now,
   updatedAt: now
 }
+
+const projectPersistedState = createReferenceMemoizedProjection(
+  (state: AppStore) => [
+    state.workspaceRoot,
+    state.workspaceRoots,
+    state.expandedWorkspacePaths,
+    state.editorTheme,
+    state.model,
+    state.customModels,
+    state.modelThinkingModes,
+    state.globalInstructions,
+    state.skills,
+    state.agentPermissionMode,
+    state.confirmCreateDelete,
+    state.tokenUsageRecords,
+    state.comfyBaseUrl,
+    state.comfyWorkflows,
+    state.selectedComfyWorkflowId,
+    state.conversations,
+    state.activeConversationId
+  ],
+  (state: AppStore) => ({
+    workspaceRoot: state.workspaceRoot,
+    workspaceRoots: state.workspaceRoots,
+    expandedWorkspacePaths: state.expandedWorkspacePaths,
+    editorTheme: state.editorTheme,
+    model: { ...state.model, apiKey: undefined },
+    customModels: state.customModels.map((item) => ({ ...item, apiKey: undefined })),
+    modelThinkingModes: state.modelThinkingModes,
+    globalInstructions: state.globalInstructions,
+    skills: state.skills,
+    agentPermissionMode: state.agentPermissionMode,
+    confirmCreateDelete: state.confirmCreateDelete,
+    tokenUsageRecords: state.tokenUsageRecords,
+    comfyBaseUrl: state.comfyBaseUrl,
+    comfyWorkflows: state.comfyWorkflows,
+    selectedComfyWorkflowId: state.selectedComfyWorkflowId,
+    conversations: state.conversations.map((conversation) => ({
+      ...conversation,
+      model: conversation.model ? persistedModel(conversation.model) : undefined
+    })),
+    activeConversationId: state.activeConversationId
+  })
+)
 
 const defaultModel: ModelConfig = {
   provider: 'ollama',
@@ -926,28 +977,7 @@ export const useAppStore = create<AppStore>()(
         state.model = restoreConversationModel(activeConversation, state.model ?? defaultModel)
         return state as AppStore
       },
-      partialize: (state) => ({
-        workspaceRoot: state.workspaceRoot,
-        workspaceRoots: state.workspaceRoots,
-        expandedWorkspacePaths: state.expandedWorkspacePaths,
-        editorTheme: state.editorTheme,
-        model: { ...state.model, apiKey: undefined },
-        customModels: state.customModels.map((item) => ({ ...item, apiKey: undefined })),
-        modelThinkingModes: state.modelThinkingModes,
-        globalInstructions: state.globalInstructions,
-        skills: state.skills,
-        agentPermissionMode: state.agentPermissionMode,
-        confirmCreateDelete: state.confirmCreateDelete,
-        tokenUsageRecords: state.tokenUsageRecords,
-        comfyBaseUrl: state.comfyBaseUrl,
-        comfyWorkflows: state.comfyWorkflows,
-        selectedComfyWorkflowId: state.selectedComfyWorkflowId,
-        conversations: state.conversations.map((conversation) => ({
-          ...conversation,
-          model: conversation.model ? persistedModel(conversation.model) : undefined
-        })),
-        activeConversationId: state.activeConversationId
-      })
+      partialize: projectPersistedState
     }
   )
 )
