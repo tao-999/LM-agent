@@ -53,6 +53,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'highlight.js/styles/github-dark.css'
 import 'katex/dist/katex.min.css'
+import { setChatScrollActive } from '../utils/chat-scroll-activity'
 import type {
   AgentApproval,
   ChatContextMessage,
@@ -2641,6 +2642,7 @@ export function ChatPanel(): React.JSX.Element {
               key={conversation?.id}
               ref={virtuosoRef}
               data={messages}
+              isScrolling={setChatScrollActive}
               computeItemKey={(_index, message) => message.id}
               followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
               atBottomThreshold={96}

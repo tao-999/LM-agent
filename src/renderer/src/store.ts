@@ -26,15 +26,20 @@ import {
   type WorkspaceExpandedPaths
 } from './utils/project-tree-state'
 import { createReferenceMemoizedProjection } from './utils/reference-memo'
+import { isChatScrollActive } from './utils/chat-scroll-activity'
 
 const pendingStorageWrites = new Map<string, StorageValue<unknown>>()
 const latestPersistedStateByName = new Map<string, unknown>()
 let storageWriteTimer: number | undefined
 
-function flushStorageWrites(): void {
+function flushStorageWrites(force = false): void {
   if (storageWriteTimer !== undefined) {
     window.clearTimeout(storageWriteTimer)
     storageWriteTimer = undefined
+  }
+  if (!force && isChatScrollActive()) {
+    storageWriteTimer = window.setTimeout(flushStorageWrites, 240)
+    return
   }
   for (const [name, value] of pendingStorageWrites) {
     window.localStorage.setItem(name, JSON.stringify(value))
@@ -69,7 +74,7 @@ const bufferedPersistStorage: PersistStorage<unknown> = {
   }
 }
 
-window.addEventListener('beforeunload', flushStorageWrites)
+window.addEventListener('beforeunload', () => flushStorageWrites(true))
 
 export type OpenFile = {
   path: string
@@ -332,43 +337,10 @@ function compactAgentBlocks(
       changed = true
       continue
     }
-    if (block.type === 'thinking' && content.length > 140_000) {
-      content = `${content.slice(0, 40_000)}\n\n……较早思考内容已折叠以保证界面流畅……\n\n${content.slice(-100_000)}`
-      changed = true
-    }
     if (content !== block.content) changed = true
     cleaned.push(content === block.content ? block : { ...block, content })
   }
-
-  if (cleaned.length <= 220) return changed ? cleaned : blocks
-  const recentStart = Math.max(0, cleaned.length - 120)
-  const retainedIndexes = new Set<number>()
-  cleaned.forEach((block, index) => {
-    if (
-      index >= recentStart ||
-      block.type === 'response' ||
-      block.type === 'guidance' ||
-      block.type === 'image' ||
-      block.type === 'tasks'
-    ) {
-      retainedIndexes.add(index)
-    }
-  })
-  const retained = cleaned.filter((_, index) => retainedIndexes.has(index))
-  const firstRetainedIndex = cleaned.findIndex((_, index) => retainedIndexes.has(index))
-  const marker: AgentExecutionBlock = {
-    id: `history-compacted-${Date.now()}`,
-    type: 'operation',
-    title: `已折叠 ${cleaned.length - retained.length} 条较早过程以保证性能`,
-    status: 'done',
-    startedAt: blockTime(cleaned[Math.max(0, firstRetainedIndex)] ?? cleaned[0]),
-    completedAt: blockTime(cleaned[Math.max(0, firstRetainedIndex)] ?? cleaned[0])
-  }
-  const insertAt = retained.findIndex(
-    (block) => blockTime(block) >= blockTime(cleaned[recentStart])
-  )
-  retained.splice(Math.max(0, insertAt), 0, marker)
-  return retained
+  return changed ? cleaned : blocks
 }
 
 function settleInterruptedMessage(message: ChatMessage): ChatMessage {

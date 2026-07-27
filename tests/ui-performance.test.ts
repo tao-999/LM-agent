@@ -3,6 +3,11 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { createReferenceMemoizedProjection } from '../src/renderer/src/utils/reference-memo.ts'
+import {
+  isChatScrollActive,
+  setChatScrollActive,
+  subscribeChatScrollActivity
+} from '../src/renderer/src/utils/chat-scroll-activity.ts'
 
 test('临时 UI 状态变化复用持久化投影，避免重建超长会话快照', () => {
   type State = { transient: boolean; conversations: object[] }
@@ -41,4 +46,35 @@ test('发送消息按需读取编辑器选区，聊天主组件不订阅选区�
   const chatPanelBody = source.slice(source.indexOf('export function ChatPanel'))
   assert.doesNotMatch(chatPanelBody, /useAppStore\(\(state\) => state\.editorSelection\)/)
   assert.match(chatPanelBody, /currentEditorSelection = useAppStore\.getState\(\)\.editorSelection/)
+})
+
+test('滚动状态协调器只在状态真正变化时通知流式渲染层', () => {
+  const states: boolean[] = []
+  setChatScrollActive(false)
+  const unsubscribe = subscribeChatScrollActivity((active) => states.push(active))
+  setChatScrollActive(true)
+  setChatScrollActive(true)
+  assert.equal(isChatScrollActive(), true)
+  setChatScrollActive(false)
+  unsubscribe()
+  assert.deepEqual(states, [true, false])
+})
+
+test('会话滚动期间暂停流式刷新与大型持久化写入', async () => {
+  const appSource = await fs.readFile(path.resolve('src/renderer/src/App.tsx'), 'utf8')
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  const storeSource = await fs.readFile(path.resolve('src/renderer/src/store.ts'), 'utf8')
+  assert.match(appSource, /if \(!force && isChatScrollActive\(\)\) return/)
+  assert.match(chatSource, /isScrolling=\{setChatScrollActive\}/)
+  assert.match(storeSource, /if \(!force && isChatScrollActive\(\)\)/)
+})
+
+test('超长思考与较早过程保持完整，不在会话存储中裁剪', async () => {
+  const storeSource = await fs.readFile(path.resolve('src/renderer/src/store.ts'), 'utf8')
+  assert.doesNotMatch(storeSource, /较早思考内容已折叠以保证界面流畅/)
+  assert.doesNotMatch(storeSource, /已折叠 .* 条较早过程以保证性能/)
+  assert.doesNotMatch(storeSource, /content\.length > 140_000/)
 })

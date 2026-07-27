@@ -15,6 +15,10 @@ import { ProjectSidebar } from './components/ProjectSidebar'
 import { SearchPanel } from './components/SearchPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { useAppStore } from './store'
+import {
+  isChatScrollActive,
+  subscribeChatScrollActivity
+} from './utils/chat-scroll-activity'
 
 function isToolResultEvent(event: AgentEvent): boolean {
   return (
@@ -656,8 +660,9 @@ export default function App(): React.JSX.Element {
       )
     }
 
-    const flushStreamQueues = (): void => {
+    const flushStreamQueues = (force = false): void => {
       streamFlushTimer = undefined
+      if (!force && isChatScrollActive()) return
       for (const requestId of [...chatStreamQueues.keys()]) flushChatRequest(requestId)
       for (const requestId of [...agentStreamQueues.keys()]) flushAgentRequest(requestId)
       for (const requestId of [...imageStreamQueues.keys()]) flushImageRequest(requestId)
@@ -665,8 +670,21 @@ export default function App(): React.JSX.Element {
 
     const scheduleStreamFlush = (): void => {
       if (streamFlushTimer !== undefined) return
+      if (isChatScrollActive()) return
       streamFlushTimer = window.setTimeout(flushStreamQueues, 120)
     }
+
+    const unsubscribeChatScrollActivity = subscribeChatScrollActivity((active) => {
+      if (active || streamFlushTimer !== undefined) return
+      if (
+        chatStreamQueues.size === 0 &&
+        agentStreamQueues.size === 0 &&
+        imageStreamQueues.size === 0
+      ) {
+        return
+      }
+      streamFlushTimer = window.setTimeout(flushStreamQueues, 0)
+    })
 
     const unsubscribeChat = window.localAgent.chat.onEvent((event) => {
       if (event.type === 'chunk' || event.type === 'reasoning') {
@@ -1043,7 +1061,8 @@ export default function App(): React.JSX.Element {
     })
     return () => {
       if (streamFlushTimer !== undefined) window.clearTimeout(streamFlushTimer)
-      flushStreamQueues()
+      flushStreamQueues(true)
+      unsubscribeChatScrollActivity()
       unsubscribeChat()
       unsubscribeAgent()
       unsubscribeImage()
@@ -1166,7 +1185,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.132</dd></div>
+                <div><dt>版本</dt><dd>0.7.133</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>
