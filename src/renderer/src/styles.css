@@ -192,8 +192,7 @@ button:disabled {
   transition: 120ms ease;
 }
 
-.resize-handle.vertical:hover::after,
-body.is-resizing .resize-handle.vertical::after {
+.resize-handle.vertical:hover::after {
   left: 1px;
   width: 3px;
   background: var(--accent);
@@ -3436,7 +3435,7 @@ body.is-resizing-vertical .terminal-resize-handle::after {
 }
 
 .message-list-footer {
-  height: 18px;
+  height: 36px;
 }
 
 .message-role-actions,
@@ -7239,8 +7238,7 @@ body.is-resizing-vertical .terminal-resize-handle::after {
   background: rgba(255, 255, 255, 0.065);
 }
 
-.resize-handle.vertical:hover::after,
-body.is-resizing .resize-handle.vertical::after {
+.resize-handle.vertical:hover::after {
   background: rgba(10, 132, 255, 0.84);
 }
 
@@ -7872,19 +7870,7 @@ body.is-resizing .resize-handle.vertical::after {
 }
 
 .resize-handle.vertical::after {
-  top: 12px;
-  bottom: 12px;
-  left: 1px;
-  width: 2px;
-  border-radius: 2px;
-  background: transparent;
-}
-
-.resize-handle.vertical:hover::after,
-body.is-resizing .resize-handle.vertical::after {
-  left: 1px;
-  width: 2px;
-  background: rgba(10, 132, 255, 0.82);
+  display: none;
 }
 
 .navigation-shell .activity-bar {

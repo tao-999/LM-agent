@@ -78,3 +78,24 @@ test('超长思考与较早过程保持完整，不在会话存储中裁剪', as
   assert.doesNotMatch(storeSource, /已折叠 .* 条较早过程以保证性能/)
   assert.doesNotMatch(storeSource, /content\.length > 140_000/)
 })
+
+test('分隔拖拽区只改变鼠标形态且宽度固定为整数像素', async () => {
+  const appSource = await fs.readFile(path.resolve('src/renderer/src/App.tsx'), 'utf8')
+  const styleSource = await fs.readFile(path.resolve('src/renderer/src/styles.css'), 'utf8')
+  assert.match(appSource, /setProjectWidth\(Math\.round\(/)
+  assert.match(appSource, /setChatWidth\(Math\.round\(/)
+  assert.match(styleSource, /\.resize-handle\.vertical\s*\{[^}]*cursor:\s*col-resize;/s)
+  const finalHandleStyle = styleSource.lastIndexOf('.resize-handle.vertical::after')
+  assert.ok(finalHandleStyle >= 0)
+  assert.match(styleSource.slice(finalHandleStyle), /display:\s*none;/)
+})
+
+test('会话底部使用真实阈值并保留完整可见留白', async () => {
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  const styleSource = await fs.readFile(path.resolve('src/renderer/src/styles.css'), 'utf8')
+  assert.match(chatSource, /atBottomThreshold=\{8\}/)
+  assert.match(styleSource, /\.message-list-footer\s*\{\s*height:\s*36px;/)
+})

@@ -485,9 +485,9 @@ export default function App(): React.JSX.Element {
     const move = (pointerEvent: PointerEvent): void => {
       const delta = pointerEvent.clientX - startX
       if (target === 'project') {
-        setProjectWidth(Math.max(180, Math.min(460, startWidth + delta)))
+        setProjectWidth(Math.round(Math.max(180, Math.min(460, startWidth + delta))))
       } else {
-        setChatWidth(Math.max(220, Math.min(720, startWidth + delta)))
+        setChatWidth(Math.round(Math.max(220, Math.min(720, startWidth + delta))))
       }
     }
     const stop = (): void => {
@@ -1185,7 +1185,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.133</dd></div>
+                <div><dt>版本</dt><dd>0.7.134</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

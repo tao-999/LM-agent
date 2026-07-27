@@ -2645,7 +2645,7 @@ export function ChatPanel(): React.JSX.Element {
               isScrolling={setChatScrollActive}
               computeItemKey={(_index, message) => message.id}
               followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
-              atBottomThreshold={96}
+              atBottomThreshold={8}
               increaseViewportBy={{ top: 500, bottom: 700 }}
               rangeChanged={setVisibleRange}
               atBottomStateChange={setAtBottom}
