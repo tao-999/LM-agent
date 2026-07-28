@@ -35,6 +35,12 @@ import {
   type LlmMessage,
   type ToolDefinition
 } from './models'
+import {
+  cachePdfResponse,
+  formatPaperCacheSummary,
+  isPdfWebResponse,
+  searchPaperCache
+} from './paper-cache'
 import { WorkflowCycleGuard } from './workflow-cycle-guard'
 import {
   commandContainsDestructiveOperation,
@@ -1298,7 +1304,7 @@ async function runFetchResult(
   signal: AbortSignal
 ): Promise<WebFetchProbe> {
   try {
-    const content = await fetchPublicWebpage(item.url, 16000, signal)
+    const content = await fetchPublicWebpage(item.url, 16000, signal, item.title)
     if (!webContentMatchesQuery(query, `${item.title}\n${item.snippet}\n${content}`)) {
       throw new Error('网页正文与查询核心词相关度不足')
     }
@@ -1518,6 +1524,11 @@ async function parsePublicWebpageResponse(
   const maxChars = Math.max(2000, Math.min(30000, maxCharsValue || 18000))
   const contentType = response.headers.get('content-type') ?? ''
   const normalizedContentType = contentType.toLocaleLowerCase()
+  if (isPdfWebResponse(response, requestedUrl)) {
+    if (!response.ok) throw new Error(`PDF 返回 ${response.status} ${response.statusText}`)
+    const record = await cachePdfResponse(response, requestedUrl)
+    return formatPaperCacheSummary(record)
+  }
   if (
     contentType &&
     !normalizedContentType.includes('text/') &&
@@ -1617,21 +1628,27 @@ async function renderPublicWebpageLocally(
 export async function fetchPublicWebpage(
   urlValue: string,
   maxCharsValue: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  titleHint = ''
 ): Promise<string> {
   const url = assertPublicWebUrl(urlValue.trim()).toString()
   const cacheKey = `${url}\n${Math.max(2000, Math.min(30000, maxCharsValue || 18000))}`
   const cached = cachedWebValue(webPageCache, cacheKey)
   if (cached) return cached
   let directError: Error | null = null
+  let directWasPdf = false
   try {
     const response = await fetchPublicPage(url, signal)
-    const content = await parsePublicWebpageResponse(response, url, maxCharsValue)
+    directWasPdf = isPdfWebResponse(response, url)
+    const content = directWasPdf
+      ? formatPaperCacheSummary(await cachePdfResponse(response, url, titleHint))
+      : await parsePublicWebpageResponse(response, url, maxCharsValue)
     storeWebValue(webPageCache, cacheKey, content, 30 * 60 * 1000, 240)
     return content
   } catch (error) {
     if (signal.aborted) throw error
     directError = error instanceof Error ? error : new Error(String(error))
+    if (directWasPdf) throw directError
   }
   try {
     const content = await renderPublicWebpageLocally(url, maxCharsValue, signal)
@@ -3052,7 +3069,7 @@ export async function runAgent(
       function: {
         name: 'grep',
         description:
-          '使用应用内置 ripgrep 检索。默认搜索当前 CWD 下的全部项目文件，并同时检索本地会话历史资料库；传入 path 时仅收窄项目文件范围，会话历史默认不附加，可用 include_history 显式开启。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。位置未知、跨文件查找、检索项目资料或历史事实时优先使用本工具。',
+          '使用应用内置 ripgrep 检索。默认搜索当前 CWD 下的全部项目文件、本地会话历史资料库，以及最近 60 分钟内由 search_web 解析的论文 PDF 临时缓存；传入 path 时仅收窄项目文件范围，会话历史与论文缓存默认不附加，可分别用 include_history、include_papers 显式开启。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。位置未知、跨文件查找、检索项目资料、论文或历史事实时优先使用本工具。',
         parameters: {
           type: 'object',
           required: ['query'],
@@ -3065,6 +3082,11 @@ export async function runAgent(
             include_history: {
               type: 'boolean',
               description: '是否同时检索本地会话历史；全局检索默认 true，指定 path 时默认 false'
+            },
+            include_papers: {
+              type: 'boolean',
+              description:
+                '是否同时检索 60 分钟内的论文 PDF 本地缓存；全局检索默认 true，指定 path 时默认 false'
             },
             max_history_results: {
               type: 'integer',
@@ -3081,7 +3103,12 @@ export async function runAgent(
       const query = text(args.query)
       const includeHistory =
         typeof args.include_history === 'boolean' ? args.include_history : !scopePath
-      const results = await searchWorkspace(request.workspaceRoot, query, scopePath)
+      const includePapers =
+        typeof args.include_papers === 'boolean' ? args.include_papers : !scopePath
+      const [results, paperMatches] = await Promise.all([
+        searchWorkspace(request.workspaceRoot, query, scopePath),
+        includePapers ? searchPaperCache(query) : Promise.resolve([])
+      ])
       return stringifyResult({
         engine: 'ripgrep',
         scope: scopePath || '当前 CWD 全部文件',
@@ -3096,7 +3123,13 @@ export async function runAgent(
               query,
               Number(args.max_history_results) || 6
             )
-          : '未启用会话历史检索'
+          : '未启用会话历史检索',
+        paperCache: includePapers
+          ? {
+              ttlMinutes: 60,
+              matches: paperMatches
+            }
+          : '未启用论文缓存检索'
       })
     }
   })

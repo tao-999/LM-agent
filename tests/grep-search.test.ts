@@ -67,4 +67,5 @@ test('Agent 暴露 grep 并默认合并本地会话历史', async () => {
   assert.match(source, /tools\.set\('grep'/)
   assert.match(source, /includeHistory[\s\S]*!scopePath/)
   assert.match(source, /searchConversationHistoryArchive\([\s\S]*request\.historyArchive/)
+  assert.match(source, /includePapers[\s\S]*searchPaperCache\(query\)/)
 })
