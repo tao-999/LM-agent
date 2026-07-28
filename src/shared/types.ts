@@ -12,6 +12,9 @@ export type SearchResult = {
   line: number
   preview: string
   matches?: string[]
+  contextStart?: number
+  contextEnd?: number
+  context?: string
 }
 
 export type FileEncoding =
@@ -230,6 +233,7 @@ export type ImageGenerationRequest = {
   prompt: string
   contextMessages: ChatContextMessage[]
   historyArchive?: ChatContextMessage[]
+  workspaceRoot: string
   steps: number
   width: number
   height: number
@@ -299,6 +303,7 @@ export type ChatStartRequest = {
   forceWebSearch?: boolean
   messages: ChatContextMessage[]
   historyArchive?: ChatContextMessage[]
+  workspaceRoot: string
   contextMemory?: string
 }
 

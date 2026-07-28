@@ -2180,7 +2180,7 @@ export function ChatPanel(): React.JSX.Element {
   ): string => {
     const totalLines = content.split(/\r?\n/).length
     if (mode === 'agent' && totalLines > 200) {
-      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 search_files 定位关键词，再用 read_file 读取命中行上下各约 50 行。</file_reference>`
+      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 grep 全局定位关键词，再用 read_file 读取命中行上下各约 50 行。</file_reference>`
     }
     return `\n\n<${tag} path="${filePath}">\n${content}\n</${tag}>`
   }
@@ -2290,6 +2290,7 @@ export function ChatPanel(): React.JSX.Element {
           prompt: visibleText,
           contextMessages: imageContext.recent,
           historyArchive: imageContext.archive,
+          workspaceRoot,
           steps: selectedImageSteps,
           width: selectedImageWidth,
           height: selectedImageHeight,
@@ -2436,7 +2437,8 @@ export function ChatPanel(): React.JSX.Element {
         webSearch: webToolsAvailable,
         forceWebSearch,
         messages: [...contextHistory.recent, { role: 'user', content: modelText }],
-        historyArchive: contextHistory.archive
+        historyArchive: contextHistory.archive,
+        workspaceRoot
       })
     }
   }

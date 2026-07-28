@@ -65,7 +65,23 @@ test('grep 表达式支持 OR 与同文件 AND', async () => {
 test('Agent 暴露 grep 并默认合并本地会话历史', async () => {
   const source = await fs.readFile(path.resolve('src/main/agent.ts'), 'utf8')
   assert.match(source, /tools\.set\('grep'/)
-  assert.match(source, /includeHistory[\s\S]*!scopePath/)
-  assert.match(source, /searchConversationHistoryArchive\([\s\S]*request\.historyArchive/)
+  assert.match(source, /includeHistory[\s\S]*:\s*true/)
+  assert.match(source, /grepConversationHistoryArchive\([\s\S]*request\.historyArchive/)
   assert.match(source, /includePapers[\s\S]*searchPaperCache\(query\)/)
+  assert.doesNotMatch(source, /tools\.set\('search_conversation_history'/)
+  assert.doesNotMatch(source, /tools\.set\('search_files'/)
+})
+
+test('grep 命中返回前后各五行上下文', async () => {
+  await withWorkspace(async (root) => {
+    const lines = Array.from({ length: 20 }, (_, index) => `第 ${index + 1} 行`)
+    lines[9] = '第 10 行包含目标词'
+    await fs.writeFile(path.join(root, 'context.txt'), lines.join('\n'), 'utf8')
+    const [result] = await searchWorkspace(root, '目标词')
+    assert.equal(result.line, 10)
+    assert.equal(result.contextStart, 5)
+    assert.equal(result.contextEnd, 15)
+    assert.match(result.context ?? '', /^5 \| 第 5 行/m)
+    assert.match(result.context ?? '', /^15 \| 第 15 行/m)
+  })
 })

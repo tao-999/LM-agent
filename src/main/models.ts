@@ -310,6 +310,8 @@ const PRIVATE_HOST_BLOCK_TAGS = [
   'post_edit_review',
   'host_runtime_context',
   'live_web_evidence',
+  'local_resource_index',
+  'grep_history_results',
   'conversation_history_results',
   'web_search_empty',
   'runtime_model_error',
@@ -317,6 +319,7 @@ const PRIVATE_HOST_BLOCK_TAGS = [
   'runtime_research_gate',
   'runtime_web_status',
   'runtime_history_status',
+  'runtime_local_search_status',
   'runtime_completion_guard',
   'runtime_replace_recovery',
   'runtime_anchor_context',
@@ -1144,6 +1147,8 @@ export function serializeHostMarkupForModel(value: string): string {
     ['interaction_event', '交互事件'],
     ['host_runtime_context', '宿主运行环境'],
     ['live_web_evidence', '实时网页证据'],
+    ['local_resource_index', '本地资料索引'],
+    ['grep_history_results', 'grep 会话历史命中'],
     ['runtime_model_error', '模型运行错误'],
     ['task_understanding', '任务理解'],
     ['runtime_workflow_stage', '工作流阶段'],
@@ -1153,6 +1158,7 @@ export function serializeHostMarkupForModel(value: string): string {
     ['runtime_research_gate', '资料检索约束'],
     ['runtime_web_status', '网页检索状态'],
     ['runtime_history_status', '会话历史检索状态'],
+    ['runtime_local_search_status', '本地检索状态'],
     ['tool_runtime_observation', '工具运行观察'],
     ['post_edit_review', '编辑后复查']
   ]

@@ -34,7 +34,7 @@ test('真实进度变化后相同工具属于新阶段', () => {
   const guard = new WorkflowCycleGuard()
   for (let revision = 1; revision <= 3; revision += 1) {
     const result = guard.observe({
-      toolName: 'search_conversation_history',
+      toolName: 'grep',
       arguments: { query: '续写 剧情推进' },
       taskState: 'edit:in_progress',
       progressRevision: revision
@@ -48,7 +48,7 @@ test('不同目标的历史检索不会误判为循环', () => {
   const queries = ['用户喜欢的编辑器主题', 'Kimi 模型连接参数', '小说人物郭巨侠设定']
   for (const query of queries) {
     const result = guard.observe({
-      toolName: 'search_conversation_history',
+      toolName: 'grep',
       arguments: { query },
       taskState: 'research:in_progress',
       progressRevision: 2

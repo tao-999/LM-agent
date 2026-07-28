@@ -39,6 +39,7 @@ import {
   cachePdfResponse,
   formatPaperCacheSummary,
   isPdfWebResponse,
+  readPaperCacheText,
   searchPaperCache
 } from './paper-cache'
 import { WorkflowCycleGuard } from './workflow-cycle-guard'
@@ -225,7 +226,77 @@ function historySearchTerms(query: string): string[] {
   return [...new Set([...terms, ...pairs])].slice(0, 24)
 }
 
-export function searchConversationHistoryArchive(
+const HISTORY_SOURCE_PREFIX = '@history/'
+const PAPER_SOURCE_PREFIX = '@papers/'
+
+function historySourcePath(index: number, role: ChatContextMessage['role']): string {
+  return `${HISTORY_SOURCE_PREFIX}${String(index + 1).padStart(4, '0')}-${role}.txt`
+}
+
+function historySourceIndex(sourcePath: string): number | null {
+  const match = sourcePath.match(/^@history\/(\d{4,})-(?:user|assistant)\.txt$/i)
+  if (!match) return null
+  const index = Number(match[1]) - 1
+  return Number.isSafeInteger(index) && index >= 0 ? index : null
+}
+
+export async function readLocalSourceContent(
+  workspaceRoot: string,
+  archive: ChatContextMessage[] | undefined,
+  sourcePath: string
+): Promise<{ content: string; virtual: boolean }> {
+  const historyIndex = historySourceIndex(sourcePath)
+  if (historyIndex !== null) {
+    const message = archive?.[historyIndex]
+    if (!message) throw new Error(`会话历史路径不存在：${sourcePath}`)
+    return { content: stripHistoryTags(message.content), virtual: true }
+  }
+  const paperMatch = sourcePath.match(/^@papers\/([a-f0-9]{24})\.txt$/i)
+  if (paperMatch) {
+    return { content: await readPaperCacheText(paperMatch[1]), virtual: true }
+  }
+  return { content: await readTextFile(workspaceRoot, sourcePath), virtual: false }
+}
+
+export async function buildLocalResourceIndex(
+  workspaceRoot: string,
+  archive: ChatContextMessage[] | undefined
+): Promise<string> {
+  const paths: string[] = []
+  try {
+    const tree = await buildFileTree(workspaceRoot, 7)
+    const walk = (nodes: typeof tree): void => {
+      for (const node of nodes) {
+        paths.push(path.relative(workspaceRoot, node.path) || '.')
+        if (paths.length >= 320) return
+        if (node.children) walk(node.children)
+        if (paths.length >= 320) return
+      }
+    }
+    walk(tree)
+  } catch {
+    // The CWD path is still reported even when its tree cannot be enumerated.
+  }
+  const historyPaths = (archive ?? []).slice(-80).map((message, offset, items) => {
+    const archiveIndex = (archive?.length ?? items.length) - items.length + offset
+    return historySourcePath(archiveIndex, message.role)
+  })
+  return [
+    '<local_resource_index priority="highest" search="grep" read="read_file">',
+    `CWD：${workspaceRoot}`,
+    '本地资料优先级：最高。必须先 grep 全局检索本地资料；只有本地零命中或读取后证据仍不足，才考虑 search_web。',
+    '默认检索范围：省略 grep.path 时覆盖 CWD 全部项目文件、会话历史虚拟文件与 60 分钟论文缓存。除非用户明确限定单个文件，禁止先把 grep.path 收窄到当前文件。',
+    '读取规则：grep 每个命中自带前后各 5 行窗口；确认相关后，把命中的 path 与 around_line 交给 read_file 继续读取。',
+    `项目文件路径（${paths.length}${paths.length >= 320 ? '+' : ''}）：`,
+    ...(paths.length ? paths : ['[当前 CWD 暂无可列出文件]']),
+    `会话历史虚拟路径（${historyPaths.length}）：`,
+    ...(historyPaths.length ? historyPaths : ['[当前会话历史资料库为空]']),
+    '论文缓存虚拟路径：@papers/<grep 返回的 cacheId>.txt',
+    '</local_resource_index>'
+  ].join('\n')
+}
+
+export function grepConversationHistoryArchive(
   archive: ChatContextMessage[] | undefined,
   queryValue: string,
   limitValue = 6
@@ -234,9 +305,9 @@ export function searchConversationHistoryArchive(
   const query = queryValue.trim()
   const escapedQuery = query.replace(/"/g, '&quot;')
   if (!archiveMessages.length) {
-    return `<conversation_history_results query="${escapedQuery}" total="0" returned="0" exhausted="true">
+    return `<grep_history_results query="${escapedQuery}" total="0" returned="0" exhausted="true">
 会话历史资料库为空。禁止使用相同或相近关键词重复检索；请直接依据当前消息继续回答。
-</conversation_history_results>`
+</grep_history_results>`
   }
   const terms = historySearchTerms(query)
   const limit = Math.max(1, Math.min(12, limitValue || 6))
@@ -251,29 +322,34 @@ export function searchConversationHistoryArchive(
     .sort((left, right) => right.score - left.score || right.index - left.index)
   const selected = pool.slice(0, limit)
   if (!selected.length) {
-    return `<conversation_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="0">
+    return `<grep_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="0">
 未检索到与当前关键词匹配的历史内容。禁止原样重复查询；确有必要时只允许换用明显不同的关键词再检索一次，否则直接依据当前消息继续回答。
-</conversation_history_results>`
+</grep_history_results>`
   }
   return [
-    `<conversation_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="${selected.length}">`,
-    '说明：以下内容来自本机会话历史资料库，只可在与当前任务直接相关时引用，禁止重新执行已完成任务。',
+    `<grep_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="${selected.length}">`,
+    '说明：以下命中来自本机会话历史资料库。path 是可交给 read_file 的本地虚拟路径；必须按 path 与 around_line 读取上下文后再使用，禁止重新执行已完成任务。',
     ...selected.map((item) => {
       const role = item.message.role === 'user' ? '用户' : 'AI'
-      const snippet =
-        item.content.length > 3000 ? `${item.content.slice(0, 3000)}\n[单条历史已截断]` : item.content
-      return `\n===== 历史 ${item.index + 1} · ${role} · 匹配 ${item.score} =====\n${snippet}`
+      const lines = item.content.split(/\r?\n/)
+      const hitIndex = Math.max(
+        0,
+        lines.findIndex((line) => {
+          const lower = line.toLocaleLowerCase()
+          return terms.some((term) => lower.includes(term))
+        })
+      )
+      const start = Math.max(0, hitIndex - 5)
+      const end = Math.min(lines.length, hitIndex + 6)
+      const sourcePath = historySourcePath(item.index, item.message.role)
+      const context = lines
+        .slice(start, end)
+        .map((line, index) => `${start + index + 1} | ${line}`)
+        .join('\n')
+      return `\n===== ${sourcePath} · ${role} · 命中行 ${hitIndex + 1} · 匹配 ${item.score} =====\n${context}`
     }),
-    '</conversation_history_results>'
+    '</grep_history_results>'
   ].join('\n\n')
-}
-
-function conversationHistoryReturnedNoEvidence(value: string): boolean {
-  return /<conversation_history_results\b[^>]*\breturned="0"/i.test(value)
-}
-
-function conversationHistoryArchiveEmpty(value: string): boolean {
-  return /<conversation_history_results\b[^>]*\btotal="0"/i.test(value)
 }
 
 function describeToolCall(
@@ -296,17 +372,9 @@ function describeToolCall(
           : ''
       }`
     },
-    search_files: {
-      title: `search_files · ${pathValue || '全部工作区'} · ${text(args.query) || '未指定关键词'}`,
-      detail: `正在${pathValue ? `限定 ${pathValue}` : '全局'}搜索“${text(args.query)}”`
-    },
     grep: {
       title: `grep · ${pathValue || 'CWD + 会话历史'} · ${text(args.query) || '未指定关键词'}`,
       detail: `正在${pathValue ? `检索 ${pathValue}` : '检索当前 CWD 全部文件与本地会话历史'}中的“${text(args.query)}”`
-    },
-    search_conversation_history: {
-      title: `search_conversation_history · ${text(args.query) || '未指定关键词'}`,
-      detail: `正在查询本机会话历史“${text(args.query)}”`
     },
     search_web: {
       title: `search_web · ${text(args.query) || '未指定关键词'}`,
@@ -451,8 +519,6 @@ function validateToolCallArguments(name: string, args: Record<string, unknown>):
       requireText('target')
       break
     case 'grep':
-    case 'search_files':
-    case 'search_conversation_history':
     case 'search_web':
       requireText('query')
       break
@@ -1729,8 +1795,10 @@ export async function runWebChat(
   onChunk: (content: string) => void,
   signal: AbortSignal,
   onEvent: (event: Omit<ChatEvent, 'requestId'>) => void = () => undefined,
+  workspaceRoot = '',
   forceWebSearch = false,
-  historyArchive: ChatContextMessage[] = []
+  historyArchive: ChatContextMessage[] = [],
+  allowWebSearch = true
 ): Promise<TokenUsage> {
   const currentTime = new Date().toLocaleString('zh-CN', {
     timeZone: 'Asia/Shanghai',
@@ -1759,29 +1827,47 @@ export async function runWebChat(
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，程序将严格限制为 ${restrictedWebHosts.join('、')}。禁止搜索、读取、引用或推荐任何其他网站；此任务不执行跨域名凑数核验。`
     : '用户未指定网页来源时，才使用多个独立网站进行交叉核验。'
+  const localResourceIndex = workspaceRoot
+    ? await buildLocalResourceIndex(workspaceRoot, historyArchive)
+    : ''
   const webTools: ToolDefinition[] = [
-    ...(historyArchive.length
-      ? [
-          {
-            type: 'function' as const,
-            function: {
-              name: 'search_conversation_history',
-              description:
-                '按关键词查询本机会话历史资料库。当前请求默认不携带历史聊天原文；需要上文、人物设定、旧结论或用户偏好时必须按需调用此工具检索，禁止凭记忆乱补。',
-              parameters: {
-                type: 'object',
-                required: ['query'],
-                properties: {
-                  query: { type: 'string', description: '要在历史资料库中查询的关键词' },
-                  max_results: { type: 'number', description: '返回条数，默认 6，最多 12' }
-                }
-              }
-            }
-          }
-        ]
-      : []),
     {
-      type: 'function',
+      type: 'function' as const,
+      function: {
+        name: 'grep',
+        description:
+          '唯一的本地资料检索工具。默认全局检索 CWD 全部项目文件、@history/ 会话历史与 @papers/ 论文缓存，并返回 path、line 及前后各 5 行上下文。确认相关后调用 read_file 扩读。',
+        parameters: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', description: '关键词表达式，支持 | OR 与 & AND' },
+            path: { type: 'string', description: '可选；默认省略以检索全部本地资料' }
+          }
+        }
+      }
+    },
+    {
+      type: 'function' as const,
+      function: {
+        name: 'read_file',
+        description:
+          '读取 grep 返回的 CWD 相对路径、@history/ 或 @papers/ 路径。优先使用 around_line 与 context_lines 读取命中附近内容。',
+        parameters: {
+          type: 'object',
+          required: ['path'],
+          properties: {
+            path: { type: 'string' },
+            start_line: { type: 'integer' },
+            end_line: { type: 'integer' },
+            around_line: { type: 'integer' },
+            context_lines: { type: 'integer' }
+          }
+        }
+      }
+    },
+    ...(allowWebSearch ? [{
+      type: 'function' as const,
       function: {
         name: 'search_web',
         description:
@@ -1799,7 +1885,7 @@ export async function runWebChat(
       }
     },
     {
-      type: 'function',
+      type: 'function' as const,
       function: {
         name: 'fetch_webpage',
         description: '读取公开网页正文并返回标题、直接网址、来源类型和正文。',
@@ -1812,15 +1898,15 @@ export async function runWebChat(
           }
         }
       }
-    }
+    }] : [])
   ]
   const workingMessages: LlmMessage[] = [
     {
       role: 'system',
       content:
-        `你处于具备真实网页工具的普通 Chat 模式。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。先完整阅读用户本轮问题与历史上下文，自主判断是否真的需要联网；问题可凭现有上下文可靠回答时直接回复，严禁仅因消息较长、出现普通关键词或为了展示能力而调用网页工具。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法从上下文可靠确定，就必须直接调用 search_web；严禁声称自己无法联网、无法搜索、无法调用工具，也禁止因自我怀疑放弃调用。${restrictedWebInstruction}${
+        `你处于具备本地 grep 与 read_file 工具的普通 Chat 模式。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。${allowWebSearch ? `网页工具已开启。先完整阅读用户本轮问题与历史上下文，自主判断是否真的需要联网；问题可由本地资料可靠回答时严禁联网。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法从本地资料可靠确定，就必须直接调用 search_web。${restrictedWebInstruction}` : '网页工具本轮未开启，只使用本地资料与现有上下文。'}${
           forceWebSearch ? '用户本轮已明确开启强制联网核验，必须调用网页工具。' : ''
-        } 当前请求默认只直接携带本轮用户消息，不携带历史聊天原文；历史记录已放入本机会话历史资料库。若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段；任务可独立理解时禁止检索历史。禁止重新分析已完成任务。网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。最终回答须依据实际读取内容，并列出来源标题和直接网址。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
+         } 本地资料库优先级高于网页。默认先用 grep 全局检索全部本地资料，严禁先把 path 收窄到当前文件；grep 命中后必须用 read_file 读取命中路径的上下文。只有本地零命中或读取后证据仍不足，才考虑网页。当前请求默认只直接携带本轮用户消息；会话历史已列为 @history/ 本地虚拟文件，只能经 grep 定位后用 read_file 获取。禁止重新分析已完成任务。${localResourceIndex} 网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。最终回答须依据实际读取内容，并列出来源标题和直接网址。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
     },
     ...runtimeMessages
   ]
@@ -1851,8 +1937,6 @@ export async function runWebChat(
   let webFailureStreak = 0
   let webFailureTotal = 0
   let webAccessExhausted = false
-  const emptyHistoryQueries = new Set<string>()
-  let historySearchExhausted = false
 
   for (let step = 0; step < 18; step += 1) {
     let streamedReasoning = false
@@ -1981,14 +2065,14 @@ export async function runWebChat(
 
     const call = completion.toolCalls[0]
     let result = ''
-    let historySearchReturnedNoEvidence = false
-    let duplicateHistorySearchBlocked = false
     const toolTitle =
       call.name === 'search_web'
         ? '调用函数：search_web'
         : call.name === 'fetch_webpage'
           ? '调用函数：fetch_webpage'
-          : '调用函数：search_conversation_history'
+          : call.name === 'grep'
+            ? '调用函数：grep'
+            : '调用函数：read_file'
     onEvent({
       type: 'tool',
       title: toolTitle,
@@ -2047,29 +2131,52 @@ export async function runWebChat(
         const hostname = new URL(finalUrl).hostname.toLocaleLowerCase()
         verifiedHosts.add(hostname)
         if (webSourceKind(finalUrl) !== '社区讨论') referenceHosts.add(hostname)
-      } else if (call.name === 'search_conversation_history') {
-        const normalizedQuery = text(call.arguments.query).trim().toLocaleLowerCase()
-        if (historySearchExhausted || emptyHistoryQueries.has(normalizedQuery)) {
-          duplicateHistorySearchBlocked = true
-          result = `<conversation_history_results query="${normalizedQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
-相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续回答。
-</conversation_history_results>`
-        } else {
-          result = searchConversationHistoryArchive(
-            historyArchive,
-            text(call.arguments.query),
-            Number(call.arguments.max_results) || 6
-          )
-          historySearchReturnedNoEvidence = conversationHistoryReturnedNoEvidence(result)
-          if (historySearchReturnedNoEvidence) {
-            emptyHistoryQueries.add(normalizedQuery)
-            if (conversationHistoryArchiveEmpty(result) || emptyHistoryQueries.size >= 2) {
-              historySearchExhausted = true
-            }
-          }
-        }
+      } else if (call.name === 'grep') {
+        const query = text(call.arguments.query)
+        const scopePath = text(call.arguments.path).trim()
+        const [workspaceMatches, paperMatches] = await Promise.all([
+          workspaceRoot
+            ? searchWorkspace(workspaceRoot, query, scopePath)
+            : Promise.resolve([]),
+          searchPaperCache(query)
+        ])
+        result = stringifyResult({
+          engine: 'ripgrep',
+          query,
+          scope: scopePath || '全部本地资料',
+          localSources: {
+            cwd: workspaceRoot || '[未设置 CWD]',
+            history: HISTORY_SOURCE_PREFIX,
+            papers: PAPER_SOURCE_PREFIX
+          },
+          workspaceMatches: workspaceMatches.map((match) => ({
+            ...match,
+            path: path.relative(workspaceRoot, match.path)
+          })),
+          conversationHistory: grepConversationHistoryArchive(historyArchive, query, 8),
+          paperCache: paperMatches.map((match) => ({
+            ...match,
+            path: `${PAPER_SOURCE_PREFIX}${match.cacheId}.txt`
+          }))
+        })
+      } else if (call.name === 'read_file') {
+        const sourcePath = text(call.arguments.path)
+        const { content } = await readLocalSourceContent(workspaceRoot, historyArchive, sourcePath)
+        const lines = content.split(/\r?\n/)
+        const aroundLine = Math.max(0, Number(call.arguments.around_line) || 0)
+        const radius = Math.max(1, Number(call.arguments.context_lines) || 50)
+        const start = aroundLine
+          ? Math.max(1, aroundLine - radius)
+          : Math.max(1, Number(call.arguments.start_line) || 1)
+        const end = aroundLine
+          ? Math.min(lines.length, aroundLine + radius)
+          : Math.min(lines.length, Number(call.arguments.end_line) || lines.length)
+        result = lines
+          .slice(start - 1, end)
+          .map((line, index) => `${start + index} | ${line}`)
+          .join('\n')
       } else {
-        result = `未知网页工具：${call.name}`
+        result = `未知工具：${call.name}`
       }
     } catch (error) {
       result = `${isWebTool(call.name) ? '网页工具执行失败' : '工具执行失败'}：${
@@ -2099,14 +2206,6 @@ export async function runWebChat(
         '\n网页工具已连续解析失败。禁止继续调用 search_web 或 fetch_webpage；请直接说明当前无法完成可靠网页核验，并列出已成功读取的来源与失败原因。'
     }
     workingMessages.push({ role: 'tool', content: result, tool_call_id: call.id })
-    if (historySearchReturnedNoEvidence || duplicateHistorySearchBlocked) {
-      workingMessages.push({
-        role: 'user',
-        content: historySearchExhausted || duplicateHistorySearchBlocked
-          ? '<runtime_history_status evidence="empty" exhausted="true">会话历史检索已确认无可用结果，禁止继续调用 search_conversation_history。请直接依据当前消息给出结论；信息确实不足时简明说明。</runtime_history_status>'
-          : '<runtime_history_status evidence="empty">本次会话历史零命中。禁止原样重复；确有必要时只允许换用明显不同的关键词再检索一次，否则直接依据当前消息继续回答。</runtime_history_status>'
-      })
-    }
     onEvent({
       type: 'tool',
       title: `${call.name} 已返回`,
@@ -2926,12 +3025,12 @@ export async function runAgent(
       function: {
         name: 'read_file',
         description:
-          '按行读取工作区内的文本文件并返回行号。默认优先提供 start_line+end_line，或 around_line+context_lines 精准读取区间；位置未知时先调用 grep 定位。用户明确要求通读、总结、审查、重构全文，或文件估算 Token 不超过当前模型上下文窗口的 50% 时，可以省略区间读取全文；工具层不限制用户明确要求的读取行数。',
+          '按行读取 grep 返回的本地资料路径并返回行号。path 支持 CWD 相对路径、@history/ 会话历史虚拟路径与 @papers/ 论文缓存虚拟路径。默认优先提供 around_line+context_lines，或 start_line+end_line 精准读取区间；位置未知时必须先调用 grep 全局定位。',
         parameters: {
           type: 'object',
           required: ['path'],
           properties: {
-            path: { type: 'string', description: '工作区相对路径' },
+            path: { type: 'string', description: 'grep 返回的 CWD 相对路径或 @history/、@papers/ 虚拟路径' },
             start_line: { type: 'integer', minimum: 1, description: '起始行' },
             end_line: { type: 'integer', minimum: 1, description: '结束行' },
             around_line: {
@@ -2950,14 +3049,18 @@ export async function runAgent(
     },
     execute: async (args) => {
       const relative = text(args.path)
-      const initialUserEditLock = readUserFileEditLock(relative)
+      const isVirtualSource =
+        relative.startsWith(HISTORY_SOURCE_PREFIX) || relative.startsWith(PAPER_SOURCE_PREFIX)
+      const initialUserEditLock = isVirtualSource ? undefined : readUserFileEditLock(relative)
       if (initialUserEditLock && !initialUserEditLock.saved) {
         throw new Error(
           `用户编辑锁：${relative} 第 ${initialUserEditLock.startLine}-${initialUserEditLock.endLine} 行仍在自动保存，请稍后重新调用 read_file，禁止基于磁盘旧内容继续编辑`
         )
       }
-      let content = await readTextFile(request.workspaceRoot, relative)
-      let userEditLock = readUserFileEditLock(relative)
+      let content = (
+        await readLocalSourceContent(request.workspaceRoot, request.historyArchive, relative)
+      ).content
+      let userEditLock = isVirtualSource ? undefined : readUserFileEditLock(relative)
       if (userEditLock) {
         if (!userEditLock.saved) {
           throw new Error(
@@ -3013,7 +3116,9 @@ export async function runAgent(
         ? Math.min(lines.length, aroundLine + contextLines)
         : Math.min(lines.length, hasEnd ? Number(args.end_line) : lines.length)
       if (end < start) throw new Error(`读取区间无效：${start}-${end}`)
-      markFileRead(relative, { startLine: start, endLine: end, totalLines: lines.length }, content)
+      if (!isVirtualSource) {
+        markFileRead(relative, { startLine: start, endLine: end, totalLines: lines.length }, content)
+      }
       if (userEditLock) acknowledgeUserFileEditLock(relative, userEditLock.revision)
       const userEditNotice = userEditLock
         ? `用户编辑事件：用户刚修改了 ${relative} 第 ${userEditLock.startLine}-${userEditLock.endLine} 行；以下内容已从保存后的最新文件重新读取，本次 read 已解除用户编辑锁，后续 edit 必须基于此内容重新分析。\n\n`
@@ -3025,43 +3130,6 @@ export async function runAgent(
     }
   })
 
-  tools.set('search_files', {
-    risk: 'read',
-    definition: {
-      type: 'function',
-      function: {
-        name: 'search_files',
-        description:
-          '兼容旧模型的文件搜索别名，仅检索工作区文件。新任务优先调用 grep：grep 默认覆盖当前 CWD 全部文件与本地会话历史。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。',
-        parameters: {
-          type: 'object',
-          required: ['query'],
-          properties: {
-            query: { type: 'string', description: '关键词表达式，支持 | 与 &' },
-            path: {
-              type: 'string',
-              description: '可选的工作区相对文件或目录路径；传入时仅搜索该范围，省略时全局搜索'
-            }
-          }
-        }
-      }
-    },
-    execute: async (args) => {
-      const scopePath = text(args.path).trim()
-      const results = await searchWorkspace(request.workspaceRoot, text(args.query), scopePath)
-      return stringifyResult(
-        {
-          scope: scopePath || '全部工作区',
-          query: text(args.query),
-          matches: results.map((result) => ({
-            ...result,
-            path: path.relative(request.workspaceRoot, result.path)
-          }))
-        }
-      )
-    }
-  })
-
   tools.set('grep', {
     risk: 'read',
     definition: {
@@ -3069,7 +3137,7 @@ export async function runAgent(
       function: {
         name: 'grep',
         description:
-          '使用应用内置 ripgrep 检索。默认搜索当前 CWD 下的全部项目文件、本地会话历史资料库，以及最近 60 分钟内由 search_web 解析的论文 PDF 临时缓存；传入 path 时仅收窄项目文件范围，会话历史与论文缓存默认不附加，可分别用 include_history、include_papers 显式开启。query 支持 OR 与 AND：a | b | c 表示任一关键词命中，a & b 表示同一文件必须同时包含全部关键词。位置未知、跨文件查找、检索项目资料、论文或历史事实时优先使用本工具。',
+          '唯一的本地资料检索工具，使用应用内置 ripgrep。默认省略 path，全局搜索当前 CWD 全部项目文件、@history/ 会话历史虚拟文件与最近 60 分钟的 @papers/ 论文缓存。每个命中返回 path、line 及前后各 5 行上下文；确认相关后必须调用 read_file 扩读。只有用户明确限定单个文件，或全局结果需要二次收窄时才传 path。query 支持 a | b | c（OR）与 a & b（同一文件 AND）。',
         parameters: {
           type: 'object',
           required: ['query'],
@@ -3077,16 +3145,16 @@ export async function runAgent(
             query: { type: 'string', description: '关键词表达式，支持 | 与 &' },
             path: {
               type: 'string',
-              description: '可选的 CWD 相对文件或目录；省略时检索整个 CWD'
+              description: '可选的 CWD 相对文件或目录；默认省略以检索全部本地资料'
             },
             include_history: {
               type: 'boolean',
-              description: '是否同时检索本地会话历史；全局检索默认 true，指定 path 时默认 false'
+               description: '是否同时检索本地会话历史；默认 true'
             },
             include_papers: {
               type: 'boolean',
               description:
-                '是否同时检索 60 分钟内的论文 PDF 本地缓存；全局检索默认 true，指定 path 时默认 false'
+                 '是否同时检索 60 分钟内的论文 PDF 本地缓存；默认 true'
             },
             max_history_results: {
               type: 'integer',
@@ -3102,9 +3170,9 @@ export async function runAgent(
       const scopePath = text(args.path).trim()
       const query = text(args.query)
       const includeHistory =
-        typeof args.include_history === 'boolean' ? args.include_history : !scopePath
+        typeof args.include_history === 'boolean' ? args.include_history : true
       const includePapers =
-        typeof args.include_papers === 'boolean' ? args.include_papers : !scopePath
+        typeof args.include_papers === 'boolean' ? args.include_papers : true
       const [results, paperMatches] = await Promise.all([
         searchWorkspace(request.workspaceRoot, query, scopePath),
         includePapers ? searchPaperCache(query) : Promise.resolve([])
@@ -3117,8 +3185,13 @@ export async function runAgent(
           ...result,
           path: path.relative(request.workspaceRoot, result.path)
         })),
+        localSources: {
+          cwd: request.workspaceRoot,
+          history: HISTORY_SOURCE_PREFIX,
+          papers: PAPER_SOURCE_PREFIX
+        },
         conversationHistory: includeHistory
-          ? searchConversationHistoryArchive(
+          ? grepConversationHistoryArchive(
               request.historyArchive ?? [],
               query,
               Number(args.max_history_results) || 6
@@ -3127,37 +3200,14 @@ export async function runAgent(
         paperCache: includePapers
           ? {
               ttlMinutes: 60,
-              matches: paperMatches
+               matches: paperMatches.map((match) => ({
+                 ...match,
+                 path: `${PAPER_SOURCE_PREFIX}${match.cacheId}.txt`
+               }))
             }
           : '未启用论文缓存检索'
       })
     }
-  })
-
-  tools.set('search_conversation_history', {
-    risk: 'read',
-    definition: {
-      type: 'function',
-      function: {
-        name: 'search_conversation_history',
-        description:
-          '按关键词查询本机会话历史资料库。当前请求默认不携带历史聊天原文；需要上文、人物设定、旧结论、用户偏好或未完成事项时按需检索。历史资料库为空时返回空结果，工具始终可用。',
-        parameters: {
-          type: 'object',
-          required: ['query'],
-          properties: {
-            query: { type: 'string', description: '要在历史资料库中查询的关键词' },
-            max_results: { type: 'number', description: '返回条数，默认 6，最多 12' }
-          }
-        }
-      }
-    },
-    execute: async (args) =>
-      searchConversationHistoryArchive(
-        request.historyArchive ?? [],
-        text(args.query),
-        Number(args.max_results) || 6
-      )
   })
 
   tools.set('search_web', {
@@ -3753,13 +3803,17 @@ export async function runAgent(
     minute: '2-digit',
     second: '2-digit'
   })
+  const localResourceIndex = await buildLocalResourceIndex(
+    request.workspaceRoot,
+    request.historyArchive
+  )
   const systemPrompt = [
     '执行控制最高优先级：只处理最后一个 <current_task>；禁止复盘、分析、续做或评价任何已完成历史请求。',
     '推理控制最高优先级：只进行完成当前任务所需的最短必要推理，确认目标后立即执行；禁止反复解释意图、复述历史、模拟多套方案、自我辩论或为了展示过程延长思考。',
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
-    '资料检索优先规则：grep 是默认本地检索工具。省略 path 时检索当前 CWD 全部项目文件并同时检索本地会话历史；已知目标文件或目录时可传 path 收窄文件范围。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。命中后调用 read_file 并传 around_line 与 context_lines 精准读取。search_files 仅作为旧模型兼容别名。已有用户选区、明确行号或可靠命中区间时，可直接 read_file 读取该区间上下文，也可继续 grep 检索其他资料。',
+    '资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 并传 path、around_line、context_lines 精准扩读。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。',
     '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 grep 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
     requiresWritingLoreResearch
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 grep 检索当前 CWD 与本地会话历史；命中项目文件后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
@@ -3773,13 +3827,14 @@ export async function runAgent(
     '你是运行在个人电脑中的星伴 AI。',
     `当前工作区：${request.workspaceRoot}`,
     `系统当前时间：${currentTime}（Asia/Shanghai）。回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。`,
+    localResourceIndex,
     '内部思考与向界面输出的可见推理过程默认使用简体中文；工具名、代码、路径与必要技术名词可保留原文。',
     '每轮都根据当前上下文自主判断：直接回复、继续思考、调用一个必要工具，或结束任务；禁止套用固定流程模板。',
     '自主决策规则：执行过程中禁止暂停任务向用户反问。遇到歧义时先检索本地资料与必要网页资料，再结合当前目标采用风险最低、最符合上下文的合理方案继续完整执行；确实无法可靠完成时，在最终回复中一次性说明缺失信息、已完成部分与建议，禁止用问题代替执行。',
     '当前任务边界规则：历史对话只用于参考用户偏好、既有结论、文件状态与未完成事项。历史中已经获得助手回复或工具结果的用户请求视为已处理，禁止重新分析、重新执行、重新总结，也禁止把旧请求并入当前任务。',
     '当前任务边界规则：只执行最后一个 <current_task> 中的目标。只有当前目标明确要求继续、复查或修正历史任务时，才允许恢复相关旧任务。',
     request.historyArchive?.length
-      ? `会话历史规则：当前请求默认只直接携带本轮目标，不携带历史聊天原文；${request.historyArchive.length} 条历史记录在本机会话历史资料库中。若本轮目标可独立理解，禁止检索历史；若本轮只给出短回复，或出现“继续、刚才、上文、之前、这个、按你说的、照旧、他/她/它”等强依赖上文的表达，必须先调用 search_conversation_history 检索相关片段。禁止把旧任务拿出来重做。`
+      ? `会话历史规则：当前请求默认只直接携带本轮目标，不携带历史聊天原文；${request.historyArchive.length} 条历史记录已作为 @history/ 虚拟本地文件列出。需要上文时只能调用 grep 全局定位，再用 read_file 读取命中的 @history/ 路径；禁止把旧任务拿出来重做。`
       : '',
     '先判断用户目标属于咨询解释、搜索定位、代码审查、运行验证、文件修改或综合任务，再选择最小必要动作。',
     `任务清单规则：Agent 模式必须在完成前建立可见 tasks；应先理解当前目标，再根据任务实际需要自主决定清单内容、粒度、顺序与状态。${modelToolScopeInstruction} tasks 只负责表达和同步执行判断，禁止用固定模板限制任务拆分。`,
@@ -3978,8 +4033,6 @@ export async function runAgent(
   let webFailureTotal = 0
   let webEmptyResultStreak = 0
   let blockedWebToolCalls = 0
-  const emptyAgentHistoryQueries = new Set<string>()
-  let agentHistorySearchExhausted = false
   type KnowledgeResearchStage =
     | 'anchor-read'
     | 'local-search'
@@ -4012,14 +4065,12 @@ export async function runAgent(
     })
   const toolPriority = new Map([
     ['grep', 0],
-    ['search_files', 1],
-    ['read_file', 2],
-    ['replace_in_file', 3],
-    ['replace_lines', 4],
-    ['insert_lines', 5],
-    ['normalize_chinese_quotes', 6],
-    ['file_info', 7],
-    ['search_conversation_history', 8],
+    ['read_file', 1],
+    ['replace_in_file', 2],
+    ['replace_lines', 3],
+    ['insert_lines', 4],
+    ['normalize_chinese_quotes', 5],
+    ['file_info', 6],
     ['create_file', 90]
   ])
   const pendingAnchorDescription = (): string =>
@@ -4517,15 +4568,11 @@ export async function runAgent(
       let toolSucceeded = false
       let preview: AgentChange[] | undefined
       let duplicateReplaceBlocked = false
-      let duplicateHistorySearchBlocked = false
-      let workflowHistoryHandled = false
-      const normalizedHistoryQuery =
-        call.name === 'search_conversation_history'
-          ? text(call.arguments.query).trim().toLocaleLowerCase()
-          : ''
+      let duplicateLocalSearchBlocked = false
+      let workflowSearchHandled = false
       const workflowCycle =
         workflow.stage === 'execute' &&
-        call.name === 'search_conversation_history'
+        call.name === 'grep'
           ? workflowCycleGuard.observe({
               toolName: call.name,
               arguments: call.arguments,
@@ -4535,26 +4582,26 @@ export async function runAgent(
           : undefined
       try {
         if (argumentError) throw new Error(argumentError)
-        if (call.name === 'search_conversation_history' && allTasksCompleted()) {
-          workflowHistoryHandled = true
-          duplicateHistorySearchBlocked = true
+        if (call.name === 'grep' && allTasksCompleted()) {
+          workflowSearchHandled = true
+          duplicateLocalSearchBlocked = true
           completedStateToolAttempt = true
           toolSucceeded = true
           result = [
-            '<conversation_history_results returned="0" skipped="task_completed">',
-            '当前状态：用户没有发送新请求；任务清单全部完成；会话历史检索未执行。',
-            '</conversation_history_results>'
+            '<grep_results returned="0" skipped="task_completed">',
+            '当前状态：用户没有发送新请求；任务清单全部完成；本地资料检索未执行。',
+            '</grep_results>'
           ].join('\n')
         } else if (workflowCycle?.detected) {
-          workflowHistoryHandled = true
-          duplicateHistorySearchBlocked = true
+          workflowSearchHandled = true
+          duplicateLocalSearchBlocked = true
           workflowCycleRecovered = true
           toolSucceeded = true
           result = [
-            '<conversation_history_results returned="0" skipped="workflow_cycle">',
-            `当前状态：同一任务状态下已连续出现 ${workflowCycle.occurrences} 次相近的会话历史检索；期间任务状态与文件进度均未变化，本次重复检索未执行。`,
+            '<grep_results returned="0" skipped="workflow_cycle">',
+            `当前状态：同一任务状态下已连续出现 ${workflowCycle.occurrences} 次相近的本地资料检索；期间任务状态与文件进度均未变化，本次重复检索未执行。`,
             `任务清单：${activeTasks.map((task) => `${task.id}=${task.status}`).join('；') || '尚未建立'}。`,
-            '</conversation_history_results>'
+            '</grep_results>'
           ].join('\n')
         } else if (
           call.name === 'replace_in_file' &&
@@ -4565,7 +4612,7 @@ export async function runAgent(
             `replace_in_file 已拦截完全相同的失败参数：${text(call.arguments.path)}。必须重新读取最新原文并修改 search；若行号明确，请改用 replace_lines。`
           )
         }
-        if (!workflowHistoryHandled) {
+        if (!workflowSearchHandled) {
           if (webVerificationExhausted && isWebTool(call.name)) {
             blockedWebToolCalls += 1
             throw new Error(
@@ -4584,15 +4631,6 @@ export async function runAgent(
               `当前阶段：${workflow.stage}。`,
               '可用工具保持不变。'
             ].join('\n')
-          } else if (
-            call.name === 'search_conversation_history' &&
-            (agentHistorySearchExhausted || emptyAgentHistoryQueries.has(normalizedHistoryQuery))
-          ) {
-            duplicateHistorySearchBlocked = true
-            toolSucceeded = true
-            result = `<conversation_history_results query="${normalizedHistoryQuery.replace(/"/g, '&quot;')}" returned="0" exhausted="true">
-相同的空结果查询已被程序拦截。禁止继续检索会话历史，请直接依据当前消息继续任务。
-</conversation_history_results>`
           } else {
             if (permissionMode === 'read-only' && tool.risk !== 'read') {
               result =
@@ -4662,18 +4700,6 @@ export async function runAgent(
       }
       const searchReturnedNoEvidence =
         call.name === 'search_web' && webSearchReturnedNoEvidence(result)
-      const historyReturnedNoEvidence =
-        call.name === 'search_conversation_history' &&
-        conversationHistoryReturnedNoEvidence(result)
-      if (toolSucceeded && historyReturnedNoEvidence && !duplicateHistorySearchBlocked) {
-        emptyAgentHistoryQueries.add(normalizedHistoryQuery)
-        if (
-          conversationHistoryArchiveEmpty(result) ||
-          emptyAgentHistoryQueries.size >= 2
-        ) {
-          agentHistorySearchExhausted = true
-        }
-      }
       if (result.startsWith('工具执行失败：') && call.name !== 'run_command') {
         consecutiveToolFailures += 1
         recentToolFailures.push(`${call.name}：${result.slice('工具执行失败：'.length)}`)
@@ -4833,13 +4859,11 @@ export async function runAgent(
         content: toolResultForModel(result),
         tool_call_id: call.id
       })
-      if (historyReturnedNoEvidence || duplicateHistorySearchBlocked) {
+      if (duplicateLocalSearchBlocked) {
         messages.push({
           role: 'user',
           content:
-            agentHistorySearchExhausted || duplicateHistorySearchBlocked
-              ? '<runtime_history_status evidence="empty" exhausted="true">会话历史已确认无可用结果，禁止继续调用 search_conversation_history。请依据当前消息与其他可用资料继续完成任务；信息确实不足时在最终回复中说明。</runtime_history_status>'
-              : '<runtime_history_status evidence="empty">本次会话历史零命中。禁止原样重复；确有必要时只允许换用明显不同的关键词再检索一次，否则继续当前任务。</runtime_history_status>'
+            '<runtime_local_search_status repeated="true">程序仅报告当前真实状态：同一任务状态下的重复 grep 已跳过。请自行判断任务是否已经完成；已完成则直接结束，仍缺资料时改用不同关键词或读取已有命中，禁止复述旧步骤。</runtime_local_search_status>'
         })
       }
       if (replaceMatchFailed) {
@@ -4893,14 +4917,13 @@ export async function runAgent(
       } else if (
         toolSucceeded &&
         knowledgeResearchStage === 'local-search' &&
-        (call.name === 'grep' || call.name === 'search_files')
+        call.name === 'grep'
       ) {
         const workspaceHasNoMatches =
           result.trim() === '[]' ||
           /"matches"\s*:\s*\[\s*\]/.test(result) ||
           /"workspaceMatches"\s*:\s*\[\s*\]/.test(result)
         const historyHasNoMatches =
-          call.name === 'search_files' ||
           /returned=\\?"0\\?"/.test(result) ||
           /会话历史资料库为空/.test(result)
         if (workspaceHasNoMatches && historyHasNoMatches) {

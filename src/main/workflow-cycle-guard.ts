@@ -47,7 +47,7 @@ function argumentFingerprint(
   toolName: string,
   args: Record<string, unknown>
 ): string {
-  if (toolName === 'search_conversation_history') {
+  if (toolName === 'grep') {
     return normalizedText(args.query)
   }
   return JSON.stringify(
@@ -106,7 +106,7 @@ export class WorkflowCycleGuard {
         item.taskState === current.taskState &&
         item.toolName === current.toolName &&
         similarity(item.comparableArgument, current.comparableArgument) >=
-          (current.toolName === 'search_conversation_history' ? 0.42 : 0.9)
+          (current.toolName === 'grep' ? 0.42 : 0.9)
     )
     return {
       detected: peers.length >= 3,
@@ -119,4 +119,3 @@ export class WorkflowCycleGuard {
     this.observations = []
   }
 }
-

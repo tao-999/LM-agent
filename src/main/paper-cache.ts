@@ -321,8 +321,8 @@ export async function searchPaperCache(
       lines = (await fs.readFile(match.path, 'utf8')).split(/\r?\n/)
       linesById.set(cacheId, lines)
     }
-    const start = Math.max(0, match.line - 3)
-    const end = Math.min(lines.length, match.line + 2)
+    const start = Math.max(0, match.line - 6)
+    const end = Math.min(lines.length, match.line + 5)
     output.push({
       cacheId,
       title: record.title,
@@ -338,6 +338,18 @@ export async function searchPaperCache(
     })
   }
   return output
+}
+
+export async function readPaperCacheText(
+  cacheIdValue: string,
+  root = paperCacheDirectory()
+): Promise<string> {
+  const cacheId = cacheIdValue.trim()
+  if (!/^[a-f0-9]{24}$/i.test(cacheId)) throw new Error('论文缓存路径无效')
+  await cleanupExpiredPaperCache(root)
+  const record = await readRecord(root, cacheId)
+  if (!record) throw new Error('论文缓存不存在或已超过 60 分钟有效期')
+  return fs.readFile(textPath(root, cacheId), 'utf8')
 }
 
 export function formatPaperCacheSummary(record: PaperCacheRecord): string {

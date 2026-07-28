@@ -628,12 +628,43 @@ export async function searchWorkspace(
   scopePath = '',
   limit = 160
 ): Promise<SearchResult[]> {
+  let results: SearchResult[]
   try {
-    const results = await searchWorkspaceWithRipgrep(root, query, scopePath, limit)
-    if (results.length) return results
+    results = await searchWorkspaceWithRipgrep(root, query, scopePath, limit)
+    if (results.length) return addSearchContexts(results)
   } catch {
     // 安装包缺少平台二进制、进程启动失败或输出异常时，继续使用内置文本扫描兜底。
   }
   // ripgrep 以 UTF-8 为主；GBK、GB18030、Big5 等文本由编码感知扫描补齐。
-  return searchWorkspaceFallback(root, query, scopePath, limit)
+  results = await searchWorkspaceFallback(root, query, scopePath, limit)
+  return addSearchContexts(results)
+}
+
+async function addSearchContexts(results: SearchResult[], radius = 5): Promise<SearchResult[]> {
+  const linesByPath = new Map<string, string[]>()
+  return Promise.all(
+    results.map(async (result) => {
+      let lines = linesByPath.get(result.path)
+      if (!lines) {
+        try {
+          const buffer = await fs.readFile(result.path)
+          lines = decodeText(buffer, detectTextEncoding(buffer)).split(/\r?\n/)
+        } catch {
+          return result
+        }
+        linesByPath.set(result.path, lines)
+      }
+      const contextStart = Math.max(1, result.line - radius)
+      const contextEnd = Math.min(lines.length, result.line + radius)
+      return {
+        ...result,
+        contextStart,
+        contextEnd,
+        context: lines
+          .slice(contextStart - 1, contextEnd)
+          .map((line, index) => `${contextStart + index} | ${line}`)
+          .join('\n')
+      }
+    })
+  )
 }

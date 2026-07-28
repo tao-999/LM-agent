@@ -23,11 +23,14 @@ import {
   writeTextFile
 } from './files'
 import {
+  buildLocalResourceIndex,
+  grepConversationHistoryArchive,
+  readLocalSourceContent,
   runAgent,
   runWebChat,
-  searchConversationHistoryArchive,
   type AgentUserFileEditLock
 } from './agent'
+import { searchPaperCache } from './paper-cache'
 import {
   discoverComfyWorkflows,
   freeComfyMemory,
@@ -373,11 +376,15 @@ async function processImageQueue(): Promise<void> {
             thinkingMode: request.model.thinkingMode === 'on' ? ('on' as const) : ('off' as const)
           }
           let promptOutput = ''
+          const localResourceIndex = await buildLocalResourceIndex(
+            request.workspaceRoot,
+            request.historyArchive
+          )
           const promptMessages: LlmMessage[] = [
             {
               role: 'system',
               content:
-                `/no_think\n你是图片生成 Prompt 转换器，只执行一次转换。禁止分析请求、解释规则、评价内容、自我纠错或输出计划。当前请求默认只直接携带本轮输入，不携带历史聊天原文；历史记录在本机会话历史资料库中。若本轮画面可独立理解，禁止检索历史；若本轮只给出短回复，或明确依赖更早人物、外貌、服装、关系、场景或画风，才调用 search_conversation_history 检索相关片段。继承检索结果中已确定的人物身份、外貌、服装、关系、场景与画面风格，以当前输入为最高优先级。把当前画面要求直接转换成一段完整英文 Prompt，保留主体、动作、构图、镜头、光线、材质、色彩与氛围。正文只能包含英文 Prompt，禁止标题、解释、引号、Markdown 与额外对话。`
+                `/no_think\n你是图片生成 Prompt 转换器，只执行一次转换。禁止分析请求、解释规则、评价内容、自我纠错或输出计划。本地资料优先级最高；需要补全更早人物、外貌、服装、关系、场景或画风时，先调用 grep 全局检索全部本地资料，再调用 read_file 读取最相关命中。只有本地资料不足才依据当前输入转换，禁止编造既有设定。继承读取结果中已确定的信息，以当前输入为最高优先级。${localResourceIndex}\n把当前画面要求直接转换成一段完整英文 Prompt，保留主体、动作、构图、镜头、光线、材质、色彩与氛围。正文只能包含英文 Prompt，禁止标题、解释、引号、Markdown 与额外对话。`
             },
             ...request.contextMessages.map((message) => ({
               role: message.role,
@@ -403,26 +410,37 @@ async function processImageQueue(): Promise<void> {
               type: 'reasoning',
               content
             })
-          const historyTools: ToolDefinition[] = request.historyArchive?.length
-            ? [
-                {
-                  type: 'function',
-                  function: {
-                    name: 'search_conversation_history',
-                    description:
-                      '按关键词查询本机会话历史资料库，用于补全更早确定的人物、外貌、服装、关系、场景或画风。',
-                    parameters: {
-                      type: 'object',
-                      required: ['query'],
-                      properties: {
-                        query: { type: 'string' },
-                        max_results: { type: 'number' }
-                      }
-                    }
+          const historyTools: ToolDefinition[] = [
+            {
+              type: 'function',
+              function: {
+                name: 'grep',
+                description:
+                  '全局检索 CWD 项目文件、@history/ 会话历史与 @papers/ 论文缓存，返回 path、line 及前后各 5 行。',
+                parameters: {
+                  type: 'object',
+                  required: ['query'],
+                  properties: { query: { type: 'string' } }
+                }
+              }
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'read_file',
+                description: '读取 grep 返回的本地路径与命中区间。',
+                parameters: {
+                  type: 'object',
+                  required: ['path'],
+                  properties: {
+                    path: { type: 'string' },
+                    around_line: { type: 'integer' },
+                    context_lines: { type: 'integer' }
                   }
                 }
-              ]
-            : []
+              }
+            }
+          ]
           if (historyTools.length) {
             for (let step = 0; step < 3; step += 1) {
               promptOutput = ''
@@ -442,19 +460,59 @@ async function processImageQueue(): Promise<void> {
               }
               promptMessages.push(completion.rawMessage)
               const call = completion.toolCalls[0]
-              const result =
-                call.name === 'search_conversation_history'
-                  ? searchConversationHistoryArchive(
-                      request.historyArchive,
-                      typeof call.arguments.query === 'string' ? call.arguments.query : request.prompt,
-                      Number(call.arguments.max_results) || 4
-                    )
-                  : `未知工具：${call.name}`
+               let result: string
+               if (call.name === 'grep') {
+                 const query =
+                   typeof call.arguments.query === 'string' ? call.arguments.query : request.prompt
+                 const [workspaceMatches, paperMatches] = await Promise.all([
+                   searchWorkspace(request.workspaceRoot, query),
+                   searchPaperCache(query)
+                 ])
+                 result = JSON.stringify(
+                   {
+                     engine: 'ripgrep',
+                     scope: '全部本地资料',
+                     workspaceMatches: workspaceMatches.map((match) => ({
+                       ...match,
+                       path: path.relative(request.workspaceRoot, match.path)
+                     })),
+                     conversationHistory: grepConversationHistoryArchive(
+                       request.historyArchive,
+                       query,
+                       6
+                     ),
+                     paperCache: paperMatches.map((match) => ({
+                       ...match,
+                       path: `@papers/${match.cacheId}.txt`
+                     }))
+                   },
+                   null,
+                   2
+                 )
+               } else if (call.name === 'read_file') {
+                 const sourcePath = String(call.arguments.path ?? '')
+                 const { content } = await readLocalSourceContent(
+                   request.workspaceRoot,
+                   request.historyArchive,
+                   sourcePath
+                 )
+                 const lines = content.split(/\r?\n/)
+                 const aroundLine = Math.max(1, Number(call.arguments.around_line) || 1)
+                 const radius = Math.max(1, Number(call.arguments.context_lines) || 50)
+                 const start = Math.max(1, aroundLine - radius)
+                 const end = Math.min(lines.length, aroundLine + radius)
+                 result = lines
+                   .slice(start - 1, end)
+                   .map((line, index) => `${start + index} | ${line}`)
+                   .join('\n')
+               } else {
+                 result = `未知工具：${call.name}`
+               }
               promptMessages.push({ role: 'tool', content: result, tool_call_id: call.id })
               send('image:event', {
                 requestId: request.requestId,
                 type: 'status',
-                content: '已按需查询更早会话历史'
+                 content: call.name === 'grep' ? '已检索全部本地资料' : '已读取本地资料命中区间'
               })
             }
           } else {
@@ -959,47 +1017,18 @@ function registerIpc(): void {
           .map((attachment) => attachment.data!)
       }
     }
-    const chatTask = request.webSearch
-      ? runWebChat(
-          request.model,
-          messages,
-          (content) =>
-            send('chat:event', { requestId: request.requestId, type: 'chunk', content }),
-          controller.signal,
-          (event) => send('chat:event', { requestId: request.requestId, ...event }),
-          Boolean(request.forceWebSearch),
-          request.historyArchive ?? []
-        )
-      : streamChat(
-          request.model,
-          messages,
-          (content) =>
-            send('chat:event', { requestId: request.requestId, type: 'chunk', content }),
-          controller.signal,
-          (content) =>
-            send('chat:event', { requestId: request.requestId, type: 'reasoning', content }),
-          {
-            onContextCompressed: (contextMemory) =>
-              send('chat:event', {
-                requestId: request.requestId,
-                type: 'context',
-                contextMemory
-              }),
-            onRepetitionStopped: (stop) =>
-              send('chat:event', {
-                requestId: request.requestId,
-                type: 'status',
-                title:
-                  stop.kind === 'emoji-flood'
-                    ? '检测到 Emoji 异常输出，已自动停止'
-                    : '检测到重复输出，已自动停止',
-                content:
-                  stop.kind === 'emoji-flood'
-                    ? `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中持续生成高密度 Emoji，程序已终止本轮流式响应，防止继续消耗 Token。`
-                    : `模型在${stop.channel === 'reasoning' ? '思考' : '正文'}中连续生成相同内容，程序已终止本轮流式响应，防止继续消耗 Token。`
-              })
-          }
-        )
+    const chatTask = runWebChat(
+      request.model,
+      messages,
+      (content) =>
+        send('chat:event', { requestId: request.requestId, type: 'chunk', content }),
+      controller.signal,
+      (event) => send('chat:event', { requestId: request.requestId, ...event }),
+      request.workspaceRoot,
+      Boolean(request.forceWebSearch),
+      request.historyArchive ?? [],
+      request.webSearch
+    )
     void chatTask
       .then((usage) =>
         send('chat:event', { requestId: request.requestId, type: 'done', usage })
