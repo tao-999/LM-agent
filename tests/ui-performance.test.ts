@@ -13,6 +13,11 @@ import {
   isScrollViewportAtBottom
 } from '../src/renderer/src/utils/scroll-position.ts'
 import { createLiveTokenUsageTracker } from '../src/main/live-token-usage.ts'
+import {
+  composerInputIdleDelay,
+  markComposerInputActive,
+  resetComposerInputActivity
+} from '../src/renderer/src/utils/composer-input-activity.ts'
 
 test('临时 UI 状态变化复用持久化投影，避免重建超长会话快照', () => {
   type State = { transient: boolean; conversations: object[] }
@@ -75,6 +80,38 @@ test('会话滚动期间暂停流式刷新与大型持久化写入', async () =>
   assert.match(appSource, /if \(!force && isChatScrollActive\(\)\) return/)
   assert.match(chatSource, /isScrolling=\{setChatScrollActive\}/)
   assert.match(storeSource, /if \(!force && isChatScrollActive\(\)\)/)
+})
+
+test('输入期间推迟思考流刷新，避免抢占键盘交互', () => {
+  resetComposerInputActivity()
+  assert.equal(composerInputIdleDelay(), 0)
+  markComposerInputActive(200)
+  assert.ok(composerInputIdleDelay() > 0)
+  resetComposerInputActivity()
+})
+
+test('聊天输入使用原生非受控值，流式消息更新不会反复写回输入框', async () => {
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  assert.match(chatSource, /const inputValueRef = useRef\(''\)/)
+  assert.match(chatSource, /defaultValue=""/)
+  assert.doesNotMatch(chatSource, /value=\{input\}/)
+  assert.match(chatSource, /markComposerInputActive\(\)/)
+})
+
+test('Skill 菜单只由外部点击、Escape、窗口变化或会话切换关闭', async () => {
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  const effectStart = chatSource.indexOf('if (!showSkills) return')
+  const effectEnd = chatSource.indexOf('}, [showSkills])', effectStart)
+  const effect = chatSource.slice(effectStart, effectEnd)
+  assert.match(effect, /document\.addEventListener\('pointerdown', close\)/)
+  assert.match(effect, /document\.addEventListener\('keydown', closeOnEscape\)/)
+  assert.doesNotMatch(effect, /addEventListener\('scroll'/)
 })
 
 test('超长思考与较早过程保持完整，不在会话存储中裁剪', async () => {

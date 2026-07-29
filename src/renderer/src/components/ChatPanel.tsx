@@ -55,6 +55,7 @@ import remarkMath from 'remark-math'
 import 'highlight.js/styles/github-dark.css'
 import 'katex/dist/katex.min.css'
 import { setChatScrollActive } from '../utils/chat-scroll-activity'
+import { markComposerInputActive } from '../utils/composer-input-activity'
 import { isScrollViewportAtBottom } from '../utils/scroll-position'
 import type {
   AgentApproval,
@@ -1597,7 +1598,9 @@ export function ChatPanel(): React.JSX.Element {
   const updateMessage = useAppStore((state) => state.updateMessage)
   const registerPending = useAppStore((state) => state.registerPending)
   const clearPending = useAppStore((state) => state.clearPending)
-  const [input, setInput] = useState('')
+  const inputValueRef = useRef('')
+  const [hasInput, setHasInput] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
   const [attachCurrent, setAttachCurrent] = useState(false)
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
@@ -1815,9 +1818,7 @@ export function ChatPanel(): React.JSX.Element {
       ),
     [workspaceRoots, workspaceTrees]
   )
-  const mentionMatch = input.match(/@([^\s@\[\]]*)$/)
-  const mentionQuery = mentionMatch?.[1]?.toLocaleLowerCase() ?? ''
-  const mentionSuggestions = mentionMatch
+  const mentionSuggestions = mentionQuery !== null
     ? mentionEntries
         .filter(
           (entry) =>
@@ -1826,6 +1827,25 @@ export function ChatPanel(): React.JSX.Element {
         )
         .slice(0, 8)
     : []
+
+  const syncComposerInputState = (value: string): void => {
+    inputValueRef.current = value
+    const nextHasInput = Boolean(value.trim())
+    setHasInput((current) => (current === nextHasInput ? current : nextHasInput))
+    const match = value.match(/@([^\s@\[\]]*)$/)
+    const nextMentionQuery = match?.[1]?.toLocaleLowerCase() ?? null
+    setMentionQuery((current) =>
+      current === nextMentionQuery ? current : nextMentionQuery
+    )
+  }
+
+  const setComposerInput = (value: string | ((current: string) => string)): void => {
+    const next = typeof value === 'function' ? value(inputValueRef.current) : value
+    syncComposerInputState(next)
+    if (textareaRef.current && textareaRef.current.value !== next) {
+      textareaRef.current.value = next
+    }
+  }
 
   const discoverModels = async (): Promise<void> => {
     setDiscovering(true)
@@ -1911,12 +1931,10 @@ export function ChatPanel(): React.JSX.Element {
     document.addEventListener('pointerdown', close)
     document.addEventListener('keydown', closeOnEscape)
     window.addEventListener('resize', close)
-    window.addEventListener('scroll', close, true)
     return () => {
       document.removeEventListener('pointerdown', close)
       document.removeEventListener('keydown', closeOnEscape)
       window.removeEventListener('resize', close)
-      window.removeEventListener('scroll', close, true)
     }
   }, [showSkills])
 
@@ -2217,7 +2235,7 @@ export function ChatPanel(): React.JSX.Element {
   }
 
   const sendMessage = async (): Promise<void> => {
-    const visibleText = input.trim()
+    const visibleText = inputValueRef.current.trim()
     const currentEditorSelection = useAppStore.getState().editorSelection
     if ((!visibleText && (mode === 'image' || !attachments.length)) || !conversation) return
     if (running && mode !== 'image') {
@@ -2238,7 +2256,7 @@ export function ChatPanel(): React.JSX.Element {
         displayContent: visibleText || '补充了附件与上下文',
         attachments: [...attachments]
       })
-      setInput('')
+      setComposerInput('')
       setAttachments([])
       return
     }
@@ -2293,7 +2311,7 @@ export function ChatPanel(): React.JSX.Element {
         model: requestModel.model,
         provider: requestModel.provider
       })
-      setInput('')
+      setComposerInput('')
       setAttachments([])
       try {
         await window.localAgent.image.start({
@@ -2410,7 +2428,7 @@ export function ChatPanel(): React.JSX.Element {
       model: requestModel.model,
       provider: requestModel.provider
     })
-    setInput('')
+    setComposerInput('')
     setAttachments([])
     setWebSearchEnabled(false)
 
@@ -2502,12 +2520,14 @@ export function ChatPanel(): React.JSX.Element {
       .reverse()
       .find((message) => message.role === 'user')
     if (!previous) return
-    setInput(previous.content)
+    setComposerInput(previous.content)
     if (messages[messageIndex]?.agentSteps?.length) setMode('agent')
   }
 
   const chooseMention = (entry: MentionEntry): void => {
-    setInput((current) => current.replace(/@([^\s@\[\]]*)$/, `@[${entry.label}] `))
+    setComposerInput((current) =>
+      current.replace(/@([^\s@\[\]]*)$/, `@[${entry.label}] `)
+    )
   }
 
   const scrollToLatest = (): void => {
@@ -3043,11 +3063,14 @@ export function ChatPanel(): React.JSX.Element {
           )}
           <textarea
             ref={textareaRef}
-            value={input}
+            defaultValue=""
             disabled={false}
             readOnly={false}
             aria-disabled="false"
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              markComposerInputActive()
+              syncComposerInputState(event.target.value)
+            }}
             onPaste={(event) => {
               if (mode === 'image') return
               const files = event.clipboardData.files
@@ -3087,7 +3110,7 @@ export function ChatPanel(): React.JSX.Element {
               <button
                 className={`send-button ${imagePendingCount > 0 ? 'queue-add' : ''}`}
                 onClick={() => void sendMessage()}
-                disabled={!input.trim() || !selectedComfyWorkflow || hasBlockingPending}
+                disabled={!hasInput || !selectedComfyWorkflow || hasBlockingPending}
                 title={imagePendingCount > 0 ? '加入图片队列' : '生成图片'}
               >
                 {imagePendingCount > 0 ? <Plus size={16} /> : <Sparkles size={16} />}
@@ -3108,7 +3131,7 @@ export function ChatPanel(): React.JSX.Element {
                 <button
                   className="send-button guide"
                   onClick={() => void sendMessage()}
-                  disabled={!input.trim() && !attachments.length}
+                  disabled={!hasInput && !attachments.length}
                   title="发送运行中引导"
                 >
                   <Send size={16} />
@@ -3122,7 +3145,7 @@ export function ChatPanel(): React.JSX.Element {
             <button
               className="send-button"
               onClick={() => void sendMessage()}
-              disabled={!input.trim() && !attachments.length}
+              disabled={!hasInput && !attachments.length}
               title="发送"
             >
               <Send size={17} />

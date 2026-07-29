@@ -49,7 +49,7 @@ function bufferedEvents<
     }
     buffers.set(payload.requestId, events)
     if (!timers.has(payload.requestId)) {
-      timers.set(payload.requestId, setTimeout(() => flush(payload.requestId), 24))
+      timers.set(payload.requestId, setTimeout(() => flush(payload.requestId), 48))
     }
   }
   ipcRenderer.on(channel, listener)

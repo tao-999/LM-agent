@@ -19,6 +19,7 @@ import {
   isChatScrollActive,
   subscribeChatScrollActivity
 } from './utils/chat-scroll-activity'
+import { composerInputIdleDelay } from './utils/composer-input-activity'
 
 function isToolResultEvent(event: AgentEvent): boolean {
   return (
@@ -663,6 +664,11 @@ export default function App(): React.JSX.Element {
     const flushStreamQueues = (force = false): void => {
       streamFlushTimer = undefined
       if (!force && isChatScrollActive()) return
+      const inputDelay = composerInputIdleDelay()
+      if (!force && inputDelay > 0) {
+        streamFlushTimer = window.setTimeout(flushStreamQueues, Math.ceil(inputDelay) + 16)
+        return
+      }
       for (const requestId of [...chatStreamQueues.keys()]) flushChatRequest(requestId)
       for (const requestId of [...agentStreamQueues.keys()]) flushAgentRequest(requestId)
       for (const requestId of [...imageStreamQueues.keys()]) flushImageRequest(requestId)
@@ -671,7 +677,11 @@ export default function App(): React.JSX.Element {
     const scheduleStreamFlush = (): void => {
       if (streamFlushTimer !== undefined) return
       if (isChatScrollActive()) return
-      streamFlushTimer = window.setTimeout(flushStreamQueues, 120)
+      const inputDelay = composerInputIdleDelay()
+      streamFlushTimer = window.setTimeout(
+        flushStreamQueues,
+        inputDelay > 0 ? Math.ceil(inputDelay) + 16 : 120
+      )
     }
 
     const unsubscribeChatScrollActivity = subscribeChatScrollActivity((active) => {
@@ -1185,7 +1195,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.139</dd></div>
+                <div><dt>版本</dt><dd>0.7.140</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>
