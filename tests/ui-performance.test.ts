@@ -12,6 +12,7 @@ import {
   CHAT_BOTTOM_TOLERANCE_PX,
   isScrollViewportAtBottom
 } from '../src/renderer/src/utils/scroll-position.ts'
+import { createLiveTokenUsageTracker } from '../src/main/live-token-usage.ts'
 
 test('临时 UI 状态变化复用持久化投影，避免重建超长会话快照', () => {
   type State = { transient: boolean; conversations: object[] }
@@ -120,4 +121,30 @@ test('会话底部判定容忍小数像素误差且离开底部后恢复箭头',
     isScrollViewportAtBottom({ scrollHeight: 320, scrollTop: 0, clientHeight: 480 }),
     true
   )
+})
+
+test('Chat 流式生成期间持续计算输出速度', () => {
+  let currentTime = 1000
+  const usages: Array<{ completionTokens: number; tokensPerSecond?: number }> = []
+  const tracker = createLiveTokenUsageTracker(
+    120,
+    (usage) => usages.push(usage),
+    { minIntervalMs: 250, now: () => currentTime }
+  )
+  tracker.push('abcd')
+  assert.equal(usages.length, 0)
+  currentTime = 1250
+  tracker.push('测试')
+  assert.equal(usages.length, 1)
+  assert.equal(usages[0].completionTokens, 3)
+  assert.equal(usages[0].tokensPerSecond, 12)
+})
+
+test('Chat 回复底部在流式状态展示实时 Tok 速度', async () => {
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  assert.match(chatSource, /message\.status === 'streaming' && message\.usage\?\.tokensPerSecond/)
+  assert.match(chatSource, /实时 \$\{liveSpeed\.toFixed\(2\)\} Tok\/s/)
 })

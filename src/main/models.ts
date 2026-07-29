@@ -4,6 +4,7 @@ import type {
   ModelOption,
   TokenUsage
 } from '../shared/types'
+import { createLiveTokenUsageTracker } from './live-token-usage'
 import { resolveThinkingEnabled } from '../shared/thinking'
 import { session, type Session } from 'electron'
 import { parseToolArgumentsJson } from './tool-json'
@@ -2554,7 +2555,10 @@ async function streamCompleteWithTools(
   toolChoice: 'auto' | 'required',
   onReasoning: (content: string) => void,
   onContent: (content: string) => void,
-  options: { stopStrings?: string[] } = {}
+  options: {
+    stopStrings?: string[]
+    onUsageProgress?: (usage: TokenUsage) => void
+  } = {}
 ): Promise<CompletionResult> {
   const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
   const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
@@ -2563,6 +2567,9 @@ async function streamCompleteWithTools(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
   ) + estimateTextTokens(JSON.stringify(tools))
+  const liveUsage = createLiveTokenUsageTracker(estimatedPrompt, (usage) =>
+    options.onUsageProgress?.(addUsage(prepared.compressionUsage, usage))
+  )
   let content = ''
   let reasoning = ''
   let repetitionStop: StreamRepetitionStop | null = null
@@ -2658,14 +2665,17 @@ async function streamCompleteWithTools(
           textField(data.message?.reasoning)
         if (thought) {
           if (!firstOutputAt) firstOutputAt = Date.now()
+          liveUsage.push(thought)
           normalizedReasoning.push(thought)
         }
         if (data.message?.content) {
           if (!firstOutputAt) firstOutputAt = Date.now()
+          liveUsage.push(data.message.content)
           normalizedContent.push(data.message.content)
         }
         if (data.message?.tool_calls?.length) {
           if (!firstOutputAt) firstOutputAt = Date.now()
+          liveUsage.push(JSON.stringify(data.message.tool_calls))
           rawToolCalls = data.message.tool_calls
         }
         if (repetitionStop) {
@@ -2726,6 +2736,7 @@ async function streamCompleteWithTools(
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
         true
       )
+    options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
     return {
       content: parsedTextCalls.content,
       reasoning: parsedTextCalls.reasoning,
@@ -2826,10 +2837,12 @@ async function streamCompleteWithTools(
         textField(delta?.thinking)
       if (thought) {
         if (!firstOutputAt) firstOutputAt = Date.now()
+        liveUsage.push(thought)
         normalizedReasoning.push(thought)
       }
       if (delta?.content) {
         if (!firstOutputAt) firstOutputAt = Date.now()
+        liveUsage.push(delta.content)
         normalizedContent.push(delta.content)
       }
       for (const toolDelta of delta?.tool_calls ?? []) {
@@ -2838,9 +2851,11 @@ async function streamCompleteWithTools(
         const current = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
         if (toolDelta.id) current.id = toolDelta.id
         if (toolDelta.function?.name) {
+          liveUsage.push(toolDelta.function.name)
           current.name = mergeStreamingFragment(current.name, toolDelta.function.name)
         }
         if (toolDelta.function?.arguments) {
+          liveUsage.push(toolDelta.function.arguments)
           current.arguments = mergeStreamingFragment(
             current.arguments,
             toolDelta.function.arguments
@@ -2911,6 +2926,7 @@ async function streamCompleteWithTools(
       estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
       true
     )
+  options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
   return {
     content: parsedTextCalls.content,
     reasoning: parsedTextCalls.reasoning,
@@ -2944,7 +2960,10 @@ export async function completeWithTools(
   toolChoice: 'auto' | 'required' = 'auto',
   onReasoning?: (content: string) => void,
   onContent?: (content: string) => void,
-  options: { stopStrings?: string[] } = {}
+  options: {
+    stopStrings?: string[]
+    onUsageProgress?: (usage: TokenUsage) => void
+  } = {}
 ): Promise<CompletionResult> {
   if (onReasoning || onContent) {
     return streamCompleteWithTools(

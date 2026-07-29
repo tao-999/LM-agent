@@ -1958,6 +1958,13 @@ export async function runWebChat(
       (content) => {
         streamedContent = true
         onChunk(content)
+      },
+      {
+        onUsageProgress: (usage) =>
+          onEvent({
+            type: 'context',
+            usage: addUsage(totalUsage, usage)
+          })
       }
     )
     if (completion.contextMemory) {

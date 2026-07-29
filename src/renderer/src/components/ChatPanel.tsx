@@ -964,6 +964,10 @@ function AssistantMessageMetaActions({
   onRetry: () => void
 }): React.JSX.Element {
   const exactUsage = message.usage && !message.usage.estimated ? message.usage : null
+  const liveSpeed =
+    message.status === 'streaming' && message.usage?.tokensPerSecond
+      ? message.usage.tokensPerSecond
+      : null
   const usageUnavailable =
     message.status !== 'streaming' && (!message.usage || message.usage.estimated)
 
@@ -975,6 +979,11 @@ function AssistantMessageMetaActions({
           title={`输入 ${exactUsage.promptTokens.toLocaleString()} Token，缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${exactUsage.completionTokens.toLocaleString()} Token，合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? `，生成速度 ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         >
           {`输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+        </span>
+      )}
+      {!exactUsage && liveSpeed && (
+        <span className="token-usage" title="根据当前流式输出实时更新，结束后替换为模型服务返回的真实用量">
+          {`实时 ${liveSpeed.toFixed(2)} Tok/s`}
         </span>
       )}
       {usageUnavailable && (
