@@ -12,7 +12,10 @@ import {
   createStreamRepetitionGuard,
   type StreamRepetitionStop
 } from './repetition-guard'
-import { stripPrivateModelOutput } from './protocol-output'
+import {
+  PRIVATE_MODEL_TOOL_BLOCK_TAGS,
+  stripPrivateModelOutput
+} from './protocol-output'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -324,7 +327,8 @@ const PRIVATE_HOST_BLOCK_TAGS = [
   'runtime_completion_guard',
   'runtime_replace_recovery',
   'runtime_anchor_context',
-  'tool_runtime_observation'
+  'tool_runtime_observation',
+  ...PRIVATE_MODEL_TOOL_BLOCK_TAGS
 ] as const
 
 const privateHostBlockPattern = (): RegExp =>
