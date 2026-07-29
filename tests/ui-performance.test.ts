@@ -8,6 +8,10 @@ import {
   setChatScrollActive,
   subscribeChatScrollActivity
 } from '../src/renderer/src/utils/chat-scroll-activity.ts'
+import {
+  CHAT_BOTTOM_TOLERANCE_PX,
+  isScrollViewportAtBottom
+} from '../src/renderer/src/utils/scroll-position.ts'
 
 test('临时 UI 状态变化复用持久化投影，避免重建超长会话快照', () => {
   type State = { transient: boolean; conversations: object[] }
@@ -97,5 +101,23 @@ test('会话底部使用真实阈值并保留完整可见留白', async () => {
   )
   const styleSource = await fs.readFile(path.resolve('src/renderer/src/styles.css'), 'utf8')
   assert.match(chatSource, /atBottomThreshold=\{8\}/)
+  assert.match(chatSource, /scrollerRef=\{setChatScrollerRef\}/)
+  assert.match(chatSource, /totalListHeightChanged=\{scheduleChatBottomSync\}/)
   assert.match(styleSource, /\.message-list-footer\s*\{\s*height:\s*36px;/)
+})
+
+test('会话底部判定容忍小数像素误差且离开底部后恢复箭头', () => {
+  assert.equal(CHAT_BOTTOM_TOLERANCE_PX, 4)
+  assert.equal(
+    isScrollViewportAtBottom({ scrollHeight: 1000.4, scrollTop: 600.2, clientHeight: 400 }),
+    true
+  )
+  assert.equal(
+    isScrollViewportAtBottom({ scrollHeight: 1000, scrollTop: 595, clientHeight: 400 }),
+    false
+  )
+  assert.equal(
+    isScrollViewportAtBottom({ scrollHeight: 320, scrollTop: 0, clientHeight: 480 }),
+    true
+  )
 })

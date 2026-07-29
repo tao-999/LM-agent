@@ -2,6 +2,7 @@ import {
   Children,
   isValidElement,
   memo,
+  useCallback,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -54,6 +55,7 @@ import remarkMath from 'remark-math'
 import 'highlight.js/styles/github-dark.css'
 import 'katex/dist/katex.min.css'
 import { setChatScrollActive } from '../utils/chat-scroll-activity'
+import { isScrollViewportAtBottom } from '../utils/scroll-position'
 import type {
   AgentApproval,
   ChatContextMessage,
@@ -1620,6 +1622,9 @@ export function ChatPanel(): React.JSX.Element {
   const [visibleRange, setVisibleRange] = useState<ListRange>({ startIndex: 0, endIndex: 0 })
   const [atBottom, setAtBottom] = useState(true)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const chatScrollerRef = useRef<HTMLElement | null>(null)
+  const bottomSyncFrameRef = useRef<number | null>(null)
+  const [chatScrollerElement, setChatScrollerElement] = useState<HTMLElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollRegionRef = useRef<HTMLDivElement>(null)
@@ -2513,6 +2518,48 @@ export function ChatPanel(): React.JSX.Element {
     window.setTimeout(scroll, 120)
   }
 
+  const syncChatBottomState = useCallback((): void => {
+    const scroller = chatScrollerRef.current
+    if (!scroller) return
+    const nextAtBottom = isScrollViewportAtBottom(scroller)
+    setAtBottom((current) => (current === nextAtBottom ? current : nextAtBottom))
+  }, [])
+
+  const scheduleChatBottomSync = useCallback((): void => {
+    if (bottomSyncFrameRef.current !== null) return
+    bottomSyncFrameRef.current = window.requestAnimationFrame(() => {
+      bottomSyncFrameRef.current = null
+      syncChatBottomState()
+    })
+  }, [syncChatBottomState])
+
+  const setChatScrollerRef = useCallback(
+    (ref: HTMLElement | Window | null): void => {
+      const element = ref instanceof HTMLElement ? ref : null
+      chatScrollerRef.current = element
+      setChatScrollerElement((current) => (current === element ? current : element))
+      if (element) scheduleChatBottomSync()
+    },
+    [scheduleChatBottomSync]
+  )
+
+  useEffect(() => {
+    if (!chatScrollerElement) return
+    const handleScroll = (): void => scheduleChatBottomSync()
+    const resizeObserver = new ResizeObserver(scheduleChatBottomSync)
+    chatScrollerElement.addEventListener('scroll', handleScroll, { passive: true })
+    resizeObserver.observe(chatScrollerElement)
+    scheduleChatBottomSync()
+    return () => {
+      chatScrollerElement.removeEventListener('scroll', handleScroll)
+      resizeObserver.disconnect()
+      if (bottomSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomSyncFrameRef.current)
+        bottomSyncFrameRef.current = null
+      }
+    }
+  }, [chatScrollerElement, scheduleChatBottomSync])
+
   return (
     <section className="chat-panel">
       <header className="panel-header chat-header">
@@ -2648,9 +2695,11 @@ export function ChatPanel(): React.JSX.Element {
               computeItemKey={(_index, message) => message.id}
               followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
               atBottomThreshold={8}
+              scrollerRef={setChatScrollerRef}
               increaseViewportBy={{ top: 500, bottom: 700 }}
               rangeChanged={setVisibleRange}
-              atBottomStateChange={setAtBottom}
+              atBottomStateChange={scheduleChatBottomSync}
+              totalListHeightChanged={scheduleChatBottomSync}
               itemContent={(index, message) => (
                 <MessageCard
                   message={message}
