@@ -416,11 +416,18 @@ async function processImageQueue(): Promise<void> {
               function: {
                 name: 'grep',
                 description:
-                  '全局检索 CWD 项目文件、@history/ 会话历史与 @papers/ 论文缓存，返回 path、line 及前后各 5 行。',
+                  '全局检索 CWD 项目文件、@history/ 会话历史与 @papers/ 论文缓存，返回 path、line 及前后各 5 行。order=desc 优先靠后的最新内容，order=asc 优先靠前的久远内容。',
                 parameters: {
                   type: 'object',
                   required: ['query'],
-                  properties: { query: { type: 'string' } }
+                  properties: {
+                    query: { type: 'string' },
+                    order: {
+                      type: 'string',
+                      enum: ['asc', 'desc'],
+                      description: '默认 asc；查找最新剧情时使用 desc'
+                    }
+                  }
                 }
               }
             },
@@ -460,36 +467,42 @@ async function processImageQueue(): Promise<void> {
               }
               promptMessages.push(completion.rawMessage)
               const call = completion.toolCalls[0]
-               let result: string
-               if (call.name === 'grep') {
-                 const query =
-                   typeof call.arguments.query === 'string' ? call.arguments.query : request.prompt
-                 const [workspaceMatches, paperMatches] = await Promise.all([
-                   searchWorkspace(request.workspaceRoot, query),
-                   searchPaperCache(query)
-                 ])
-                 result = JSON.stringify(
-                   {
-                     engine: 'ripgrep',
-                     scope: '全部本地资料',
-                     workspaceMatches: workspaceMatches.map((match) => ({
-                       ...match,
-                       path: path.relative(request.workspaceRoot, match.path)
-                     })),
-                     conversationHistory: grepConversationHistoryArchive(
-                       request.historyArchive,
-                       query,
-                       6
-                     ),
-                     paperCache: paperMatches.map((match) => ({
-                       ...match,
-                       path: `@papers/${match.cacheId}.txt`
-                     }))
-                   },
-                   null,
-                   2
-                 )
-               } else if (call.name === 'read_file') {
+              let result: string
+              if (call.name === 'grep') {
+                const query =
+                  typeof call.arguments.query === 'string' ? call.arguments.query : request.prompt
+                const order = call.arguments.order === 'desc' ? 'desc' : 'asc'
+                const [workspaceMatches, paperMatches] = await Promise.all([
+                  searchWorkspace(request.workspaceRoot, query, '', 160, order),
+                  searchPaperCache(query)
+                ])
+                result = JSON.stringify(
+                  {
+                    engine: 'ripgrep',
+                    scope: '全部本地资料',
+                    order,
+                    workspaceMatches: workspaceMatches.map((match) => ({
+                      ...match,
+                      path: path.relative(request.workspaceRoot, match.path)
+                    })),
+                    conversationHistory: grepConversationHistoryArchive(
+                      request.historyArchive,
+                      query,
+                      6,
+                      order
+                    ),
+                    paperCache: (order === 'desc'
+                      ? [...paperMatches].reverse()
+                      : paperMatches
+                    ).map((match) => ({
+                      ...match,
+                      path: `@papers/${match.cacheId}.txt`
+                    }))
+                  },
+                  null,
+                  2
+                )
+              } else if (call.name === 'read_file') {
                  const sourcePath = String(call.arguments.path ?? '')
                  const { content } = await readLocalSourceContent(
                    request.workspaceRoot,

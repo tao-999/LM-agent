@@ -30,7 +30,61 @@ import { isChatScrollActive } from './utils/chat-scroll-activity'
 
 const pendingStorageWrites = new Map<string, StorageValue<unknown>>()
 const latestPersistedStateByName = new Map<string, unknown>()
+const storageWriteChains = new Map<string, Promise<void>>()
 let storageWriteTimer: number | undefined
+let persistenceDatabase: Promise<IDBDatabase> | undefined
+
+function openPersistenceDatabase(): Promise<IDBDatabase> {
+  if (persistenceDatabase) return persistenceDatabase
+  persistenceDatabase = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open('star-companion-persistence', 1)
+    request.onupgradeneeded = () => {
+      const database = request.result
+      if (!database.objectStoreNames.contains('zustand')) {
+        database.createObjectStore('zustand')
+      }
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error ?? new Error('无法打开会话数据库'))
+  })
+  return persistenceDatabase
+}
+
+async function readDatabaseValue(name: string): Promise<StorageValue<unknown> | null> {
+  const database = await openPersistenceDatabase()
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction('zustand', 'readonly')
+    const request = transaction.objectStore('zustand').get(name)
+    request.onsuccess = () => resolve((request.result as StorageValue<unknown> | undefined) ?? null)
+    request.onerror = () => reject(request.error ?? new Error('无法读取会话数据库'))
+  })
+}
+
+async function writeDatabaseValue(name: string, value: StorageValue<unknown>): Promise<void> {
+  const database = await openPersistenceDatabase()
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction('zustand', 'readwrite')
+    transaction.objectStore('zustand').put(value, name)
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error ?? new Error('无法写入会话数据库'))
+    transaction.onabort = () => reject(transaction.error ?? new Error('会话数据库写入已中止'))
+  })
+}
+
+function queueDatabaseWrite(name: string, value: StorageValue<unknown>): void {
+  const previous = storageWriteChains.get(name) ?? Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(() => writeDatabaseValue(name, value))
+    .catch(() => {
+      // 极旧环境无法使用 IndexedDB 时才回退；正常路径不在渲染线程序列化超长会话。
+      window.localStorage.setItem(name, JSON.stringify(value))
+    })
+  storageWriteChains.set(name, next)
+  void next.finally(() => {
+    if (storageWriteChains.get(name) === next) storageWriteChains.delete(name)
+  })
+}
 
 function flushStorageWrites(force = false): void {
   if (storageWriteTimer !== undefined) {
@@ -41,20 +95,29 @@ function flushStorageWrites(force = false): void {
     storageWriteTimer = window.setTimeout(flushStorageWrites, 240)
     return
   }
-  for (const [name, value] of pendingStorageWrites) {
-    window.localStorage.setItem(name, JSON.stringify(value))
-  }
+  for (const [name, value] of pendingStorageWrites) queueDatabaseWrite(name, value)
   pendingStorageWrites.clear()
 }
 
 const bufferedPersistStorage: PersistStorage<unknown> = {
-  getItem: (name) => {
+  getItem: async (name) => {
     if (pendingStorageWrites.has(name)) return pendingStorageWrites.get(name) ?? null
-    const value = window.localStorage.getItem(name)
-    if (!value) return null
     try {
-      const parsed = JSON.parse(value) as StorageValue<unknown>
+      const databaseValue = await readDatabaseValue(name)
+      if (databaseValue) {
+        latestPersistedStateByName.set(name, databaseValue.state)
+        return databaseValue
+      }
+    } catch {
+      // 继续尝试读取旧版 localStorage 数据。
+    }
+    const legacyValue = window.localStorage.getItem(name)
+    if (!legacyValue) return null
+    try {
+      const parsed = JSON.parse(legacyValue) as StorageValue<unknown>
       latestPersistedStateByName.set(name, parsed.state)
+      queueDatabaseWrite(name, parsed)
+      window.localStorage.removeItem(name)
       return parsed
     } catch {
       return null
@@ -65,12 +128,19 @@ const bufferedPersistStorage: PersistStorage<unknown> = {
     latestPersistedStateByName.set(name, value.state)
     pendingStorageWrites.set(name, value)
     if (storageWriteTimer !== undefined) window.clearTimeout(storageWriteTimer)
-    storageWriteTimer = window.setTimeout(flushStorageWrites, 800)
+    storageWriteTimer = window.setTimeout(flushStorageWrites, 1200)
   },
   removeItem: (name) => {
     pendingStorageWrites.delete(name)
     latestPersistedStateByName.delete(name)
     window.localStorage.removeItem(name)
+    void openPersistenceDatabase().then(
+      (database) => {
+        const transaction = database.transaction('zustand', 'readwrite')
+        transaction.objectStore('zustand').delete(name)
+      },
+      () => undefined
+    )
   }
 }
 
@@ -243,10 +313,7 @@ const projectPersistedState = createReferenceMemoizedProjection(
     comfyBaseUrl: state.comfyBaseUrl,
     comfyWorkflows: state.comfyWorkflows,
     selectedComfyWorkflowId: state.selectedComfyWorkflowId,
-    conversations: state.conversations.map((conversation) => ({
-      ...conversation,
-      model: conversation.model ? persistedModel(conversation.model) : undefined
-    })),
+    conversations: state.conversations,
     activeConversationId: state.activeConversationId
   })
 )

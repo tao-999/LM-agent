@@ -85,3 +85,27 @@ test('grep 命中返回前后各五行上下文', async () => {
     assert.match(result.context ?? '', /^15 \| 第 15 行/m)
   })
 })
+
+test('grep 支持顺序与倒序检索，并在截取数量前完成排序', async () => {
+  await withWorkspace(async (root) => {
+    const lines = Array.from({ length: 30 }, (_, index) => `剧情 ${index + 1}`)
+    lines[2] = '目标剧情：久远事件'
+    lines[14] = '目标剧情：中段事件'
+    lines[27] = '目标剧情：最新事件'
+    await fs.writeFile(path.join(root, '正文.txt'), lines.join('\n'), 'utf8')
+
+    const ascending = await searchWorkspace(root, '目标剧情', '正文.txt', 2, 'asc')
+    assert.deepEqual(ascending.map((result) => result.line), [3, 15])
+
+    const descending = await searchWorkspace(root, '目标剧情', '正文.txt', 2, 'desc')
+    assert.deepEqual(descending.map((result) => result.line), [28, 15])
+    assert.match(descending[0].preview, /最新事件/)
+  })
+})
+
+test('Agent grep 工具公开 order 参数并传递给项目与会话历史检索', async () => {
+  const source = await fs.readFile(path.resolve('src/main/agent.ts'), 'utf8')
+  assert.match(source, /enum:\s*\['asc', 'desc'\]/)
+  assert.match(source, /searchWorkspace\(request\.workspaceRoot, query, scopePath, 160, order\)/)
+  assert.match(source, /grepConversationHistoryArchive\([\s\S]*?order\)/)
+})

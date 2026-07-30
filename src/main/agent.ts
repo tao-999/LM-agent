@@ -286,7 +286,7 @@ export async function buildLocalResourceIndex(
     `CWD：${workspaceRoot}`,
     '本地资料优先级：最高。必须先 grep 全局检索本地资料；只有本地零命中或读取后证据仍不足，才考虑 search_web。',
     '默认检索范围：省略 grep.path 时覆盖 CWD 全部项目文件、会话历史虚拟文件与 60 分钟论文缓存。除非用户明确限定单个文件，禁止先把 grep.path 收窄到当前文件。',
-    '读取规则：grep 每个命中自带前后各 5 行窗口；确认相关后，把命中的 path 与 around_line 交给 read_file 继续读取。',
+    '排序与读取规则：grep.order=desc 用于优先定位文件靠后的最新剧情，grep.order=asc 用于优先定位文件靠前的久远剧情，默认 asc。每个命中自带前后各 5 行窗口；确认相关后，把命中的 path 与 around_line 交给 read_file 继续读取。',
     `项目文件路径（${paths.length}${paths.length >= 320 ? '+' : ''}）：`,
     ...(paths.length ? paths : ['[当前 CWD 暂无可列出文件]']),
     `会话历史虚拟路径（${historyPaths.length}）：`,
@@ -299,7 +299,8 @@ export async function buildLocalResourceIndex(
 export function grepConversationHistoryArchive(
   archive: ChatContextMessage[] | undefined,
   queryValue: string,
-  limitValue = 6
+  limitValue = 6,
+  order: 'asc' | 'desc' = 'desc'
 ): string {
   const archiveMessages = archive ?? []
   const query = queryValue.trim()
@@ -319,7 +320,11 @@ export function grepConversationHistoryArchive(
   })
   const pool = scored
     .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || right.index - left.index)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        (order === 'desc' ? right.index - left.index : left.index - right.index)
+    )
   const selected = pool.slice(0, limit)
   if (!selected.length) {
     return `<grep_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="0">
@@ -373,8 +378,8 @@ function describeToolCall(
       }`
     },
     grep: {
-      title: `grep · ${pathValue || 'CWD + 会话历史'} · ${text(args.query) || '未指定关键词'}`,
-      detail: `正在${pathValue ? `检索 ${pathValue}` : '检索当前 CWD 全部文件与本地会话历史'}中的“${text(args.query)}”`
+      title: `grep · ${pathValue || 'CWD + 会话历史'} · ${args.order === 'desc' ? '倒序' : '顺序'} · ${text(args.query) || '未指定关键词'}`,
+      detail: `正在${args.order === 'desc' ? '从后向前' : '从前向后'}${pathValue ? `检索 ${pathValue}` : '检索当前 CWD 全部文件与本地会话历史'}中的“${text(args.query)}”`
     },
     search_web: {
       title: `search_web · ${text(args.query) || '未指定关键词'}`,
@@ -1836,13 +1841,18 @@ export async function runWebChat(
       function: {
         name: 'grep',
         description:
-          '唯一的本地资料检索工具。默认全局检索 CWD 全部项目文件、@history/ 会话历史与 @papers/ 论文缓存，并返回 path、line 及前后各 5 行上下文。确认相关后调用 read_file 扩读。',
+          '唯一的本地资料检索工具。默认全局检索 CWD 全部项目文件、@history/ 会话历史与 @papers/ 论文缓存，并返回 path、line 及前后各 5 行上下文。order=desc 优先返回靠后的最新剧情，order=asc 优先返回靠前的久远剧情；默认 asc。确认相关后调用 read_file 扩读。',
         parameters: {
           type: 'object',
           required: ['query'],
           properties: {
             query: { type: 'string', description: '关键词表达式，支持 | OR 与 & AND' },
-            path: { type: 'string', description: '可选；默认省略以检索全部本地资料' }
+            path: { type: 'string', description: '可选；默认省略以检索全部本地资料' },
+            order: {
+              type: 'string',
+              enum: ['asc', 'desc'],
+              description: 'asc 顺序检索靠前内容，desc 倒序检索靠后内容；默认 asc'
+            }
           }
         }
       }
@@ -2141,9 +2151,10 @@ export async function runWebChat(
       } else if (call.name === 'grep') {
         const query = text(call.arguments.query)
         const scopePath = text(call.arguments.path).trim()
+        const order = call.arguments.order === 'desc' ? 'desc' : 'asc'
         const [workspaceMatches, paperMatches] = await Promise.all([
           workspaceRoot
-            ? searchWorkspace(workspaceRoot, query, scopePath)
+            ? searchWorkspace(workspaceRoot, query, scopePath, 160, order)
             : Promise.resolve([]),
           searchPaperCache(query)
         ])
@@ -2160,8 +2171,9 @@ export async function runWebChat(
             ...match,
             path: path.relative(workspaceRoot, match.path)
           })),
-          conversationHistory: grepConversationHistoryArchive(historyArchive, query, 8),
-          paperCache: paperMatches.map((match) => ({
+          order,
+          conversationHistory: grepConversationHistoryArchive(historyArchive, query, 8, order),
+          paperCache: (order === 'desc' ? [...paperMatches].reverse() : paperMatches).map((match) => ({
             ...match,
             path: `${PAPER_SOURCE_PREFIX}${match.cacheId}.txt`
           }))
@@ -3144,7 +3156,7 @@ export async function runAgent(
       function: {
         name: 'grep',
         description:
-          '唯一的本地资料检索工具，使用应用内置 ripgrep。默认省略 path，全局搜索当前 CWD 全部项目文件、@history/ 会话历史虚拟文件与最近 60 分钟的 @papers/ 论文缓存。每个命中返回 path、line 及前后各 5 行上下文；确认相关后必须调用 read_file 扩读。只有用户明确限定单个文件，或全局结果需要二次收窄时才传 path。query 支持 a | b | c（OR）与 a & b（同一文件 AND）。',
+          '唯一的本地资料检索工具，使用应用内置 ripgrep。默认省略 path，全局搜索当前 CWD 全部项目文件、@history/ 会话历史虚拟文件与最近 60 分钟的 @papers/ 论文缓存。每个命中返回 path、line 及前后各 5 行上下文；确认相关后必须调用 read_file 扩读。order=desc 优先返回文件靠后的最新剧情，order=asc 优先返回文件靠前的久远剧情；默认 asc。只有用户明确限定单个文件，或全局结果需要二次收窄时才传 path。query 支持 a | b | c（OR）与 a & b（同一文件 AND）。',
         parameters: {
           type: 'object',
           required: ['query'],
@@ -3153,6 +3165,11 @@ export async function runAgent(
             path: {
               type: 'string',
               description: '可选的 CWD 相对文件或目录；默认省略以检索全部本地资料'
+            },
+            order: {
+              type: 'string',
+              enum: ['asc', 'desc'],
+              description: 'asc 顺序检索靠前内容，desc 倒序检索靠后内容；默认 asc'
             },
             include_history: {
               type: 'boolean',
@@ -3176,18 +3193,20 @@ export async function runAgent(
     execute: async (args) => {
       const scopePath = text(args.path).trim()
       const query = text(args.query)
+      const order = args.order === 'desc' ? 'desc' : 'asc'
       const includeHistory =
         typeof args.include_history === 'boolean' ? args.include_history : true
       const includePapers =
         typeof args.include_papers === 'boolean' ? args.include_papers : true
       const [results, paperMatches] = await Promise.all([
-        searchWorkspace(request.workspaceRoot, query, scopePath),
+        searchWorkspace(request.workspaceRoot, query, scopePath, 160, order),
         includePapers ? searchPaperCache(query) : Promise.resolve([])
       ])
       return stringifyResult({
         engine: 'ripgrep',
         scope: scopePath || '当前 CWD 全部文件',
         query,
+        order,
         workspaceMatches: results.map((result) => ({
           ...result,
           path: path.relative(request.workspaceRoot, result.path)
@@ -3201,13 +3220,14 @@ export async function runAgent(
           ? grepConversationHistoryArchive(
               request.historyArchive ?? [],
               query,
-              Number(args.max_history_results) || 6
+              Number(args.max_history_results) || 6,
+              order
             )
           : '未启用会话历史检索',
         paperCache: includePapers
           ? {
               ttlMinutes: 60,
-               matches: paperMatches.map((match) => ({
+               matches: (order === 'desc' ? [...paperMatches].reverse() : paperMatches).map((match) => ({
                  ...match,
                  path: `${PAPER_SOURCE_PREFIX}${match.cacheId}.txt`
                }))
@@ -3820,7 +3840,7 @@ export async function runAgent(
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
-    '资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 并传 path、around_line、context_lines 精准扩读。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。',
+    '资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。查最新剧情或文件末尾信息使用 order=desc，查久远剧情或文件开头信息使用 order=asc，默认 asc。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 并传 path、around_line、context_lines 精准扩读。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。',
     '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 grep 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
     requiresWritingLoreResearch
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 grep 检索当前 CWD 与本地会话历史；命中项目文件后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'

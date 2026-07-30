@@ -18,6 +18,11 @@ import {
   markComposerInputActive,
   resetComposerInputActivity
 } from '../src/renderer/src/utils/composer-input-activity.ts'
+import {
+  markUiInteractionActive,
+  resetUiInteractionActivity,
+  uiInteractionIdleDelay
+} from '../src/renderer/src/utils/ui-interaction-activity.ts'
 
 test('临时 UI 状态变化复用持久化投影，避免重建超长会话快照', () => {
   type State = { transient: boolean; conversations: object[] }
@@ -90,6 +95,13 @@ test('输入期间推迟思考流刷新，避免抢占键盘交互', () => {
   resetComposerInputActivity()
 })
 
+test('滚轮、按键与弹框点击期间统一推迟流式刷新', () => {
+  resetUiInteractionActivity()
+  markUiInteractionActive(220)
+  assert.ok(uiInteractionIdleDelay() > 0)
+  resetUiInteractionActivity()
+})
+
 test('聊天输入使用原生非受控值，流式消息更新不会反复写回输入框', async () => {
   const chatSource = await fs.readFile(
     path.resolve('src/renderer/src/components/ChatPanel.tsx'),
@@ -99,6 +111,27 @@ test('聊天输入使用原生非受控值，流式消息更新不会反复写�
   assert.match(chatSource, /defaultValue=""/)
   assert.doesNotMatch(chatSource, /value=\{input\}/)
   assert.match(chatSource, /markComposerInputActive\(\)/)
+})
+
+test('超长会话持久化使用 IndexedDB 异步写入并避免复制全部会话', async () => {
+  const storeSource = await fs.readFile(path.resolve('src/renderer/src/store.ts'), 'utf8')
+  assert.match(storeSource, /indexedDB\.open\('star-companion-persistence'/)
+  assert.match(storeSource, /queueDatabaseWrite\(name, value\)/)
+  assert.match(
+    storeSource,
+    /selectedComfyWorkflowId:\s*state\.selectedComfyWorkflowId,[\s\S]*?conversations:\s*state\.conversations,\s*activeConversationId/
+  )
+})
+
+test('流式消息通过延迟值渲染且已完成步骤按引用隔离', async () => {
+  const chatSource = await fs.readFile(
+    path.resolve('src/renderer/src/components/ChatPanel.tsx'),
+    'utf8'
+  )
+  assert.match(chatSource, /const renderedMessages = useDeferredValue\(messages\)/)
+  assert.match(chatSource, /data=\{renderedMessages\}/)
+  assert.match(chatSource, /const AgentStepBlock = memo/)
+  assert.match(chatSource, /previous\.block === next\.block/)
 })
 
 test('Skill 菜单只由外部点击、Escape、窗口变化或会话切换关闭', async () => {

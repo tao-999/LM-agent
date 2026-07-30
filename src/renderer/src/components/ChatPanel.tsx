@@ -513,7 +513,7 @@ function useThrottledText(content: string, streaming: boolean): string {
     }
     sync()
     if (!streaming) return
-    const timer = window.setInterval(sync, 100)
+    const timer = window.setInterval(sync, 260)
     return () => window.clearInterval(timer)
   }, [streaming])
 
@@ -755,14 +755,7 @@ function StreamingThinkingContent({
   )
 }
 
-function AgentStepBlock({
-  block,
-  messageStatus,
-  responseFooterExtra,
-  lastResponseBlockId,
-  onPreviewImage,
-  onImageContextMenu
-}: {
+type AgentStepBlockProps = {
   block: AgentExecutionBlock
   messageStatus?: ChatMessage['status']
   responseFooterExtra?: React.ReactNode
@@ -772,7 +765,16 @@ function AgentStepBlock({
     event: React.MouseEvent,
     image: MessageAttachment
   ) => void
-}): React.JSX.Element | null {
+}
+
+const AgentStepBlock = memo(function AgentStepBlock({
+  block,
+  messageStatus,
+  responseFooterExtra,
+  lastResponseBlockId,
+  onPreviewImage,
+  onImageContextMenu
+}: AgentStepBlockProps): React.JSX.Element | null {
   const running = messageStatus === 'streaming'
   if (block.type === 'operation') {
     const title = block.title || block.toolName || '执行操作'
@@ -904,7 +906,12 @@ function AgentStepBlock({
     )
   }
   return null
-}
+}, (previous, next) =>
+  previous.block === next.block &&
+  previous.messageStatus === next.messageStatus &&
+  previous.lastResponseBlockId === next.lastResponseBlockId &&
+  (previous.block.type !== 'response' || previous.responseFooterExtra === next.responseFooterExtra)
+)
 
 function AgentExecutionStream({
   blocks,
@@ -1647,7 +1654,9 @@ export function ChatPanel(): React.JSX.Element {
 
   const conversation =
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
+  const renderedConversations = useDeferredValue(conversations)
   const messages = conversation?.messages ?? []
+  const renderedMessages = useDeferredValue(messages)
   const mode = conversation?.mode ?? 'chat'
   const enabledSkills = useMemo(() => filterEnabledSkills(skills), [skills])
   const enabledSelectedSkillIds = useMemo(
@@ -1658,7 +1667,9 @@ export function ChatPanel(): React.JSX.Element {
   const thinkingCapability = inferThinkingCapability(model)
   const requestModel = { ...model, thinkingMode }
   const floatingTaskState = useMemo(() => {
-    const latestAssistant = [...messages].reverse().find((message) => message.role === 'assistant')
+    const latestAssistant = [...renderedMessages]
+      .reverse()
+      .find((message) => message.role === 'assistant')
     if (!latestAssistant) return null
     for (
       let blockIndex = (latestAssistant.agentBlocks?.length ?? 0) - 1;
@@ -1678,7 +1689,7 @@ export function ChatPanel(): React.JSX.Element {
       }
     }
     return null
-  }, [messages])
+  }, [renderedMessages])
   const approvalForConversation =
     agentApproval &&
     pending[agentApproval.requestId]?.conversationId === conversation?.id
@@ -1705,7 +1716,7 @@ export function ChatPanel(): React.JSX.Element {
   const filteredConversations = useMemo(() => {
     if (!showSessions) return []
     const query = deferredSessionQuery.trim().toLocaleLowerCase()
-    return conversations
+    return renderedConversations
       .filter(
         (item) =>
           !query ||
@@ -1713,7 +1724,7 @@ export function ChatPanel(): React.JSX.Element {
           item.messages.some((message) => message.content.toLocaleLowerCase().includes(query))
       )
       .sort((left, right) => right.updatedAt - left.updatedAt)
-  }, [conversations, deferredSessionQuery, showSessions])
+  }, [renderedConversations, deferredSessionQuery, showSessions])
   const conversationPendings = useMemo(
     () =>
       Object.entries(pending).filter(
@@ -1723,13 +1734,14 @@ export function ChatPanel(): React.JSX.Element {
   )
   const imageQueueItems = useMemo(
     () => {
+      if (mode !== 'image') return []
       const imagePendings = Object.entries(pending).filter(
         ([, value]) => value.kind === 'image'
       )
       if (!imagePendings.length) return []
       return imagePendings
         .map(([requestId, value]) => {
-          const owner = conversations.find((item) => item.id === value.conversationId)
+          const owner = renderedConversations.find((item) => item.id === value.conversationId)
           const assistantIndex =
             owner?.messages.findIndex((message) => message.id === value.assistantId) ?? -1
           const assistant = assistantIndex >= 0 ? owner?.messages[assistantIndex] : undefined
@@ -1743,7 +1755,7 @@ export function ChatPanel(): React.JSX.Element {
           }
         })
     },
-    [pending, conversations]
+    [mode, pending, renderedConversations]
   )
   const activePending = conversationPendings[0]
   const imagePendingCount = imageQueueItems.length
@@ -2533,7 +2545,7 @@ export function ChatPanel(): React.JSX.Element {
   const scrollToLatest = (): void => {
     const scroll = (): void => {
       virtuosoRef.current?.scrollToIndex({
-        index: Math.max(0, messages.length - 1),
+        index: Math.max(0, renderedMessages.length - 1),
         align: 'end',
         behavior: 'auto'
       })
@@ -2715,11 +2727,11 @@ export function ChatPanel(): React.JSX.Element {
           />
         )}
         <div className="message-list">
-          {messages.length ? (
+        {renderedMessages.length ? (
             <Virtuoso
               key={conversation?.id}
               ref={virtuosoRef}
-              data={messages}
+              data={renderedMessages}
               isScrolling={setChatScrollActive}
               computeItemKey={(_index, message) => message.id}
               followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
@@ -2779,7 +2791,7 @@ export function ChatPanel(): React.JSX.Element {
             </div>
           )}
         </div>
-        {messages.length > 0 && !atBottom && (
+        {renderedMessages.length > 0 && !atBottom && (
           <button
             className="scroll-to-bottom-button"
             onClick={scrollToLatest}
@@ -2788,9 +2800,9 @@ export function ChatPanel(): React.JSX.Element {
             <ChevronDown size={17} />
           </button>
         )}
-        {messages.length > 3 && (
+        {renderedMessages.length > 3 && (
           <ChatMinimap
-            messages={messages}
+            messages={renderedMessages}
             range={visibleRange}
             onJump={(index) =>
               virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })

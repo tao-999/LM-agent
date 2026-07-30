@@ -433,7 +433,8 @@ async function searchWorkspaceFallback(
   root: string,
   query: string,
   scopePath = '',
-  limit = 160
+  limit = 160,
+  order: SearchOrder = 'asc'
 ): Promise<SearchResult[]> {
   const results: SearchResult[] = []
   const groups = parseSearchGroups(query)
@@ -460,7 +461,9 @@ async function searchWorkspaceFallback(
     if (!matchedGroups.length) return
     const activeTerms = [...new Set(matchedGroups.flat())]
     const lines = content.split(/\r?\n/)
-    lines.forEach((line, index) => {
+    const indexedLines = lines.map((line, index) => ({ line, index }))
+    if (order === 'desc') indexedLines.reverse()
+    indexedLines.forEach(({ line, index }) => {
       if (results.length >= limit) return
       const loweredLine = line.toLocaleLowerCase()
       const matches = activeTerms.filter((term) => loweredLine.includes(term))
@@ -477,7 +480,10 @@ async function searchWorkspaceFallback(
 
   const walk = async (directory: string): Promise<void> => {
     if (results.length >= limit || scanned >= 2500) return
-    const entries = await fs.readdir(directory, { withFileTypes: true })
+    const entries = (await fs.readdir(directory, { withFileTypes: true })).sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+    )
+    if (order === 'desc') entries.reverse()
     for (const entry of entries) {
       if (results.length >= limit || scanned >= 2500) return
       if (ignoredNames.has(entry.name)) continue
@@ -510,11 +516,26 @@ type RipgrepJsonMatch = {
   }
 }
 
+export type SearchOrder = 'asc' | 'desc'
+
+function sortSearchResults(results: SearchResult[], order: SearchOrder): SearchResult[] {
+  const direction = order === 'desc' ? -1 : 1
+  return results.sort((left, right) => {
+    const pathOrder = left.path.localeCompare(right.path, undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    })
+    if (pathOrder !== 0) return pathOrder * direction
+    return (left.line - right.line) * direction
+  })
+}
+
 async function searchWorkspaceWithRipgrep(
   root: string,
   query: string,
   scopePath = '',
-  limit = 160
+  limit = 160,
+  order: SearchOrder = 'asc'
 ): Promise<SearchResult[]> {
   const groups = parseSearchGroups(query)
   if (!groups.length) return []
@@ -612,32 +633,32 @@ async function searchWorkspaceWithRipgrep(
     const matchedGroups = groups.filter((group) => group.every((term) => fileEntry.terms.has(term)))
     if (!matchedGroups.length) continue
     const activeTerms = new Set(matchedGroups.flat())
-    for (const [line, lineEntry] of [...fileEntry.lines].sort((left, right) => left[0] - right[0])) {
+    for (const [line, lineEntry] of fileEntry.lines) {
       const matches = [...lineEntry.matches].filter((term) => activeTerms.has(term))
       if (!matches.length) continue
       results.push({ path: fullPath, line, preview: lineEntry.preview, matches })
-      if (results.length >= limit) return results
     }
   }
-  return results
+  return sortSearchResults(results, order).slice(0, limit)
 }
 
 export async function searchWorkspace(
   root: string,
   query: string,
   scopePath = '',
-  limit = 160
+  limit = 160,
+  order: SearchOrder = 'asc'
 ): Promise<SearchResult[]> {
   let results: SearchResult[]
   try {
-    results = await searchWorkspaceWithRipgrep(root, query, scopePath, limit)
+    results = await searchWorkspaceWithRipgrep(root, query, scopePath, limit, order)
     if (results.length) return addSearchContexts(results)
   } catch {
     // 安装包缺少平台二进制、进程启动失败或输出异常时，继续使用内置文本扫描兜底。
   }
   // ripgrep 以 UTF-8 为主；GBK、GB18030、Big5 等文本由编码感知扫描补齐。
-  results = await searchWorkspaceFallback(root, query, scopePath, limit)
-  return addSearchContexts(results)
+  results = await searchWorkspaceFallback(root, query, scopePath, limit, order)
+  return addSearchContexts(sortSearchResults(results, order).slice(0, limit))
 }
 
 async function addSearchContexts(results: SearchResult[], radius = 5): Promise<SearchResult[]> {

@@ -1,16 +1,17 @@
-let activeUntil = 0
+import {
+  markUiInteractionActive,
+  resetUiInteractionActivity,
+  uiInteractionIdleDelay
+} from './ui-interaction-activity.ts'
 
-const now = (): number =>
-  typeof performance !== 'undefined' ? performance.now() : Date.now()
-
-export function markComposerInputActive(durationMs = 180): void {
-  activeUntil = Math.max(activeUntil, now() + Math.max(0, durationMs))
+export function markComposerInputActive(durationMs = 420): void {
+  markUiInteractionActive(durationMs)
 }
 
 export function composerInputIdleDelay(): number {
-  return Math.max(0, activeUntil - now())
+  return uiInteractionIdleDelay()
 }
 
 export function resetComposerInputActivity(): void {
-  activeUntil = 0
+  resetUiInteractionActivity()
 }

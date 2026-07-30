@@ -20,6 +20,7 @@ import {
   subscribeChatScrollActivity
 } from './utils/chat-scroll-activity'
 import { composerInputIdleDelay } from './utils/composer-input-activity'
+import { markUiInteractionActive } from './utils/ui-interaction-activity'
 
 function isToolResultEvent(event: AgentEvent): boolean {
   return (
@@ -680,7 +681,7 @@ export default function App(): React.JSX.Element {
       const inputDelay = composerInputIdleDelay()
       streamFlushTimer = window.setTimeout(
         flushStreamQueues,
-        inputDelay > 0 ? Math.ceil(inputDelay) + 16 : 120
+        inputDelay > 0 ? Math.ceil(inputDelay) + 16 : 260
       )
     }
 
@@ -695,6 +696,13 @@ export default function App(): React.JSX.Element {
       }
       streamFlushTimer = window.setTimeout(flushStreamQueues, 0)
     })
+
+    const markPointerInteraction = (): void => markUiInteractionActive(320)
+    const markKeyboardInteraction = (): void => markUiInteractionActive(420)
+    const markWheelInteraction = (): void => markUiInteractionActive(240)
+    window.addEventListener('pointerdown', markPointerInteraction, true)
+    window.addEventListener('keydown', markKeyboardInteraction, true)
+    window.addEventListener('wheel', markWheelInteraction, { capture: true, passive: true })
 
     const unsubscribeChat = window.localAgent.chat.onEvent((event) => {
       if (event.type === 'chunk' || event.type === 'reasoning') {
@@ -1073,6 +1081,9 @@ export default function App(): React.JSX.Element {
       if (streamFlushTimer !== undefined) window.clearTimeout(streamFlushTimer)
       flushStreamQueues(true)
       unsubscribeChatScrollActivity()
+      window.removeEventListener('pointerdown', markPointerInteraction, true)
+      window.removeEventListener('keydown', markKeyboardInteraction, true)
+      window.removeEventListener('wheel', markWheelInteraction, true)
       unsubscribeChat()
       unsubscribeAgent()
       unsubscribeImage()
@@ -1195,7 +1206,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.140</dd></div>
+                <div><dt>版本</dt><dd>0.7.141</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>
