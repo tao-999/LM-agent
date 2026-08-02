@@ -16,6 +16,11 @@ import {
   PRIVATE_MODEL_TOOL_BLOCK_TAGS,
   stripPrivateModelOutput
 } from './protocol-output'
+import {
+  cachedPromptTokensFromOpenAiPayload,
+  type OpenAiTimingsPayload,
+  type OpenAiUsagePayload
+} from './model-usage'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -111,26 +116,18 @@ export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
   )
 }
 
-type OpenAiUsagePayload = {
-  prompt_tokens?: number
-  completion_tokens?: number
-  cached_tokens?: number
-  prompt_cache_hit_tokens?: number
-  cache_read_input_tokens?: number
-  prompt_tokens_details?: { cached_tokens?: number }
-  input_tokens_details?: { cached_tokens?: number }
-}
-
-function cachedPromptTokensFromUsage(usage: OpenAiUsagePayload): number {
-  return Math.max(
-    0,
-    usage.prompt_tokens_details?.cached_tokens ??
-      usage.input_tokens_details?.cached_tokens ??
-      usage.prompt_cache_hit_tokens ??
-      usage.cache_read_input_tokens ??
-      usage.cached_tokens ??
-      0
+export function tokenUsageFromOpenAiPayload(
+  usage?: OpenAiUsagePayload,
+  timings?: OpenAiTimingsPayload
+): TokenUsage | null {
+  if (!usage && !timings) return null
+  const cachedPromptTokens = cachedPromptTokensFromOpenAiPayload(usage, timings)
+  const promptTokens = Math.max(
+    usage?.prompt_tokens ?? 0,
+    Math.max(0, (timings?.prompt_n ?? 0) + cachedPromptTokens)
   )
+  const completionTokens = usage?.completion_tokens ?? timings?.predicted_n ?? 0
+  return createUsage(promptTokens, completionTokens, false, undefined, cachedPromptTokens)
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -1773,6 +1770,8 @@ async function generateSemanticSummary(
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let latestUsagePayload: OpenAiUsagePayload | undefined
+      let latestTimingsPayload: OpenAiTimingsPayload | undefined
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
@@ -1793,6 +1792,7 @@ async function generateSemanticSummary(
               }
             }>
             usage?: OpenAiUsagePayload
+            timings?: OpenAiTimingsPayload
           }
           const delta = data.choices?.[0]?.delta
           const reasoning =
@@ -1801,15 +1801,13 @@ async function generateSemanticSummary(
             textField(delta?.thinking)
           if (reasoning) reasoningStream.push(reasoning)
           if (delta?.content) contentStream.push(delta.content)
-          if (data.usage) {
-            usage = createUsage(
-              data.usage.prompt_tokens ?? 0,
-              data.usage.completion_tokens ?? 0,
-              false,
-              undefined,
-              cachedPromptTokensFromUsage(data.usage)
-            )
-          }
+          if (data.usage) latestUsagePayload = data.usage
+          if (data.timings) latestTimingsPayload = data.timings
+          const reportedUsage = tokenUsageFromOpenAiPayload(
+            latestUsagePayload,
+            latestTimingsPayload
+          )
+          if (reportedUsage) usage = reportedUsage
         }
       }
     }
@@ -1861,18 +1859,12 @@ async function generateSemanticSummary(
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>
       usage?: OpenAiUsagePayload
+      timings?: OpenAiTimingsPayload
     }
     summary = data.choices?.[0]?.message?.content?.trim() ?? ''
     usage =
-      data.usage
-        ? createUsage(
-            data.usage.prompt_tokens ?? 0,
-            data.usage.completion_tokens ?? 0,
-            false,
-            undefined,
-            cachedPromptTokensFromUsage(data.usage)
-          )
-        : createUsage(usage.promptTokens, estimateTextTokens(summary), true)
+      tokenUsageFromOpenAiPayload(data.usage, data.timings) ??
+      createUsage(usage.promptTokens, estimateTextTokens(summary), true)
   }
   if (summary) {
     summaryCache.set(cacheKey, summary)
@@ -2481,6 +2473,8 @@ export async function streamChat(
   const decoder = new TextDecoder()
   let buffer = ''
   let providerUsage: TokenUsage | null = null
+  let latestUsagePayload: OpenAiUsagePayload | undefined
+  let latestTimingsPayload: OpenAiTimingsPayload | undefined
   let firstOutputAt = 0
   openAiChatStream: while (true) {
     const { value, done } = await reader.read()
@@ -2505,6 +2499,7 @@ export async function streamChat(
           }
         }>
         usage?: OpenAiUsagePayload
+        timings?: OpenAiTimingsPayload
       }
       const delta = data.choices?.[0]?.delta
       const reasoning =
@@ -2522,15 +2517,10 @@ export async function streamChat(
         await reader.cancel().catch(() => undefined)
         break openAiChatStream
       }
-      if (data.usage) {
-        providerUsage = createUsage(
-          data.usage.prompt_tokens ?? 0,
-          data.usage.completion_tokens ?? 0,
-          false,
-          undefined,
-          cachedPromptTokensFromUsage(data.usage)
-        )
-      }
+      if (data.usage) latestUsagePayload = data.usage
+      if (data.timings) latestTimingsPayload = data.timings
+      providerUsage =
+        tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
     }
   }
   normalizedContent.flush()
@@ -2788,6 +2778,8 @@ async function streamCompleteWithTools(
   const decoder = new TextDecoder()
   let buffer = ''
   let providerUsage: TokenUsage | null = null
+  let latestUsagePayload: OpenAiUsagePayload | undefined
+  let latestTimingsPayload: OpenAiTimingsPayload | undefined
   let firstOutputAt = 0
   let finishReason: string | undefined
   const pendingToolCalls = new Map<
@@ -2823,6 +2815,7 @@ async function streamCompleteWithTools(
           }
         }>
         usage?: OpenAiUsagePayload
+        timings?: OpenAiTimingsPayload
       }
       if (data.error) {
         const detail =
@@ -2872,15 +2865,10 @@ async function streamCompleteWithTools(
         break openAiToolStream
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason
-      if (data.usage) {
-        providerUsage = createUsage(
-          data.usage.prompt_tokens ?? 0,
-          data.usage.completion_tokens ?? 0,
-          false,
-          undefined,
-          cachedPromptTokensFromUsage(data.usage)
-        )
-      }
+      if (data.usage) latestUsagePayload = data.usage
+      if (data.timings) latestTimingsPayload = data.timings
+      providerUsage =
+        tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
     }
   }
   normalizedContent.flush()
@@ -3104,6 +3092,7 @@ export async function completeWithTools(
       }
     }>
     usage?: OpenAiUsagePayload
+    timings?: OpenAiTimingsPayload
   }
   const message = data.choices?.[0]?.message ?? {}
   const structuredToolCalls = (message.tool_calls ?? []).map((call, index) =>
@@ -3135,15 +3124,9 @@ export async function completeWithTools(
     reasoning_content: parsedTextCalls.reasoning,
     tool_calls: finalRawToolCalls
   }
-  const providerUsage = data.usage
-    ? createUsage(
-        data.usage.prompt_tokens ?? 0,
-        data.usage.completion_tokens ?? 0,
-        false,
-        undefined,
-        cachedPromptTokensFromUsage(data.usage)
-      )
-    : createUsage(
+  const providerUsage =
+    tokenUsageFromOpenAiPayload(data.usage, data.timings) ??
+    createUsage(
         estimatedPrompt,
         estimateTextTokens(message.content ?? '') +
           estimateTextTokens(JSON.stringify(message.tool_calls ?? [])),
