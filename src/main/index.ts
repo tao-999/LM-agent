@@ -23,14 +23,10 @@ import {
   writeTextFile
 } from './files'
 import {
-  buildLocalResourceIndex,
-  grepConversationHistoryArchive,
-  readLocalSourceContent,
   runAgent,
   runWebChat,
   type AgentUserFileEditLock
 } from './agent'
-import { searchPaperCache } from './paper-cache'
 import {
   discoverComfyWorkflows,
   freeComfyMemory,
@@ -43,12 +39,10 @@ import {
   discoverLocalModels,
   inspectModelContext,
   sameModel,
-  completeWithTools,
   streamChat,
   testModelConnection,
   unloadLocalModel,
-  type LlmMessage,
-  type ToolDefinition
+  type LlmMessage
 } from './models'
 import type {
   AgentApproval,
@@ -376,15 +370,11 @@ async function processImageQueue(): Promise<void> {
             thinkingMode: request.model.thinkingMode === 'on' ? ('on' as const) : ('off' as const)
           }
           let promptOutput = ''
-          const localResourceIndex = await buildLocalResourceIndex(
-            request.workspaceRoot,
-            request.historyArchive
-          )
           const promptMessages: LlmMessage[] = [
             {
               role: 'system',
               content:
-                `/no_think\n你是图片生成 Prompt 转换器，只执行一次转换。禁止分析请求、解释规则、评价内容、自我纠错或输出计划。本地资料优先级最高；需要补全更早人物、外貌、服装、关系、场景或画风时，先调用 grep 全局检索全部本地资料，再调用 read_file 读取最相关命中。只有本地资料不足才依据当前输入转换，禁止编造既有设定。继承读取结果中已确定的信息，以当前输入为最高优先级。${localResourceIndex}\n把当前画面要求直接转换成一段完整英文 Prompt，保留主体、动作、构图、镜头、光线、材质、色彩与氛围。正文只能包含英文 Prompt，禁止标题、解释、引号、Markdown 与额外对话。`
+                '/no_think\n你是图片生成 Prompt 转换器，只执行一次转换。禁止访问、检索或读取本地项目文件，不具备 grep 与 read_file 工具。仅依据本轮输入和当前会话已经携带的上下文转换，当前输入优先级最高。禁止分析请求、解释规则、评价内容、自我纠错或输出计划。把当前画面要求直接转换成一段完整英文 Prompt，保留主体、动作、构图、镜头、光线、材质、色彩与氛围。正文只能包含英文 Prompt，禁止标题、解释、引号、Markdown 与额外对话。'
             },
             ...request.contextMessages.map((message) => ({
               role: message.role,
@@ -410,134 +400,14 @@ async function processImageQueue(): Promise<void> {
               type: 'reasoning',
               content
             })
-          const historyTools: ToolDefinition[] = [
-            {
-              type: 'function',
-              function: {
-                name: 'grep',
-                description:
-                  '全局检索 CWD 项目文件、@history/ 会话历史与 @papers/ 论文缓存，返回 path、line 及前后各 5 行。order=desc 优先靠后的最新内容，order=asc 优先靠前的久远内容。',
-                parameters: {
-                  type: 'object',
-                  required: ['query'],
-                  properties: {
-                    query: { type: 'string' },
-                    order: {
-                      type: 'string',
-                      enum: ['asc', 'desc'],
-                      description: '默认 asc；查找最新剧情时使用 desc'
-                    }
-                  }
-                }
-              }
-            },
-            {
-              type: 'function',
-              function: {
-                name: 'read_file',
-                description: '读取 grep 返回的本地路径与命中区间。',
-                parameters: {
-                  type: 'object',
-                  required: ['path'],
-                  properties: {
-                    path: { type: 'string' },
-                    around_line: { type: 'integer' },
-                    context_lines: { type: 'integer' }
-                  }
-                }
-              }
-            }
-          ]
-          if (historyTools.length) {
-            for (let step = 0; step < 3; step += 1) {
-              promptOutput = ''
-              const completion = await completeWithTools(
-                promptModel,
-                promptMessages,
-                historyTools,
-                controller.signal,
-                'auto',
-                onPromptReasoning,
-                onPromptChunk
-              )
-              usage = addUsage(usage, completion.usage)
-              if (!completion.toolCalls.length) {
-                if (!promptOutput.trim()) promptOutput = completion.content
-                break
-              }
-              promptMessages.push(completion.rawMessage)
-              const call = completion.toolCalls[0]
-              let result: string
-              if (call.name === 'grep') {
-                const query =
-                  typeof call.arguments.query === 'string' ? call.arguments.query : request.prompt
-                const order = call.arguments.order === 'desc' ? 'desc' : 'asc'
-                const [workspaceMatches, paperMatches] = await Promise.all([
-                  searchWorkspace(request.workspaceRoot, query, '', 160, order),
-                  searchPaperCache(query)
-                ])
-                result = JSON.stringify(
-                  {
-                    engine: 'ripgrep',
-                    scope: '全部本地资料',
-                    order,
-                    workspaceMatches: workspaceMatches.map((match) => ({
-                      ...match,
-                      path: path.relative(request.workspaceRoot, match.path)
-                    })),
-                    conversationHistory: grepConversationHistoryArchive(
-                      request.historyArchive,
-                      query,
-                      6,
-                      order
-                    ),
-                    paperCache: (order === 'desc'
-                      ? [...paperMatches].reverse()
-                      : paperMatches
-                    ).map((match) => ({
-                      ...match,
-                      path: `@papers/${match.cacheId}.txt`
-                    }))
-                  },
-                  null,
-                  2
-                )
-              } else if (call.name === 'read_file') {
-                 const sourcePath = String(call.arguments.path ?? '')
-                 const { content } = await readLocalSourceContent(
-                   request.workspaceRoot,
-                   request.historyArchive,
-                   sourcePath
-                 )
-                 const lines = content.split(/\r?\n/)
-                 const aroundLine = Math.max(1, Number(call.arguments.around_line) || 1)
-                 const radius = Math.max(1, Number(call.arguments.context_lines) || 50)
-                 const start = Math.max(1, aroundLine - radius)
-                 const end = Math.min(lines.length, aroundLine + radius)
-                 result = lines
-                   .slice(start - 1, end)
-                   .map((line, index) => `${start + index} | ${line}`)
-                   .join('\n')
-               } else {
-                 result = `未知工具：${call.name}`
-               }
-              promptMessages.push({ role: 'tool', content: result, tool_call_id: call.id })
-              send('image:event', {
-                requestId: request.requestId,
-                type: 'status',
-                 content: call.name === 'grep' ? '已检索全部本地资料' : '已读取本地资料命中区间'
-              })
-            }
-          } else {
-            usage = await streamChat(
-              promptModel,
-              promptMessages,
-              onPromptChunk,
-              controller.signal,
-              onPromptReasoning,
-              { disableThinking: true, maxOutputTokens: 1200 }
-            )
-          }
+          usage = await streamChat(
+            promptModel,
+            promptMessages,
+            onPromptChunk,
+            controller.signal,
+            onPromptReasoning,
+            { disableThinking: true, maxOutputTokens: 1200 }
+          )
           enhancedPrompt = cleanImagePrompt(promptOutput)
           if (!enhancedPrompt) {
             enhancedPrompt = cleanImagePrompt(request.prompt)

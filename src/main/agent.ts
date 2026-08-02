@@ -1832,51 +1832,7 @@ export async function runWebChat(
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，程序将严格限制为 ${restrictedWebHosts.join('、')}。禁止搜索、读取、引用或推荐任何其他网站；此任务不执行跨域名凑数核验。`
     : '用户未指定网页来源时，才使用多个独立网站进行交叉核验。'
-  const localResourceIndex = workspaceRoot
-    ? await buildLocalResourceIndex(workspaceRoot, historyArchive)
-    : ''
-  const webTools: ToolDefinition[] = [
-    {
-      type: 'function' as const,
-      function: {
-        name: 'grep',
-        description:
-          '唯一的本地资料检索工具。默认全局检索 CWD 全部项目文件、@history/ 会话历史与 @papers/ 论文缓存，并返回 path、line 及前后各 5 行上下文。order=desc 优先返回靠后的最新剧情，order=asc 优先返回靠前的久远剧情；默认 asc。确认相关后调用 read_file 扩读。',
-        parameters: {
-          type: 'object',
-          required: ['query'],
-          properties: {
-            query: { type: 'string', description: '关键词表达式，支持 | OR 与 & AND' },
-            path: { type: 'string', description: '可选；默认省略以检索全部本地资料' },
-            order: {
-              type: 'string',
-              enum: ['asc', 'desc'],
-              description: 'asc 顺序检索靠前内容，desc 倒序检索靠后内容；默认 asc'
-            }
-          }
-        }
-      }
-    },
-    {
-      type: 'function' as const,
-      function: {
-        name: 'read_file',
-        description:
-          '读取 grep 返回的 CWD 相对路径、@history/ 或 @papers/ 路径。优先使用 around_line 与 context_lines 读取命中附近内容。',
-        parameters: {
-          type: 'object',
-          required: ['path'],
-          properties: {
-            path: { type: 'string' },
-            start_line: { type: 'integer' },
-            end_line: { type: 'integer' },
-            around_line: { type: 'integer' },
-            context_lines: { type: 'integer' }
-          }
-        }
-      }
-    },
-    ...(allowWebSearch ? [{
+  const webTools: ToolDefinition[] = allowWebSearch ? [{
       type: 'function' as const,
       function: {
         name: 'search_web',
@@ -1908,15 +1864,14 @@ export async function runWebChat(
           }
         }
       }
-    }] : [])
-  ]
+    }] : []
   const workingMessages: LlmMessage[] = [
     {
       role: 'system',
       content:
-        `你处于具备本地 grep 与 read_file 工具的普通 Chat 模式。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。${allowWebSearch ? `网页工具已开启。先完整阅读用户本轮问题与历史上下文，自主判断是否真的需要联网；问题可由本地资料可靠回答时严禁联网。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法从本地资料可靠确定，就必须直接调用 search_web。${restrictedWebInstruction}` : '网页工具本轮未开启，只使用本地资料与现有上下文。'}${
+        `你处于普通 Chat 模式，禁止访问、检索或读取本地项目文件，不具备 grep、read_file、编辑与命令工具。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。${allowWebSearch ? `网页工具已开启。先完整阅读用户本轮问题与现有对话上下文，自主判断是否真的需要联网；问题可由现有上下文可靠回答时严禁联网。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法可靠确定，就必须直接调用 search_web。${restrictedWebInstruction}` : '网页工具本轮未开启，只使用当前消息与现有对话上下文。'}${
           forceWebSearch ? '用户本轮已明确开启强制联网核验，必须调用网页工具。' : ''
-         } 本地资料库优先级高于网页。默认先用 grep 全局检索全部本地资料，严禁先把 path 收窄到当前文件；grep 命中后必须用 read_file 读取命中路径的上下文。只有本地零命中或读取后证据仍不足，才考虑网页。当前请求默认只直接携带本轮用户消息；会话历史已列为 @history/ 本地虚拟文件，只能经 grep 定位后用 read_file 获取。禁止重新分析已完成任务。${localResourceIndex} 网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。最终回答须依据实际读取内容，并列出来源标题和直接网址。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
+         } 禁止重新分析已完成任务。网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。使用网页时，最终回答须依据实际读取内容，并列出来源标题和直接网址；未使用网页时直接回答。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
     },
     ...runtimeMessages
   ]
@@ -2085,20 +2040,14 @@ export async function runWebChat(
     const toolTitle =
       call.name === 'search_web'
         ? '调用函数：search_web'
-        : call.name === 'fetch_webpage'
-          ? '调用函数：fetch_webpage'
-          : call.name === 'grep'
-            ? '调用函数：grep'
-            : '调用函数：read_file'
+        : '调用函数：fetch_webpage'
     onEvent({
       type: 'tool',
       title: toolTitle,
       content:
         call.name === 'search_web'
           ? `query=${text(call.arguments.query)}`
-          : call.name === 'fetch_webpage'
-            ? `url=${text(call.arguments.url)}`
-            : `query=${text(call.arguments.query)}`,
+          : `url=${text(call.arguments.url)}`,
       toolName: call.name,
       toolArgs: call.arguments
     })
@@ -2148,52 +2097,6 @@ export async function runWebChat(
         const hostname = new URL(finalUrl).hostname.toLocaleLowerCase()
         verifiedHosts.add(hostname)
         if (webSourceKind(finalUrl) !== '社区讨论') referenceHosts.add(hostname)
-      } else if (call.name === 'grep') {
-        const query = text(call.arguments.query)
-        const scopePath = text(call.arguments.path).trim()
-        const order = call.arguments.order === 'desc' ? 'desc' : 'asc'
-        const [workspaceMatches, paperMatches] = await Promise.all([
-          workspaceRoot
-            ? searchWorkspace(workspaceRoot, query, scopePath, 160, order)
-            : Promise.resolve([]),
-          searchPaperCache(query)
-        ])
-        result = stringifyResult({
-          engine: 'ripgrep',
-          query,
-          scope: scopePath || '全部本地资料',
-          localSources: {
-            cwd: workspaceRoot || '[未设置 CWD]',
-            history: HISTORY_SOURCE_PREFIX,
-            papers: PAPER_SOURCE_PREFIX
-          },
-          workspaceMatches: workspaceMatches.map((match) => ({
-            ...match,
-            path: path.relative(workspaceRoot, match.path)
-          })),
-          order,
-          conversationHistory: grepConversationHistoryArchive(historyArchive, query, 8, order),
-          paperCache: (order === 'desc' ? [...paperMatches].reverse() : paperMatches).map((match) => ({
-            ...match,
-            path: `${PAPER_SOURCE_PREFIX}${match.cacheId}.txt`
-          }))
-        })
-      } else if (call.name === 'read_file') {
-        const sourcePath = text(call.arguments.path)
-        const { content } = await readLocalSourceContent(workspaceRoot, historyArchive, sourcePath)
-        const lines = content.split(/\r?\n/)
-        const aroundLine = Math.max(0, Number(call.arguments.around_line) || 0)
-        const radius = Math.max(1, Number(call.arguments.context_lines) || 50)
-        const start = aroundLine
-          ? Math.max(1, aroundLine - radius)
-          : Math.max(1, Number(call.arguments.start_line) || 1)
-        const end = aroundLine
-          ? Math.min(lines.length, aroundLine + radius)
-          : Math.min(lines.length, Number(call.arguments.end_line) || lines.length)
-        result = lines
-          .slice(start - 1, end)
-          .map((line, index) => `${start + index} | ${line}`)
-          .join('\n')
       } else {
         result = `未知工具：${call.name}`
       }
@@ -2206,7 +2109,7 @@ export async function runWebChat(
       webAccessExhausted = true
       webSearchUsed = true
       workingMessages[0].content +=
-        '\n网页请求已确认发生代理、DNS 或基础网络故障。禁止更换关键词重复调用网页工具；请直接说明网络通道与故障原因，并基于本地资料完成仍可完成的部分。'
+        '\n网页请求已确认发生代理、DNS 或基础网络故障。禁止更换关键词重复调用网页工具；请直接说明网络通道与故障原因，并基于当前对话上下文完成仍可完成的部分。'
       onEvent({
         type: 'status',
         title: '网页网络故障，停止重复搜索',
