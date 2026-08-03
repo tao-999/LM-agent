@@ -56,3 +56,46 @@ test('不同目标的历史检索不会误判为循环', () => {
     assert.equal(result.detected, false)
   }
 })
+
+test('识别同一任务状态中重复读取完全相同区间的工作流循环', async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL('./fixtures/workflow-read-file-loop.json', import.meta.url),
+      'utf8'
+    )
+  ) as Array<{ toolName: string; arguments: Record<string, unknown> }>
+  const guard = new WorkflowCycleGuard()
+  const results = fixture.map((item) =>
+    guard.observe({
+      toolName: item.toolName,
+      arguments: item.arguments,
+      taskState: 'check-greeting:in_progress|fix-greeting:pending',
+      progressRevision: 2
+    })
+  )
+
+  assert.equal(results[0].detected, false)
+  assert.equal(results[1].detected, false)
+  assert.equal(results[2].detected, true)
+  assert.equal(results[2].toolName, 'read_file')
+})
+
+test('读取区间发生变化时允许继续读取', () => {
+  const guard = new WorkflowCycleGuard()
+  for (const aroundLine of [70868, 70920, 70946]) {
+    const result = guard.observe({
+      toolName: 'read_file',
+      arguments: { path: '风云同人.txt', around_line: aroundLine, context_lines: 50 },
+      taskState: 'check-greeting:in_progress',
+      progressRevision: 2
+    })
+    assert.equal(result.detected, false)
+  }
+})
+
+test('Agent 将工作流循环检测覆盖到 grep 与读取类工具', async () => {
+  const source = await readFile(new URL('../src/main/agent.ts', import.meta.url), 'utf8')
+  assert.match(source, /\['grep', 'read_file', 'file_info', 'list_files'\]/)
+  assert.match(source, /compactRepeatedWorkflowToolExchanges/)
+  assert.match(source, /重复工具交换消息/)
+})

@@ -43,7 +43,7 @@ function normalizedText(value: unknown): string {
     : ''
 }
 
-function argumentFingerprint(
+export function workflowToolArgumentFingerprint(
   toolName: string,
   args: Record<string, unknown>
 ): string {
@@ -89,7 +89,7 @@ export class WorkflowCycleGuard {
   private observations: RecordedObservation[] = []
 
   observe(observation: WorkflowCycleObservation): WorkflowCycleResult {
-    const comparableArgument = argumentFingerprint(
+    const comparableArgument = workflowToolArgumentFingerprint(
       observation.toolName,
       observation.arguments
     )
