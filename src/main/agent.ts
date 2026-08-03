@@ -300,7 +300,8 @@ export function grepConversationHistoryArchive(
   archive: ChatContextMessage[] | undefined,
   queryValue: string,
   limitValue = 6,
-  order: 'asc' | 'desc' = 'desc'
+  order: 'asc' | 'desc' = 'desc',
+  resultMode: 'reference' | 'inline' = 'reference'
 ): string {
   const archiveMessages = archive ?? []
   const query = queryValue.trim()
@@ -333,7 +334,9 @@ export function grepConversationHistoryArchive(
   }
   return [
     `<grep_history_results query="${escapedQuery}" total="${archiveMessages.length}" returned="${selected.length}">`,
-    '说明：以下命中来自本机会话历史资料库。path 是可交给 read_file 的本地虚拟路径；必须按 path 与 around_line 读取上下文后再使用，禁止重新执行已完成任务。',
+    resultMode === 'inline'
+      ? '说明：以下命中来自当前会话历史资料库，已包含可直接使用的上下文。只能提取与当前问题相关的事实、偏好和既有结论，禁止重新执行已完成任务。'
+      : '说明：以下命中来自本机会话历史资料库。path 是可交给 read_file 的本地虚拟路径；必须按 path 与 around_line 读取上下文后再使用，禁止重新执行已完成任务。',
     ...selected.map((item) => {
       const role = item.message.role === 'user' ? '用户' : 'AI'
       const lines = item.content.split(/\r?\n/)
@@ -1832,6 +1835,29 @@ export async function runWebChat(
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，程序将严格限制为 ${restrictedWebHosts.join('、')}。禁止搜索、读取、引用或推荐任何其他网站；此任务不执行跨域名凑数核验。`
     : '用户未指定网页来源时，才使用多个独立网站进行交叉核验。'
+  const historyTools: ToolDefinition[] = [
+    {
+      type: 'function' as const,
+      function: {
+        name: 'grep',
+        description:
+          '仅检索当前会话历史内容，用于找回之前聊过的事实、偏好、名称与既有结论。此工具不能访问项目文件、CWD、论文缓存或其他本地文件。',
+        parameters: {
+          type: 'object',
+          required: ['query'],
+          properties: {
+            query: { type: 'string', description: '要在当前会话历史中检索的关键词' },
+            limit: { type: 'number', description: '最多返回的历史命中数，默认 6' },
+            order: {
+              type: 'string',
+              enum: ['asc', 'desc'],
+              description: 'asc 优先较早记录，desc 优先较新记录，默认 desc'
+            }
+          }
+        }
+      }
+    }
+  ]
   const webTools: ToolDefinition[] = allowWebSearch ? [{
       type: 'function' as const,
       function: {
@@ -1865,11 +1891,12 @@ export async function runWebChat(
         }
       }
     }] : []
+  const chatTools = [...historyTools, ...webTools]
   const workingMessages: LlmMessage[] = [
     {
       role: 'system',
       content:
-        `你处于普通 Chat 模式，禁止访问、检索或读取本地项目文件，不具备 grep、read_file、编辑与命令工具。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。${allowWebSearch ? `网页工具已开启。先完整阅读用户本轮问题与现有对话上下文，自主判断是否真的需要联网；问题可由现有上下文可靠回答时严禁联网。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法可靠确定，就必须直接调用 search_web。${restrictedWebInstruction}` : '网页工具本轮未开启，只使用当前消息与现有对话上下文。'}${
+        `你处于普通 Chat 模式，禁止访问、检索或读取本地项目文件，不具备 read_file、编辑与命令工具。你具备 grep，但它只检索当前会话历史，绝不访问 CWD、项目文件、论文缓存或其他本地文件。用户追问上一句、先前约定、旧偏好或更早对话，而当前请求中缺少对应信息时，必须先调用 grep 找回相关历史，严禁声称遗忘；当前消息已足够时直接回答，不要机械检索。当前会话历史共有 ${historyArchive.length} 条可检索记录。系统当前时间为 ${currentTime}（Asia/Shanghai），回答日期、年龄、时效信息时必须以此时间为准，严禁把训练数据截止日期当作当前日期。${allowWebSearch ? `网页工具已开启。先完整阅读用户本轮问题与现有对话上下文，自主判断是否真的需要联网；问题可由现有上下文可靠回答时严禁联网。只要你判断问题依赖最新信息、用户明确要求搜索，或关键事实无法可靠确定，就必须直接调用 search_web。${restrictedWebInstruction}` : '网页工具本轮未开启，只使用当前消息与可检索的会话历史。'}${
           forceWebSearch ? '用户本轮已明确开启强制联网核验，必须调用网页工具。' : ''
          } 禁止重新分析已完成任务。网页工具返回的是证据资料，并不代表用户任务已经完成；每次拿到工具结果后，必须重新对照用户的原始问题继续分析、推导、计算或求解。用户要求解题、判断、比较、创作或给方案时，严禁只复述搜索摘要、罗列链接便结束，必须完成用户真正要求的结果。使用网页时，最终回答须依据实际读取内容，并列出来源标题和直接网址；未使用网页时直接回答。证据不足时明确说明无法确认。内部思考与可见推理过程默认使用简体中文，工具 arguments 必须是严格 JSON 对象。`
     },
@@ -1909,7 +1936,7 @@ export async function runWebChat(
     const completion = await completeWithTools(
       model,
       workingMessages,
-      webTools,
+      chatTools,
       signal,
       forceTool ? 'required' : 'auto',
       (content) => {
@@ -1983,7 +2010,7 @@ export async function runWebChat(
     if (!completion.content.trim() && completion.toolCalls.length === 0) {
       invalidRetries += 1
       if (invalidRetries >= 3) {
-        throw new Error(completion.toolCallParseError || '本地模型连续生成无效网页工具调用')
+        throw new Error(completion.toolCallParseError || '本地模型连续生成无效工具调用')
       }
       workingMessages[0].content += completion.toolCallParseError
         ? `\n上一次工具调用格式无效：${completion.toolCallParseError}。重新调用时必须同时返回 tools 中的准确函数名与完整 arguments，禁止只输出参数 JSON。`
@@ -2037,15 +2064,14 @@ export async function runWebChat(
 
     const call = completion.toolCalls[0]
     let result = ''
-    const toolTitle =
-      call.name === 'search_web'
-        ? '调用函数：search_web'
-        : '调用函数：fetch_webpage'
+    const toolTitle = `调用函数：${call.name}`
     onEvent({
       type: 'tool',
       title: toolTitle,
       content:
-        call.name === 'search_web'
+        call.name === 'grep'
+          ? `query=${text(call.arguments.query)}`
+          : call.name === 'search_web'
           ? `query=${text(call.arguments.query)}`
           : `url=${text(call.arguments.url)}`,
       toolName: call.name,
@@ -2062,7 +2088,15 @@ export async function runWebChat(
       continue
     }
     try {
-      if (call.name === 'search_web') {
+      if (call.name === 'grep') {
+        result = grepConversationHistoryArchive(
+          historyArchive,
+          text(call.arguments.query),
+          Number(call.arguments.limit) || 6,
+          text(call.arguments.order) === 'asc' ? 'asc' : 'desc',
+          'inline'
+        )
+      } else if (call.name === 'search_web') {
         webSearchUsed = true
         lastQuery = text(call.arguments.query)
         result = await searchPublicWeb(
