@@ -1,101 +1,64 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { WorkflowCycleGuard } from '../src/main/workflow-cycle-guard.ts'
+import {
+  createStreamRepetitionGuard,
+  type StreamRepetitionStop
+} from '../src/main/repetition-guard.ts'
 
-type FixtureItem = {
-  toolName: string
-  query: string
+function inspectCrossTurn(
+  current: string,
+  priorSamples: string[]
+): StreamRepetitionStop | undefined {
+  let detected: StreamRepetitionStop | undefined
+  const guard = createStreamRepetitionGuard(
+    'reasoning',
+    (stop) => {
+      detected = stop
+    },
+    { priorSamples }
+  )
+  for (let index = 0; index < current.length; index += 13) {
+    if (guard.push(current.slice(index, index + 13))) break
+  }
+  return detected
 }
 
-test('识别同一任务状态中改写关键词的历史检索工作流循环', async () => {
+test('连续多轮复读相同思考内容时识别跨轮循环', async () => {
   const fixture = JSON.parse(
     await readFile(
-      new URL('./fixtures/workflow-history-search-loop.json', import.meta.url),
+      new URL('./fixtures/cross-turn-reasoning-loop.json', import.meta.url),
       'utf8'
     )
-  ) as FixtureItem[]
-  const guard = new WorkflowCycleGuard()
-  const results = fixture.map((item) =>
-    guard.observe({
-      toolName: item.toolName,
-      arguments: { query: item.query },
-      taskState: 'edit:completed|review:completed',
-      progressRevision: 4
-    })
-  )
+  ) as string[]
+  const detected = inspectCrossTurn(fixture[2], fixture.slice(0, 2))
 
-  assert.equal(results[0].detected, false)
-  assert.equal(results[1].detected, false)
-  assert.equal(results[2].detected, true)
+  assert.equal(detected?.kind, 'cross-turn-repeat')
+  assert.equal(detected?.channel, 'reasoning')
 })
 
-test('真实进度变化后相同工具属于新阶段', () => {
-  const guard = new WorkflowCycleGuard()
-  for (let revision = 1; revision <= 3; revision += 1) {
-    const result = guard.observe({
-      toolName: 'grep',
-      arguments: { query: '续写 剧情推进' },
-      taskState: 'edit:in_progress',
-      progressRevision: revision
-    })
-    assert.equal(result.detected, false)
-  }
+test('同一读取工具调用多次但思考内容持续推进时不误判', () => {
+  const prior = [
+    '先读取第一处出场段落，确认断浪早期使用江兄作为称呼，并记录对应剧情时期。',
+    '继续读取结尾告别段落，确认人物关系变化后改用大哥，同时核对前后事件跨度。'
+  ]
+  const current =
+    '两处原文证据已经齐全，现在比较称呼变化与人物关系，随后只修改用户指出的目标句。'
+
+  assert.equal(inspectCrossTurn(current, prior), undefined)
 })
 
-test('不同目标的历史检索不会误判为循环', () => {
-  const guard = new WorkflowCycleGuard()
-  const queries = ['用户喜欢的编辑器主题', 'Kimi 模型连接参数', '小说人物郭巨侠设定']
-  for (const query of queries) {
-    const result = guard.observe({
-      toolName: 'grep',
-      arguments: { query },
-      taskState: 'research:in_progress',
-      progressRevision: 2
-    })
-    assert.equal(result.detected, false)
-  }
+test('仅有一次相似历史内容时不判定为跨轮循环', () => {
+  const content =
+    '读取人物设定文件并核对称呼来源，确认当前句子是否符合既有关系和剧情阶段。'
+
+  assert.equal(inspectCrossTurn(content, [content]), undefined)
 })
 
-test('识别同一任务状态中重复读取完全相同区间的工作流循环', async () => {
-  const fixture = JSON.parse(
-    await readFile(
-      new URL('./fixtures/workflow-read-file-loop.json', import.meta.url),
-      'utf8'
-    )
-  ) as Array<{ toolName: string; arguments: Record<string, unknown> }>
-  const guard = new WorkflowCycleGuard()
-  const results = fixture.map((item) =>
-    guard.observe({
-      toolName: item.toolName,
-      arguments: item.arguments,
-      taskState: 'check-greeting:in_progress|fix-greeting:pending',
-      progressRevision: 2
-    })
-  )
-
-  assert.equal(results[0].detected, false)
-  assert.equal(results[1].detected, false)
-  assert.equal(results[2].detected, true)
-  assert.equal(results[2].toolName, 'read_file')
-})
-
-test('读取区间发生变化时允许继续读取', () => {
-  const guard = new WorkflowCycleGuard()
-  for (const aroundLine of [70868, 70920, 70946]) {
-    const result = guard.observe({
-      toolName: 'read_file',
-      arguments: { path: '风云同人.txt', around_line: aroundLine, context_lines: 50 },
-      taskState: 'check-greeting:in_progress',
-      progressRevision: 2
-    })
-    assert.equal(result.detected, false)
-  }
-})
-
-test('Agent 将工作流循环检测覆盖到 grep 与读取类工具', async () => {
+test('Agent 以模型实际内容样本检测跨轮复读并撤销工具次数拦截', async () => {
   const source = await readFile(new URL('../src/main/agent.ts', import.meta.url), 'utf8')
-  assert.match(source, /\['grep', 'read_file', 'file_info', 'list_files'\]/)
-  assert.match(source, /compactRepeatedWorkflowToolExchanges/)
-  assert.match(source, /重复工具交换消息/)
+  assert.match(source, /repetitionSamples:/)
+  assert.match(source, /检测到跨轮内容复读/)
+  assert.doesNotMatch(source, /WorkflowCycleGuard/)
+  assert.doesNotMatch(source, /cycleGuardedTool/)
 })

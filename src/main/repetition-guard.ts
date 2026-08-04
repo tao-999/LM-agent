@@ -1,7 +1,16 @@
 export type StreamRepetitionStop = {
   channel: 'content' | 'reasoning'
   periodCharacters: number
-  kind?: 'repeated-tail' | 'emoji-flood' | 'completion-echo' | 'idle-drift'
+  kind?:
+    | 'repeated-tail'
+    | 'emoji-flood'
+    | 'completion-echo'
+    | 'idle-drift'
+    | 'cross-turn-repeat'
+}
+
+export type StreamRepetitionGuardOptions = {
+  priorSamples?: string[]
 }
 
 const emojiGraphemePattern =
@@ -130,15 +139,76 @@ function hasPostCompletionIdleDrift(value: string): boolean {
   return (completionClaims?.length ?? 0) >= 2 && completionAt >= 0 && idleAt > completionAt
 }
 
+function normalizeCrossTurnSample(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/\d+/gu, '#')
+    .replace(/[\p{P}\p{S}\s]+/gu, '')
+    .slice(0, 6_000)
+}
+
+function ngrams(value: string, size: number): Set<string> {
+  const result = new Set<string>()
+  for (let index = 0; index <= value.length - size; index += 1) {
+    result.add(value.slice(index, index + size))
+  }
+  return result
+}
+
+function ngramSimilarity(left: string, right: string): number {
+  const size = 4
+  const leftGrams = ngrams(left, size)
+  const rightGrams = ngrams(right, size)
+  if (!leftGrams.size || !rightGrams.size) return 0
+  let intersection = 0
+  for (const gram of leftGrams) {
+    if (rightGrams.has(gram)) intersection += 1
+  }
+  return intersection / Math.max(leftGrams.size, rightGrams.size)
+}
+
+function hasCrossTurnRepeat(value: string, priorSamples: string[]): boolean {
+  if (priorSamples.length < 2) return false
+  const current = normalizeCrossTurnSample(value)
+  if (current.length < 40) return false
+  const prior = priorSamples
+    .map(normalizeCrossTurnSample)
+    .filter((sample) => sample.length >= 40)
+    .slice(-8)
+  if (prior.length < 2) return false
+
+  const shortestPrior = Math.min(...prior.map((sample) => sample.length))
+  const exactPrefixThreshold = Math.max(40, Math.min(160, Math.floor(shortestPrior * 0.82)))
+  if (current.length >= exactPrefixThreshold) {
+    const prefix = current.slice(0, exactPrefixThreshold)
+    const exactMatches = prior.filter((sample) => sample.startsWith(prefix)).length
+    if (exactMatches >= 2) return true
+  }
+
+  if (current.length < 120) return false
+  const comparisonLength = Math.min(current.length, 1_200)
+  const currentPrefix = current.slice(0, comparisonLength)
+  const fuzzyMatches = prior.filter((sample) => {
+    const priorPrefix = sample.slice(0, comparisonLength)
+    if (priorPrefix.length < Math.floor(comparisonLength * 0.8)) return false
+    return ngramSimilarity(currentPrefix, priorPrefix) >= 0.88
+  }).length
+  return fuzzyMatches >= 2
+}
+
 export function createStreamRepetitionGuard(
   channel: StreamRepetitionStop['channel'],
-  onStop: (stop: StreamRepetitionStop) => void
+  onStop: (stop: StreamRepetitionStop) => void,
+  options: StreamRepetitionGuardOptions = {}
 ): { push: (value: string) => boolean } {
   const maxHistoryCharacters = 16_000
   const signatureCharacters = 96
   let history = ''
   let stopped = false
-  let nextInspectionAt = 160
+  let nextInspectionAt = (options.priorSamples?.length ?? 0) >= 2 ? 40 : 160
 
   return {
     push: (value) => {
@@ -146,9 +216,14 @@ export function createStreamRepetitionGuard(
       if (!value) return false
       history += value
       if (history.length < nextInspectionAt) return false
-      nextInspectionAt = history.length + 48
+      nextInspectionAt = history.length + ((options.priorSamples?.length ?? 0) >= 2 ? 12 : 48)
 
       const sample = history.slice(-maxHistoryCharacters)
+      if (hasCrossTurnRepeat(history, options.priorSamples ?? [])) {
+        stopped = true
+        onStop({ channel, periodCharacters: 0, kind: 'cross-turn-repeat' })
+        return true
+      }
       if (hasEmojiFlood(sample)) {
         stopped = true
         onStop({ channel, periodCharacters: 0, kind: 'emoji-flood' })

@@ -2552,6 +2552,10 @@ async function streamCompleteWithTools(
   options: {
     stopStrings?: string[]
     onUsageProgress?: (usage: TokenUsage) => void
+    repetitionSamples?: {
+      content?: string[]
+      reasoning?: string[]
+    }
   } = {}
 ): Promise<CompletionResult> {
   const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
@@ -2570,8 +2574,12 @@ async function streamCompleteWithTools(
   const stopForRepetition = (stop: StreamRepetitionStop): void => {
     if (!repetitionStop) repetitionStop = stop
   }
-  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
-  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
+  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition, {
+    priorSamples: options.repetitionSamples?.content
+  })
+  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition, {
+    priorSamples: options.repetitionSamples?.reasoning
+  })
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
   const appendReasoning = (value: string): void => {
@@ -2747,10 +2755,10 @@ async function streamCompleteWithTools(
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
       repetitionStop: repetitionStop ?? undefined,
-      finishReason: toolCalls.length
-        ? 'tool_calls'
-        : repetitionStop
-          ? 'repetition_guard'
+      finishReason: repetitionStop
+        ? 'repetition_guard'
+        : toolCalls.length
+          ? 'tool_calls'
           : finishReason
     }
   }
@@ -2936,10 +2944,10 @@ async function streamCompleteWithTools(
     compressed: prepared.compressed,
     contextMemory: prepared.contextMemory,
     repetitionStop: repetitionStop ?? undefined,
-    finishReason: toolCalls.length
-      ? 'tool_calls'
-      : repetitionStop
-        ? 'repetition_guard'
+    finishReason: repetitionStop
+      ? 'repetition_guard'
+      : toolCalls.length
+        ? 'tool_calls'
         : finishReason
   }
 }
@@ -2955,6 +2963,10 @@ export async function completeWithTools(
   options: {
     stopStrings?: string[]
     onUsageProgress?: (usage: TokenUsage) => void
+    repetitionSamples?: {
+      content?: string[]
+      reasoning?: string[]
+    }
   } = {}
 ): Promise<CompletionResult> {
   if (onReasoning || onContent) {

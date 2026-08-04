@@ -43,10 +43,6 @@ import {
   searchPaperCache
 } from './paper-cache'
 import {
-  WorkflowCycleGuard,
-  workflowToolArgumentFingerprint
-} from './workflow-cycle-guard'
-import {
   commandContainsDestructiveOperation,
   shouldRequestToolApproval,
   toolAvailableInStage,
@@ -2201,7 +2197,6 @@ export async function runAgent(
   const permissionMode = request.permissionMode || 'read-write-manual'
   let activeTasks: AgentTask[] = []
   const workflow: { stage: AgentWorkflowStage } = { stage: 'understand' }
-  const workflowCycleGuard = new WorkflowCycleGuard()
   let progressRevision = 0
   const taskStateSignature = (): string =>
     activeTasks.length
@@ -3746,7 +3741,6 @@ export async function runAgent(
       activeTasks = tasks
       if (taskStateSignature() !== previousTaskState) {
         progressRevision += 1
-        workflowCycleGuard.reset()
       }
       send({
         requestId: request.requestId,
@@ -3896,56 +3890,38 @@ export async function runAgent(
       images: attachmentImages
     }
   ]
-  const compactRepeatedWorkflowToolExchanges = (
-    toolName: string,
-    args: Record<string, unknown>
-  ): number => {
-    const targetFingerprint = workflowToolArgumentFingerprint(toolName, args)
-    const matchingAssistants: Array<{ message: LlmMessage; callIds: Set<string> }> = []
-    const scanStart = Math.max(1, messages.length - 48)
-    for (let index = scanStart; index < messages.length; index += 1) {
-      const message = messages[index]
-      if (message.role !== 'assistant' || !message.tool_calls?.length) continue
-      const callIds = new Set<string>()
-      for (const rawCall of message.tool_calls) {
-        const call = rawCall as {
-          id?: unknown
-          function?: { name?: unknown; arguments?: unknown }
-        }
-        if (call.function?.name !== toolName || typeof call.id !== 'string') continue
-        let parsedArguments: Record<string, unknown> = {}
-        try {
-          parsedArguments =
-            typeof call.function.arguments === 'string'
-              ? (JSON.parse(call.function.arguments) as Record<string, unknown>)
-              : ((call.function.arguments ?? {}) as Record<string, unknown>)
-        } catch {
-          continue
-        }
-        if (
-          workflowToolArgumentFingerprint(toolName, parsedArguments) === targetFingerprint
-        ) {
-          callIds.add(call.id)
-        }
-      }
-      if (callIds.size) matchingAssistants.push({ message, callIds })
+  let modelRepetitionStateKey = ''
+  const modelRepetitionSamples: { content: string[]; reasoning: string[] } = {
+    content: [],
+    reasoning: []
+  }
+  const currentModelRepetitionSamples = (): {
+    content: string[]
+    reasoning: string[]
+  } => {
+    const key = `${workflow.stage}|${taskStateSignature()}|${progressRevision}`
+    if (key !== modelRepetitionStateKey) {
+      modelRepetitionStateKey = key
+      modelRepetitionSamples.content = []
+      modelRepetitionSamples.reasoning = []
     }
-    if (matchingAssistants.length < 2) return 0
-
-    const duplicateAssistants = new Set(
-      matchingAssistants.slice(1).map((entry) => entry.message)
-    )
-    const duplicateCallIds = new Set(
-      matchingAssistants.slice(1).flatMap((entry) => [...entry.callIds])
-    )
-    const retained = messages.filter(
-      (message) =>
-        !duplicateAssistants.has(message) &&
-        !(message.role === 'tool' && message.tool_call_id && duplicateCallIds.has(message.tool_call_id))
-    )
-    const removed = messages.length - retained.length
-    if (removed > 0) messages.splice(0, messages.length, ...retained)
-    return removed
+    return modelRepetitionSamples
+  }
+  const rememberModelOutput = (content: string, reasoning = ''): void => {
+    const samples = currentModelRepetitionSamples()
+    if (content.trim().length >= 24) samples.content.push(content)
+    if (reasoning.trim().length >= 24) samples.reasoning.push(reasoning)
+    if (samples.content.length > 8) samples.content.shift()
+    if (samples.reasoning.length > 8) samples.reasoning.shift()
+  }
+  const discardLatestModelTurnFromContext = (): number => {
+    for (let index = messages.length - 1; index > 0; index -= 1) {
+      if (messages[index].role !== 'assistant') continue
+      const removed = messages.length - index
+      messages.splice(index, removed)
+      return removed
+    }
+    return 0
   }
 
   const appendQueuedGuidance = (): boolean => {
@@ -4118,7 +4094,6 @@ export async function runAgent(
     if (signal.aborted) throw new Error('任务已停止')
     if (appendQueuedGuidance()) {
       progressRevision += 1
-      workflowCycleGuard.reset()
     }
     if (workflow.stage === 'understand') forceToolNext = false
     if (workflow.stage === 'tasks') forceToolNext = true
@@ -4208,6 +4183,7 @@ export async function runAgent(
       ...messages.slice(1)
     ]
     const modelToolDefinitions = buildModelToolDefinitions()
+    const repetitionSamples = currentModelRepetitionSamples()
     let streamedReasoning = false
     let streamedContent = false
     let completion: Awaited<ReturnType<typeof completeWithTools>>
@@ -4250,7 +4226,11 @@ export async function runAgent(
             activeTasks.length > 0 &&
             activeTasks.every((task) => task.status === 'completed')
               ? ['等待用户下一个任务', '等待下一个任务']
-              : undefined
+              : undefined,
+          repetitionSamples: {
+            content: [...repetitionSamples.content],
+            reasoning: [...repetitionSamples.reasoning]
+          }
         }
       )
       modelRequestFailures = 0
@@ -4347,17 +4327,27 @@ export async function runAgent(
         })
         return
       }
+      const crossTurnRepeat = completion.repetitionStop?.kind === 'cross-turn-repeat'
+      const discardedContextMessages = crossTurnRepeat
+        ? discardLatestModelTurnFromContext()
+        : 0
       send({
         requestId: request.requestId,
         type: 'status',
-        title: '异常思考段已停止，状态已恢复',
+        title: crossTurnRepeat
+          ? '检测到跨轮内容复读，已切断当前输出'
+          : '异常思考段已停止，状态已恢复',
         content:
-          '程序仅丢弃当前失控输出，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留。'
+          crossTurnRepeat
+            ? `程序依据模型连续多轮生成的实际文字重复度进行判断，并未根据工具调用次数判断。当前复读输出已丢弃，同时清理最近 ${discardedContextMessages} 条重复轮次上下文；Tasks、首份有效工具结果、文件改动与 Token 统计均已保留。`
+            : '程序仅丢弃当前失控输出，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留。'
       })
       const recoveryMessage: LlmMessage = {
         role: 'system',
         content: [
-          '运行时状态快照：上一轮模型输出因重复生成被截断。',
+          crossTurnRepeat
+            ? '运行时状态快照：模型连续多轮生成了高度重复的实际内容，当前重复输出已截断。'
+            : '运行时状态快照：上一轮模型输出因重复生成被截断。',
           '用户在此期间没有发送新请求；本条状态不是新任务，也不代表必须继续执行。',
           `工作流阶段：${workflow.stage}。`,
           `任务清单：${activeTasks.length ? activeTasks.map((task) => `${task.id}=${task.status}`).join('；') : '尚未建立'}。`,
@@ -4377,6 +4367,7 @@ export async function runAgent(
       forceToolNext = false
       continue
     }
+    rememberModelOutput(completion.content, completion.reasoning)
     const missingStructuredToolCall =
       completion.finishReason === 'tool_calls' && completion.toolCalls.length === 0
     const emptyCompletion =
@@ -4419,7 +4410,6 @@ export async function runAgent(
     }
     if (appendQueuedGuidance()) {
       progressRevision += 1
-      workflowCycleGuard.reset()
       forceToolNext = false
       continue
     }
@@ -4559,11 +4549,6 @@ export async function runAgent(
     }
 
     let restartAfterReplaceRecovery = false
-    let completedStateToolAttempt = false
-    let workflowCycleRecovered = false
-    let workflowCycleToolName = ''
-    let workflowCycleToolArgs: Record<string, unknown> = {}
-    let workflowCycleOccurrences = 0
     for (let callIndex = 0; callIndex < completion.toolCalls.length; callIndex += 1) {
       const call = completion.toolCalls[callIndex]
       if (signal.aborted) throw new Error('任务已停止')
@@ -4589,47 +4574,9 @@ export async function runAgent(
       let toolSucceeded = false
       let preview: AgentChange[] | undefined
       let duplicateReplaceBlocked = false
-      let workflowToolCycleBlocked = false
-      let workflowSearchHandled = false
-      const cycleGuardedTool = ['grep', 'read_file', 'file_info', 'list_files'].includes(
-        call.name
-      )
-      const workflowCycle =
-        workflow.stage === 'execute' && cycleGuardedTool
-          ? workflowCycleGuard.observe({
-              toolName: call.name,
-              arguments: call.arguments,
-              taskState: taskStateSignature(),
-              progressRevision
-            })
-          : undefined
       try {
         if (argumentError) throw new Error(argumentError)
-        if (cycleGuardedTool && allTasksCompleted()) {
-          workflowSearchHandled = true
-          workflowToolCycleBlocked = true
-          completedStateToolAttempt = true
-          toolSucceeded = true
-          result = [
-            `<tool_cycle_status tool="${call.name}" skipped="task_completed">`,
-            '当前状态：用户没有发送新请求；任务清单全部完成；多余的读取或检索未执行。',
-            '</tool_cycle_status>'
-          ].join('\n')
-        } else if (workflowCycle?.detected) {
-          workflowSearchHandled = true
-          workflowToolCycleBlocked = true
-          workflowCycleRecovered = true
-          workflowCycleToolName = call.name
-          workflowCycleToolArgs = call.arguments
-          workflowCycleOccurrences = workflowCycle.occurrences
-          toolSucceeded = true
-          result = [
-            `<tool_cycle_status tool="${call.name}" skipped="workflow_cycle">`,
-            `当前状态：同一任务状态下已连续出现 ${workflowCycle.occurrences} 次相同或高度相近的 ${call.name} 调用；期间任务状态与文件进度均未变化，本次重复调用未执行。`,
-            `任务清单：${activeTasks.map((task) => `${task.id}=${task.status}`).join('；') || '尚未建立'}。`,
-            '</tool_cycle_status>'
-          ].join('\n')
-        } else if (
+        if (
           call.name === 'replace_in_file' &&
           failedReplaceSignatures.has(replaceSignature(call.arguments))
         ) {
@@ -4638,7 +4585,7 @@ export async function runAgent(
             `replace_in_file 已拦截完全相同的失败参数：${text(call.arguments.path)}。必须重新读取最新原文并修改 search；若行号明确，请改用 replace_lines。`
           )
         }
-        if (!workflowSearchHandled) {
+        {
           if (webVerificationExhausted && isWebTool(call.name)) {
             blockedWebToolCalls += 1
             throw new Error(
@@ -4741,7 +4688,6 @@ export async function runAgent(
         ['write', 'create', 'delete', 'command'].includes(tool.risk)
       ) {
         progressRevision += 1
-        workflowCycleGuard.reset()
       }
       const replaceMatchFailed =
         call.name === 'replace_in_file' &&
@@ -4885,12 +4831,6 @@ export async function runAgent(
         content: toolResultForModel(result),
         tool_call_id: call.id
       })
-      if (workflowToolCycleBlocked) {
-        messages.push({
-          role: 'user',
-          content: `<runtime_workflow_cycle_status tool="${call.name}" repeated="true">程序仅报告当前真实状态：同一任务状态下的重复 ${call.name} 已跳过。此前相同调用的真实结果仍然有效；请依据任务清单和已有结果自主选择不同动作，任务已完成时直接结束，禁止复述旧步骤或再次提交相同参数。</runtime_workflow_cycle_status>`
-        })
-      }
       if (replaceMatchFailed) {
         messages.push({
           role: 'user',
@@ -5022,23 +4962,6 @@ export async function runAgent(
         toolName: call.name,
         content: toolResultPreview(result)
       })
-      if (completedStateToolAttempt) {
-        send({
-          requestId: request.requestId,
-          type: 'status',
-          title: '任务完成，忽略多余历史检索',
-          content:
-            '用户没有发送新请求，任务清单已经完成；程序未执行模型额外发起的历史检索。'
-        })
-        send({
-          requestId: request.requestId,
-          type: 'done',
-          title: '任务完成',
-          changes: [...changes.values()],
-          usage: visibleAgentUsage()
-        })
-        return
-      }
       if (invalidToolArgumentRetries >= 3) {
         send({
           requestId: request.requestId,
@@ -5094,26 +5017,6 @@ export async function runAgent(
         }
         break
       }
-    }
-    if (workflowCycleRecovered) {
-      const compactedMessages = compactRepeatedWorkflowToolExchanges(
-        workflowCycleToolName,
-        workflowCycleToolArgs
-      )
-      const stateMessage: LlmMessage = {
-        role: 'system',
-        content: [
-          `运行时状态快照：检测到跨轮工作流重复，刚才重复的 ${workflowCycleToolName} 未执行。`,
-          '用户没有发送新请求。',
-          `重复次数：${workflowCycleOccurrences}；已从模型上下文清理 ${compactedMessages} 条重复工具交换消息，仅保留最早一次真实结果。`,
-          `任务清单：${activeTasks.map((task) => `${task.id}=${task.status}`).join('；') || '尚未建立'}。`,
-          `已记录文件改动：${changes.size} 个。`,
-          '本条只陈述真实状态。请基于保留的工具结果与任务清单自主选择不同动作；任务已完成时直接结束。'
-        ].join('\n')
-      }
-      messages.push(stateMessage)
-      forceToolNext = false
-      continue
     }
     if (restartAfterReplaceRecovery) continue
   }
