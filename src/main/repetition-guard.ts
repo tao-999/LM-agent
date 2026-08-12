@@ -7,6 +7,7 @@ export type StreamRepetitionStop = {
     | 'completion-echo'
     | 'idle-drift'
     | 'cross-turn-repeat'
+    | 'paraphrase-loop'
 }
 
 export type StreamRepetitionGuardOptions = {
@@ -139,15 +140,15 @@ function hasPostCompletionIdleDrift(value: string): boolean {
   return (completionClaims?.length ?? 0) >= 2 && completionAt >= 0 && idleAt > completionAt
 }
 
-function normalizeCrossTurnSample(value: string): string {
-  return value
+function normalizeCrossTurnSample(value: string, limit = 6_000): string {
+  const normalized = value
     .normalize('NFKC')
     .toLocaleLowerCase('zh-CN')
     .replace(/<[^>]+>/gu, ' ')
     .replace(/\p{Extended_Pictographic}/gu, '')
     .replace(/\d+/gu, '#')
     .replace(/[\p{P}\p{S}\s]+/gu, '')
-    .slice(0, 6_000)
+  return limit > 0 ? normalized.slice(0, limit) : normalized
 }
 
 function ngrams(value: string, size: number): Set<string> {
@@ -170,12 +171,50 @@ function ngramSimilarity(left: string, right: string): number {
   return intersection / Math.max(leftGrams.size, rightGrams.size)
 }
 
+function ngramContainment(source: string, candidate: string, size = 5): number {
+  const sourceGrams = ngrams(source, size)
+  const candidateGrams = ngrams(candidate, size)
+  if (!sourceGrams.size || !candidateGrams.size) return 0
+  let intersection = 0
+  for (const gram of sourceGrams) {
+    if (candidateGrams.has(gram)) intersection += 1
+  }
+  return intersection / sourceGrams.size
+}
+
+function hasWithinTurnParaphraseLoop(value: string): boolean {
+  const paragraphs = value
+    .slice(-16_000)
+    .split(/\r?\n\s*\r?\n/gu)
+    .map((paragraph) => normalizeCrossTurnSample(paragraph, 2_000))
+    .filter((paragraph) => paragraph.length >= 72)
+  if (paragraphs.length < 5) return false
+
+  for (let currentIndex = 4; currentIndex < paragraphs.length; currentIndex += 1) {
+    const current = paragraphs[currentIndex]
+    let matchCount = 0
+    for (let earlierIndex = 0; earlierIndex <= currentIndex - 2; earlierIndex += 1) {
+      const earlier = paragraphs[earlierIndex]
+      const shorterLength = Math.min(current.length, earlier.length)
+      if (shorterLength < 72) continue
+      const score = Math.max(
+        ngramContainment(current, earlier, 4),
+        ngramContainment(earlier, current, 4)
+      )
+      if (score < 0.32) continue
+      matchCount += 1
+      if (matchCount >= 2) return true
+    }
+  }
+  return false
+}
+
 function hasCrossTurnRepeat(value: string, priorSamples: string[]): boolean {
   if (priorSamples.length < 2) return false
   const current = normalizeCrossTurnSample(value)
   if (current.length < 40) return false
   const prior = priorSamples
-    .map(normalizeCrossTurnSample)
+    .map((sample) => normalizeCrossTurnSample(sample))
     .filter((sample) => sample.length >= 40)
     .slice(-8)
   if (prior.length < 2) return false
@@ -209,6 +248,7 @@ export function createStreamRepetitionGuard(
   let history = ''
   let stopped = false
   let nextInspectionAt = (options.priorSamples?.length ?? 0) >= 2 ? 40 : 160
+  let nextParaphraseInspectionAt = 800
 
   return {
     push: (value) => {
@@ -223,6 +263,17 @@ export function createStreamRepetitionGuard(
         stopped = true
         onStop({ channel, periodCharacters: 0, kind: 'cross-turn-repeat' })
         return true
+      }
+      if (
+        channel === 'reasoning' &&
+        history.length >= nextParaphraseInspectionAt
+      ) {
+        nextParaphraseInspectionAt = history.length + 192
+        if (hasWithinTurnParaphraseLoop(history)) {
+          stopped = true
+          onStop({ channel, periodCharacters: 0, kind: 'paraphrase-loop' })
+          return true
+        }
       }
       if (hasEmojiFlood(sample)) {
         stopped = true

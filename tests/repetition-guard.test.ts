@@ -54,6 +54,15 @@ test('detects a dense emoji tail', () => {
   assert.equal(inspectStream(reasoning)?.kind, 'emoji-flood')
 })
 
+test('detects a long reasoning stream that repeatedly paraphrases the same scene', () => {
+  const reasoning = readFileSync(
+    new URL('./fixtures/within-turn-paraphrase-loop.txt', import.meta.url),
+    'utf8'
+  )
+
+  assert.equal(inspectStream(reasoning)?.kind, 'paraphrase-loop')
+})
+
 test('detects changing DONE and END claims as a closure echo loop', () => {
   const lines = [
     '任务结束。无需进一步操作。',

@@ -1705,6 +1705,15 @@ button:disabled {
   color: #b8afff;
 }
 
+.composer-tool.loop-stop-retry {
+  color: #ffb4ad;
+}
+
+.composer-tool.loop-stop-retry:hover:not(:disabled) {
+  color: #ffd1cc;
+  background: rgba(255, 69, 58, 0.12);
+}
+
 .agent-scope {
   margin-left: auto;
   overflow: hidden;

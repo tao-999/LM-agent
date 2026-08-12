@@ -268,6 +268,7 @@ export type ChatMessage = {
   usage?: TokenUsage
   contextState?: ContextWindowState
   stoppedByUser?: boolean
+  excludeFromContext?: boolean
   attachments?: Array<{
     name: string
     kind: 'image' | 'text' | 'file'

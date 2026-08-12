@@ -1614,6 +1614,7 @@ export function ChatPanel(): React.JSX.Element {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([])
   const [discovering, setDiscovering] = useState(false)
   const [actionNotice, setActionNotice] = useState('')
+  const [restartingAfterLoopStop, setRestartingAfterLoopStop] = useState(false)
   const [showSessions, setShowSessions] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [skillMenuPosition, setSkillMenuPosition] = useState<{
@@ -1651,6 +1652,7 @@ export function ChatPanel(): React.JSX.Element {
   const comfyScanStartedRef = useRef(false)
   const skillButtonRef = useRef<HTMLButtonElement>(null)
   const skillMenuRef = useRef<HTMLDivElement>(null)
+  const retryAfterLoopStopRef = useRef(false)
 
   const conversation =
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
@@ -2292,7 +2294,11 @@ export function ChatPanel(): React.JSX.Element {
         : -1
       const imageHistory = conversation.messages
         .slice(imageContextCheckpointIndex + 1)
-        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .filter(
+          (message) =>
+            !message.excludeFromContext &&
+            (message.role === 'user' || message.role === 'assistant')
+        )
         .map((message) => buildContextMessage(message))
       const imageContext = splitContextHistory(imageHistory, conversation.contextMemory)
       const startedAt = Date.now()
@@ -2454,7 +2460,11 @@ export function ChatPanel(): React.JSX.Element {
       : -1
     const history = requestConversation.messages
       .slice(contextCheckpointIndex + 1)
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .filter(
+        (message) =>
+          !message.excludeFromContext &&
+          (message.role === 'user' || message.role === 'assistant')
+      )
       .map((message) => buildContextMessage(message, latestTaskMessageId))
     const contextHistory = splitContextHistory(history, requestConversation.contextMemory)
 
@@ -2515,6 +2525,71 @@ export function ChatPanel(): React.JSX.Element {
     }))
     clearPending(requestId)
   }
+
+  const stopLoopAndRetry = async (): Promise<void> => {
+    if (!activePending || restartingAfterLoopStop || !conversation) return
+    const [requestId, info] = activePending
+    if (info.kind === 'image') return
+    setRestartingAfterLoopStop(true)
+    try {
+      const assistantIndex = conversation.messages.findIndex(
+        (message) => message.id === info.assistantId
+      )
+      const previousUser = [...conversation.messages]
+        .slice(0, assistantIndex < 0 ? undefined : assistantIndex)
+        .reverse()
+        .find((message) => message.role === 'user')
+      if (!previousUser) {
+        setActionNotice('未找到本轮用户消息，无法重新发送')
+        return
+      }
+
+      if (info.kind === 'agent') await window.localAgent.agent.stop(requestId)
+      else await window.localAgent.chat.stop(requestId)
+      updateMessage(info.conversationId, info.assistantId, (message) => ({
+        ...message,
+        status: 'done',
+        meta: '用户手动终止疑似复读，正在重新发送本轮消息',
+        stoppedByUser: true,
+        excludeFromContext: true,
+        completedAt: Date.now(),
+        agentBlocks: message.agentBlocks?.map((block) => {
+          if (block.type === 'thinking' && block.status !== 'done') {
+            return { ...block, status: 'done' as const, updatedAt: Date.now() }
+          }
+          if (
+            block.type === 'operation' &&
+            (block.status === 'running' || block.status === 'waiting')
+          ) {
+            return { ...block, status: 'done' as const, completedAt: Date.now() }
+          }
+          return block
+        })
+      }))
+      updateMessage(info.conversationId, previousUser.id, (message) => ({
+        ...message,
+        excludeFromContext: true
+      }))
+      clearPending(requestId)
+      const retryText = previousUser.content
+      setComposerInput(retryText)
+      setAttachments(
+        (previousUser.attachments ?? []).map((attachment) => ({ ...attachment }))
+      )
+      setActionNotice('已终止疑似复读，正在重新发送本轮消息')
+      retryAfterLoopStopRef.current = true
+      inputValueRef.current = retryText
+    } catch (error) {
+      setRestartingAfterLoopStop(false)
+      setActionNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  useEffect(() => {
+    if (running || !retryAfterLoopStopRef.current) return
+    retryAfterLoopStopRef.current = false
+    void sendMessage().finally(() => setRestartingAfterLoopStop(false))
+  }, [running])
 
   const resolveApproval = async (approved: boolean): Promise<void> => {
     if (!agentApproval) return
@@ -3008,6 +3083,18 @@ export function ChatPanel(): React.JSX.Element {
                   Skill{enabledSelectedSkillIds.length ? ` · ${enabledSelectedSkillIds.length}` : ''}
                 </button>
               </div>
+              {running && activePending?.[1].kind !== 'image' && (
+                <button
+                  type="button"
+                  className="composer-tool loop-stop-retry"
+                  onClick={() => void stopLoopAndRetry()}
+                  disabled={restartingAfterLoopStop}
+                  title="终止当前疑似复读并重新发送本轮消息"
+                >
+                  <RotateCcw size={14} />
+                  {restartingAfterLoopStop ? '重发中' : '终止重发'}
+                </button>
+              )}
             </>
           ) : (
             <>
