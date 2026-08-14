@@ -84,6 +84,15 @@ test('keeps a long edit review that revisits evidence while continuing toward an
   assert.equal(inspectStream(reasoning, 'reasoning', priorSamples), undefined)
 })
 
+test('keeps an understanding summary that repeatedly mentions completion criteria', () => {
+  const reasoning = readFileSync(
+    new URL('./fixtures/understanding-with-completion-criteria.txt', import.meta.url),
+    'utf8'
+  )
+
+  assert.equal(inspectStream(reasoning), undefined)
+})
+
 test('detects changing DONE and END claims as a closure echo loop', () => {
   const lines = [
     '任务结束。无需进一步操作。',

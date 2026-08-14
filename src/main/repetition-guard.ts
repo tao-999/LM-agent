@@ -19,6 +19,14 @@ const emojiGraphemePattern =
 const substantiveGraphemePattern = /[\p{L}\p{N}]/u
 const graphemeSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' })
 
+function completionClaimPattern(): RegExp {
+  return /(?:(?:任务|修改|修复|处理|改动|验证|复查|检查)(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|(?:已经|已)(?:完成|完毕|搞定|改好|修正)|(?:任务|本轮)(?:结束|关闭))(?!标准|条件|要求|理解|阶段|目标|清单|记录|状态|后|前|时)|(?:task\s*)?(?:complete|completed)|\b(?:done|final|end)\b/giu
+}
+
+function completionClaims(value: string): string[] {
+  return value.match(completionClaimPattern()) ?? []
+}
+
 function hasEmojiFlood(value: string): boolean {
   const tail = value.slice(-2_400)
   const graphemes = [...graphemeSegmenter.segment(tail)].map((entry) => entry.segment)
@@ -52,10 +60,11 @@ function hasCompletionEchoLoop(
   channel: StreamRepetitionStop['channel']
 ): boolean {
   const source = value.slice(-6_000)
-  const closureEchoes =
+  const idleEchoes =
     source.match(
-      /(?:修改|修复|处理|改动|任务|验证|复查|检查)?(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|已改|等待(?:下一个|新的?|用户)?(?:任务|指令|输入)|(?:task\s*)?(?:complete|completed)|\b(?:done|final|end|stop|bye|period)\b|awaiting(?:\s+(?:your|the|next|new|user))*\s+(?:input|command|prompt|task)|end\s+of\s+(?:line|transmission)|(?:last|final)\s+line|no\s+more\s+(?:text|words)/giu
+      /等待(?:下一个|新的?|用户)?(?:任务|指令|输入)|\b(?:stop|bye|period)\b|awaiting(?:\s+(?:your|the|next|new|user))*\s+(?:input|command|prompt|task)|end\s+of\s+(?:line|transmission)|(?:last|final)\s+line|no\s+more\s+(?:text|words)/giu
     ) ?? []
+  const closureEchoes = [...completionClaims(source), ...idleEchoes]
   if (closureEchoes.length < 6) return false
 
   const normalized = source
@@ -96,11 +105,8 @@ function hasRepeatedCompletionStructure(
   channel: StreamRepetitionStop['channel']
 ): boolean {
   const source = value.slice(-12_000)
-  const completionClaims =
-    source.match(
-      /(?:任务|修改|修复|处理|改动|验证|复查|检查)?(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|(?:task\s*)?(?:complete|completed)|\b(?:done|final|end)\b/giu
-    ) ?? []
-  if (completionClaims.length < (channel === 'content' ? 3 : 2)) return false
+  const claims = completionClaims(source)
+  if (claims.length < (channel === 'content' ? 3 : 2)) return false
 
   const frequencies = new Map<string, number>()
   for (const rawLine of source.split(/\r?\n/u)) {
@@ -128,16 +134,12 @@ function hasRepeatedCompletionStructure(
 
 function hasPostCompletionIdleDrift(value: string): boolean {
   const source = value.slice(-3_000)
-  const completionPattern =
-    /(?:任务|修改|修复|处理|改动|验证|复查|检查)?(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|(?:task\s*)?(?:complete|completed)|\b(?:done|final)\b/iu
   const idlePattern =
     /等待(?:下一个|新的?|用户)?(?:任务|指令|输入)|在线待命|静默待命|准备好继续|awaiting(?:\s+(?:your|the|next|new|user))*\s+(?:input|command|prompt|task)|ready\s+for\s+(?:the\s+)?next|system\s+idle/iu
-  const completionClaims = source.match(
-    /(?:任务|修改|修复|处理|改动|验证|复查|检查)?(?:已经|已)?(?:完成|完毕|通过|搞定|改好|修正)|(?:task\s*)?(?:complete|completed)|\b(?:done|final)\b/giu
-  )
-  const completionAt = source.search(completionPattern)
+  const claims = completionClaims(source)
+  const completionAt = source.search(completionClaimPattern())
   const idleAt = source.search(idlePattern)
-  return (completionClaims?.length ?? 0) >= 2 && completionAt >= 0 && idleAt > completionAt
+  return claims.length >= 2 && completionAt >= 0 && idleAt > completionAt
 }
 
 function normalizeCrossTurnSample(value: string, limit = 6_000): string {
