@@ -1,4 +1,4 @@
-export const CHAT_BOTTOM_TOLERANCE_PX = 4
+export const CHAT_BOTTOM_TOLERANCE_PX = 12
 
 export interface ScrollViewportMetrics {
   scrollHeight: number
@@ -15,4 +15,10 @@ export function isScrollViewportAtBottom(
   const clientHeight = Number.isFinite(metrics.clientHeight) ? Math.max(0, metrics.clientHeight) : 0
   const safeTolerance = Number.isFinite(tolerance) ? Math.max(0, tolerance) : 0
   return scrollHeight - clientHeight - scrollTop <= safeTolerance
+}
+
+export function scrollViewportBottomTop(metrics: ScrollViewportMetrics): number {
+  const scrollHeight = Number.isFinite(metrics.scrollHeight) ? Math.max(0, metrics.scrollHeight) : 0
+  const clientHeight = Number.isFinite(metrics.clientHeight) ? Math.max(0, metrics.clientHeight) : 0
+  return Math.max(0, scrollHeight - clientHeight)
 }

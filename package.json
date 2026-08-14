@@ -1,6 +1,6 @@
 {
   "name": "local-agent-studio",
-  "version": "0.7.150",
+  "version": "0.7.151",
   "private": true,
   "description": "星伴 AI｜你的本地 AI 伙伴",
   "main": "out/main/index.js",
@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "icon:build": "node scripts/build-icon.cjs",
-    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts tests/workflow-cycle-guard.test.ts tests/agent-workflow.test.ts tests/viewport-menu.test.ts tests/project-tree-state.test.ts tests/skill-selection.test.ts tests/workspace-transfer.test.ts tests/file-encoding.test.ts tests/grep-search.test.ts tests/paper-cache.test.ts tests/ui-performance.test.ts tests/model-usage.test.ts tests/mode-tool-isolation.test.ts tests/tokenhub-hy3.test.ts",
+    "test": "node --test tests/repetition-guard.test.ts tests/protocol-output.test.ts tests/workflow-cycle-guard.test.ts tests/agent-workflow.test.ts tests/viewport-menu.test.ts tests/project-tree-state.test.ts tests/skill-selection.test.ts tests/workspace-transfer.test.ts tests/file-encoding.test.ts tests/grep-search.test.ts tests/paper-cache.test.ts tests/read-file-window.test.ts tests/ui-performance.test.ts tests/model-usage.test.ts tests/mode-tool-isolation.test.ts tests/tokenhub-hy3.test.ts",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "dist": "npm run icon:build && npm run build && electron-builder --win",

@@ -49,6 +49,7 @@ import {
   workflowToolChoice,
   type AgentWorkflowStage
 } from './agent-workflow'
+import { expandReadFileWindow, MIN_READ_FILE_LINES } from './read-file-window'
 
 const execAsync = promisify(exec)
 
@@ -372,8 +373,8 @@ function describeToolCall(
     read_file: {
       title: `read_file · ${pathValue || '未指定文件'}`,
       detail: `正在读取 ${pathValue}${
-        args.around_line
-          ? ` 第 ${String(args.around_line)} 行上下各 ${String(args.context_lines || 50)} 行`
+          args.around_line
+          ? ` 第 ${String(args.around_line)} 行附近至少 ${MIN_READ_FILE_LINES} 行`
           : args.start_line
           ? ` 第 ${String(args.start_line)}-${String(args.end_line || '末尾')} 行`
           : ''
@@ -2380,11 +2381,17 @@ export async function runAgent(
           args.around_line
         ].some((value) => Number.isSafeInteger(Number(value)) && Number(value) >= 1)
         if (!selectedRange || hasExplicitRange) return { arguments: args }
-        const contextLines = 50
+        const current = await readTextFile(request.workspaceRoot, relative)
+        const totalLines = current.split(/\r?\n/).length
+        const expanded = expandReadFileWindow(
+          totalLines,
+          selectedRange.startLine,
+          selectedRange.endLine
+        )
         const normalizedArguments = {
           ...args,
-          start_line: Math.max(1, selectedRange.startLine - contextLines),
-          end_line: selectedRange.endLine + contextLines
+          start_line: expanded.start,
+          end_line: expanded.end
         }
         return {
           arguments: normalizedArguments,
@@ -2979,7 +2986,7 @@ export async function runAgent(
       function: {
         name: 'read_file',
         description:
-          '按行读取 grep 返回的本地资料路径并返回行号。path 支持 CWD 相对路径、@history/ 会话历史虚拟路径与 @papers/ 论文缓存虚拟路径。默认优先提供 around_line+context_lines，或 start_line+end_line 精准读取区间；位置未知时必须先调用 grep 全局定位。',
+          `按行读取 grep 返回的本地资料路径并返回行号。path 支持 CWD 相对路径、@history/ 会话历史虚拟路径与 @papers/ 论文缓存虚拟路径。每次至少返回 ${MIN_READ_FILE_LINES} 行；文件不足 ${MIN_READ_FILE_LINES} 行时返回全文。默认优先提供 around_line+context_lines，或 start_line+end_line 定位区间；位置未知时必须先调用 grep 全局定位。`,
         parameters: {
           type: 'object',
           required: ['path'],
@@ -2995,7 +3002,7 @@ export async function runAgent(
             context_lines: {
               type: 'integer',
               minimum: 1,
-              description: 'around_line 上下各读取多少行，默认 50'
+              description: `around_line 上下各读取多少行，默认 ${Math.floor(MIN_READ_FILE_LINES / 2)}；最终区间不足 ${MIN_READ_FILE_LINES} 行时自动扩展`
             }
           }
         }
@@ -3038,7 +3045,7 @@ export async function runAgent(
       const contextLines =
         Number.isSafeInteger(Number(args.context_lines)) && Number(args.context_lines) >= 1
           ? Number(args.context_lines)
-          : 50
+          : Math.floor(MIN_READ_FILE_LINES / 2)
       const hasStart = Number.isSafeInteger(Number(args.start_line)) && Number(args.start_line) >= 1
       const hasEnd = Number.isSafeInteger(Number(args.end_line)) && Number(args.end_line) >= 1
       const hasExplicitInterval = aroundLine > 0 || (hasStart && hasEnd)
@@ -3053,22 +3060,23 @@ export async function runAgent(
         !hasExplicitInterval &&
         !userRequestedWholeFileRead &&
         !fileFitsWholeReadBudget &&
-        lines.length > 1
+        lines.length > MIN_READ_FILE_LINES
       ) {
         throw new Error(
           [
             `read_file 缺少准确读取区间：${relative} 当前共 ${lines.length} 行，估算 ${estimatedFileTokens.toLocaleString()} Token，超过当前上下文窗口 50% 阈值 ${wholeFileThreshold.toLocaleString()} Token，已阻止默认读取全文。`,
-            '位置未知时先调用 grep 定位关键词行号，再用 around_line 与 context_lines（默认上下各 50 行）读取上下文。',
+            `位置未知时先调用 grep 定位关键词行号，再用 around_line 与 context_lines 读取至少 ${MIN_READ_FILE_LINES} 行上下文。`,
             '已有用户选区、明确行号或其他可靠区间时，提供 start_line 与 end_line。当前任务明确要求全文处理时也可省略区间。'
           ].join('\n')
         )
       }
-      const start = aroundLine
+      const requestedStart = aroundLine
         ? Math.max(1, aroundLine - contextLines)
         : Math.min(lines.length, hasStart ? Number(args.start_line) : 1)
-      const end = aroundLine
+      const requestedEnd = aroundLine
         ? Math.min(lines.length, aroundLine + contextLines)
         : Math.min(lines.length, hasEnd ? Number(args.end_line) : lines.length)
+      const { start, end } = expandReadFileWindow(lines.length, requestedStart, requestedEnd)
       if (end < start) throw new Error(`读取区间无效：${start}-${end}`)
       if (!isVirtualSource) {
         markFileRead(relative, { startLine: start, endLine: end, totalLines: lines.length }, content)
@@ -3774,7 +3782,7 @@ export async function runAgent(
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
-    '资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。查最新剧情或文件末尾信息使用 order=desc，查久远剧情或文件开头信息使用 order=asc，默认 asc。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 并传 path、around_line、context_lines 精准扩读。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。',
+    `资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。查最新剧情或文件末尾信息使用 order=desc，查久远剧情或文件开头信息使用 order=asc，默认 asc。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 扩读至少 ${MIN_READ_FILE_LINES} 行，文件不足 ${MIN_READ_FILE_LINES} 行时读取全文。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。`,
     '选区锚点规则：<selected_code> 只提供初始定位锚点，绝不代表上下文或资料已经完整。必须先读取选区前后上下文，再根据任务自主判断是否需要 grep 检索当前文件、其他文件、项目资料或会话历史；涉及外部事实、最新信息、陌生技术或本地资料不足时继续 search_web。严禁因用户提供选区而跳过必要检索，也严禁因选区存在而禁止联网。',
     requiresWritingLoreResearch
       ? '写作本地资料检索闸门已启用：本轮属于续写、改写、润色、文学细节纠错或人物设定修正。输出正文或编辑文件前，必须先用 grep 检索当前 CWD 与本地会话历史；命中项目文件后必须用 read_file 读取命中行上下文。只有本地零命中或读取结果确实缺少目标设定时，才允许调用 search_web 查询原著或可靠公开资料。完成本地检索前严禁联网、补造设定、输出正文或修改文件。'
@@ -4150,11 +4158,11 @@ export async function runAgent(
               role: 'system' as const,
               content:
                 knowledgeResearchStage === 'anchor-read'
-                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。${modelToolScopeInstruction} 需要定位关键词、同义表达、跨文件资料或会话历史时优先 grep，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。若未显式提供范围，程序会自动扩展选区前后各约 50 行。请根据当前子任务自主选择工具。`
+                  ? `当前选区锚点建议：用户选区只负责定位当前问题，不代表资料完整。${modelToolScopeInstruction} 需要定位关键词、同义表达、跨文件资料或会话历史时优先 grep，已知目标区间时可用 read_file 读取 ${pendingAnchorDescription()} 的前后上下文。程序会把读取区间自动扩展到至少 ${MIN_READ_FILE_LINES} 行。请根据当前子任务自主选择工具。`
                   : knowledgeResearchStage === 'local-search'
                     ? `当前资料建议：本轮可能涉及人物、服装形象、关系、武学、门派、情节或其他关键设定，优先用 grep 检索当前 CWD 与本地会话历史。${modelToolScopeInstruction} 请根据当前子任务自主选择。`
                   : knowledgeResearchStage === 'local-read'
-                    ? `当前资料建议：优先用 read_file 读取 grep 命中的文件与行号，推荐 around_line 加 context_lines=50；命中不够精准时可继续 grep，也可根据当前子任务调用其他工具。${modelToolScopeInstruction}`
+                    ? `当前资料建议：优先用 read_file 读取 grep 命中的文件与行号；程序会自动返回至少 ${MIN_READ_FILE_LINES} 行，文件不足 ${MIN_READ_FILE_LINES} 行时返回全文。命中不够精准时可继续 grep，也可根据当前子任务调用其他工具。${modelToolScopeInstruction}`
                     : `本地资料未命中。若任务仍依赖外部人物、武学或既有设定，建议调用 search_web 并带上准确名称与作品名；${modelToolScopeInstruction}`
             }
           ]
@@ -4905,7 +4913,7 @@ export async function runAgent(
           messages.push({
             role: 'user',
             content:
-              '<runtime_research_gate local_hits="found">本地检索已有命中。下一步必须调用 read_file 读取最相关命中行上下各 50 行，再判断资料是否足够。</runtime_research_gate>'
+              `<runtime_research_gate local_hits="found">本地检索已有命中。下一步必须调用 read_file 读取最相关命中附近至少 ${MIN_READ_FILE_LINES} 行，再判断资料是否足够。</runtime_research_gate>`
           })
         }
       } else if (

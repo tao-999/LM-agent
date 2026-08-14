@@ -56,7 +56,11 @@ import 'highlight.js/styles/github-dark.css'
 import 'katex/dist/katex.min.css'
 import { setChatScrollActive } from '../utils/chat-scroll-activity'
 import { markComposerInputActive } from '../utils/composer-input-activity'
-import { isScrollViewportAtBottom } from '../utils/scroll-position'
+import {
+  CHAT_BOTTOM_TOLERANCE_PX,
+  isScrollViewportAtBottom,
+  scrollViewportBottomTop
+} from '../utils/scroll-position'
 import type {
   AgentApproval,
   ChatContextMessage,
@@ -1641,6 +1645,7 @@ export function ChatPanel(): React.JSX.Element {
   const deferredSessionQuery = useDeferredValue(sessionQuery)
   const [visibleRange, setVisibleRange] = useState<ListRange>({ startIndex: 0, endIndex: 0 })
   const [atBottom, setAtBottom] = useState(true)
+  const atBottomRef = useRef(true)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const chatScrollerRef = useRef<HTMLElement | null>(null)
   const bottomSyncFrameRef = useRef<number | null>(null)
@@ -2226,7 +2231,7 @@ export function ChatPanel(): React.JSX.Element {
   ): string => {
     const totalLines = content.split(/\r?\n/).length
     if (mode === 'agent' && totalLines > 200) {
-      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 grep 全局定位关键词，再用 read_file 读取命中行上下各约 50 行。</file_reference>`
+      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 grep 全局定位关键词，再用 read_file 读取命中附近至少 1000 行。</file_reference>`
     }
     return `\n\n<${tag} path="${filePath}">\n${content}\n</${tag}>`
   }
@@ -2617,7 +2622,7 @@ export function ChatPanel(): React.JSX.Element {
     )
   }
 
-  const scrollToLatest = (): void => {
+  const scrollToLatest = useCallback((): void => {
     const scroll = (): void => {
       virtuosoRef.current?.scrollToIndex({
         index: Math.max(0, renderedMessages.length - 1),
@@ -2628,16 +2633,24 @@ export function ChatPanel(): React.JSX.Element {
         top: Number.MAX_SAFE_INTEGER,
         behavior: 'auto'
       })
+      const scroller = chatScrollerRef.current
+      if (scroller) scroller.scrollTop = scrollViewportBottomTop(scroller)
     }
     scroll()
     window.requestAnimationFrame(scroll)
     window.setTimeout(scroll, 120)
-  }
+  }, [renderedMessages.length])
 
   const syncChatBottomState = useCallback((): void => {
     const scroller = chatScrollerRef.current
     if (!scroller) return
     const nextAtBottom = isScrollViewportAtBottom(scroller)
+    atBottomRef.current = nextAtBottom
+    setAtBottom((current) => (current === nextAtBottom ? current : nextAtBottom))
+  }, [])
+
+  const handleVirtuosoAtBottomStateChange = useCallback((nextAtBottom: boolean): void => {
+    atBottomRef.current = nextAtBottom
     setAtBottom((current) => (current === nextAtBottom ? current : nextAtBottom))
   }, [])
 
@@ -2662,7 +2675,13 @@ export function ChatPanel(): React.JSX.Element {
   useEffect(() => {
     if (!chatScrollerElement) return
     const handleScroll = (): void => scheduleChatBottomSync()
-    const resizeObserver = new ResizeObserver(scheduleChatBottomSync)
+    const handleResize = (): void => {
+      if (atBottomRef.current) {
+        chatScrollerElement.scrollTop = scrollViewportBottomTop(chatScrollerElement)
+      }
+      scheduleChatBottomSync()
+    }
+    const resizeObserver = new ResizeObserver(handleResize)
     chatScrollerElement.addEventListener('scroll', handleScroll, { passive: true })
     resizeObserver.observe(chatScrollerElement)
     scheduleChatBottomSync()
@@ -2810,11 +2829,11 @@ export function ChatPanel(): React.JSX.Element {
               isScrolling={setChatScrollActive}
               computeItemKey={(_index, message) => message.id}
               followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
-              atBottomThreshold={8}
+              atBottomThreshold={CHAT_BOTTOM_TOLERANCE_PX}
               scrollerRef={setChatScrollerRef}
               increaseViewportBy={{ top: 500, bottom: 700 }}
               rangeChanged={setVisibleRange}
-              atBottomStateChange={scheduleChatBottomSync}
+              atBottomStateChange={handleVirtuosoAtBottomStateChange}
               totalListHeightChanged={scheduleChatBottomSync}
               itemContent={(index, message) => (
                 <MessageCard
