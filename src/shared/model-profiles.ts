@@ -49,6 +49,22 @@ export function knownRemoteModelContext(
   }
 }
 
+export function applyKnownRemoteModelProfile(model: ModelConfig): ModelConfig {
+  const context = knownRemoteModelContext(model)
+  if (!context) return model
+  if (
+    model.contextLength === context.contextLength &&
+    model.maxContextLength === context.maxContextLength
+  ) {
+    return model
+  }
+  return {
+    ...model,
+    contextLength: context.contextLength,
+    maxContextLength: context.maxContextLength
+  }
+}
+
 export function resolveOpenAiEndpoint(baseUrl: string, suffix: string): string {
   const normalizedSuffix = suffix.startsWith('/') ? suffix : `/${suffix}`
   let base = baseUrl.trim().replace(/\/+$/, '')

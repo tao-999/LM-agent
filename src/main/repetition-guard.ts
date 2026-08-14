@@ -188,23 +188,40 @@ function hasWithinTurnParaphraseLoop(value: string): boolean {
     .split(/\r?\n\s*\r?\n/gu)
     .map((paragraph) => normalizeCrossTurnSample(paragraph, 2_000))
     .filter((paragraph) => paragraph.length >= 72)
-  if (paragraphs.length < 5) return false
+  if (paragraphs.length < 8) return false
 
-  for (let currentIndex = 4; currentIndex < paragraphs.length; currentIndex += 1) {
-    const current = paragraphs[currentIndex]
-    let matchCount = 0
-    for (let earlierIndex = 0; earlierIndex <= currentIndex - 2; earlierIndex += 1) {
-      const earlier = paragraphs[earlierIndex]
-      const shorterLength = Math.min(current.length, earlier.length)
-      if (shorterLength < 72) continue
-      const score = Math.max(
-        ngramContainment(current, earlier, 4),
-        ngramContainment(earlier, current, 4)
-      )
-      if (score < 0.32) continue
-      matchCount += 1
-      if (matchCount >= 2) return true
+  // A long analysis legitimately revisits the same file, line range, constraints, or
+  // proposed wording while still making progress. Treating any two similar paragraphs
+  // as a loop stops valid work too early. A real paraphrase loop repeats the same
+  // *sequence* for at least four consecutive cycles, so compare aligned paragraph
+  // windows at the stream tail instead of searching arbitrary earlier paragraphs.
+  for (let cycleLength = 1; cycleLength <= 3; cycleLength += 1) {
+    const requiredParagraphs = cycleLength * 4
+    if (paragraphs.length < requiredParagraphs) continue
+    const cycles = paragraphs.slice(-requiredParagraphs)
+    let totalScore = 0
+    let comparisons = 0
+    let allAligned = true
+
+    for (let cycleIndex = 1; cycleIndex < 4; cycleIndex += 1) {
+      for (let offset = 0; offset < cycleLength; offset += 1) {
+        const previous = cycles[(cycleIndex - 1) * cycleLength + offset]
+        const current = cycles[cycleIndex * cycleLength + offset]
+        const score = Math.max(
+          ngramContainment(previous, current, 4),
+          ngramContainment(current, previous, 4)
+        )
+        if (score < 0.22) {
+          allAligned = false
+          break
+        }
+        totalScore += score
+        comparisons += 1
+      }
+      if (!allAligned) break
     }
+
+    if (allAligned && comparisons > 0 && totalScore / comparisons >= 0.29) return true
   }
   return false
 }

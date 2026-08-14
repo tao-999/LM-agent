@@ -8,12 +8,17 @@ import {
 
 function inspectStream(
   value: string,
-  channel: StreamRepetitionStop['channel'] = 'reasoning'
+  channel: StreamRepetitionStop['channel'] = 'reasoning',
+  priorSamples: string[] = []
 ): StreamRepetitionStop | undefined {
   let detected: StreamRepetitionStop | undefined
-  const guard = createStreamRepetitionGuard(channel, (stop) => {
-    detected = stop
-  })
+  const guard = createStreamRepetitionGuard(
+    channel,
+    (stop) => {
+      detected = stop
+    },
+    { priorSamples }
+  )
   for (let index = 0; index < value.length; index += 31) {
     if (guard.push(value.slice(index, index + 31))) break
   }
@@ -61,6 +66,22 @@ test('detects a long reasoning stream that repeatedly paraphrases the same scene
   )
 
   assert.equal(inspectStream(reasoning)?.kind, 'paraphrase-loop')
+})
+
+test('keeps a long edit review that revisits evidence while continuing toward an action', () => {
+  const reasoning = readFileSync(
+    new URL('./fixtures/progressive-edit-review.txt', import.meta.url),
+    'utf8'
+  )
+
+  const genericPrefix =
+    'Let me analyze the task. The user wants me to review the edits made to 正文.txt. '
+  const priorSamples = [
+    `${genericPrefix}Earlier work inspected a different chapter and reached a separate conclusion.`,
+    `${genericPrefix}Earlier work checked another file and used different evidence.`
+  ]
+
+  assert.equal(inspectStream(reasoning, 'reasoning', priorSamples), undefined)
 })
 
 test('detects changing DONE and END claims as a closure echo loop', () => {

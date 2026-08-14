@@ -27,6 +27,7 @@ import {
 } from './utils/project-tree-state'
 import { createReferenceMemoizedProjection } from './utils/reference-memo'
 import { isChatScrollActive } from './utils/chat-scroll-activity'
+import { applyKnownRemoteModelProfile } from '../../shared/model-profiles'
 
 const pendingStorageWrites = new Map<string, StorageValue<unknown>>()
 const latestPersistedStateByName = new Map<string, unknown>()
@@ -325,8 +326,9 @@ const defaultModel: ModelConfig = {
 }
 
 function persistedModel(model: ModelConfig): ModelConfig {
+  const profiled = applyKnownRemoteModelProfile(model)
   return {
-    ...model,
+    ...profiled,
     apiKey: undefined,
     thinkingMode: undefined
   }
@@ -759,23 +761,29 @@ export const useAppStore = create<AppStore>()(
           }
         }),
       setModel: (model) =>
-        set((state) => ({
-          model,
-          conversations: state.conversations.map((conversation) =>
-            conversation.id === state.activeConversationId
-              ? { ...conversation, model: persistedModel(model), updatedAt: Date.now() }
-              : conversation
-          )
-        })),
+        set((state) => {
+          const profiled = applyKnownRemoteModelProfile(model)
+          return {
+            model: profiled,
+            conversations: state.conversations.map((conversation) =>
+              conversation.id === state.activeConversationId
+                ? { ...conversation, model: persistedModel(profiled), updatedAt: Date.now() }
+                : conversation
+            )
+          }
+        }),
       saveCustomModel: (model) =>
-        set((state) => ({
-          customModels: [
-            ...state.customModels.filter(
-              (item) => item.connectionId !== model.connectionId
-            ),
-            { ...model, apiKey: undefined }
-          ]
-        })),
+        set((state) => {
+          const profiled = applyKnownRemoteModelProfile(model)
+          return {
+            customModels: [
+              ...state.customModels.filter(
+                (item) => item.connectionId !== profiled.connectionId
+              ),
+              { ...profiled, apiKey: undefined }
+            ]
+          }
+        }),
       deleteCustomModel: (connectionId) =>
         set((state) => ({
           customModels: state.customModels.filter(
@@ -974,7 +982,7 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 18,
+      version: 19,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -996,6 +1004,7 @@ export const useAppStore = create<AppStore>()(
         if (!state.editorTheme) state.editorTheme = 'one-dark-pro'
         if (typeof state.confirmCreateDelete !== 'boolean') state.confirmCreateDelete = true
         if (!state.customModels) state.customModels = []
+        state.customModels = state.customModels.map(applyKnownRemoteModelProfile)
         if (!state.modelThinkingModes) state.modelThinkingModes = {}
         if (!state.expandedWorkspacePaths) state.expandedWorkspacePaths = {}
         if (!state.tokenUsageRecords) state.tokenUsageRecords = []
@@ -1006,14 +1015,18 @@ export const useAppStore = create<AppStore>()(
         state.conversations = settleInterruptedConversations(state.conversations).map(
           (conversation) => ({
             ...conversation,
-            model: conversation.model ?? persistedModel(state.model ?? defaultModel),
+            model: applyKnownRemoteModelProfile(
+              conversation.model ?? persistedModel(state.model ?? defaultModel)
+            ),
             thinkingMode: conversation.thinkingMode ?? 'auto'
           })
         )
         const activeConversation = state.conversations.find(
           (conversation) => conversation.id === state.activeConversationId
         )
-        state.model = restoreConversationModel(activeConversation, state.model ?? defaultModel)
+        state.model = applyKnownRemoteModelProfile(
+          restoreConversationModel(activeConversation, state.model ?? defaultModel)
+        )
         return state as AppStore
       },
       partialize: projectPersistedState

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  applyKnownRemoteModelProfile,
   isTokenHubHy3Model,
   knownRemoteModelContext,
   resolveOpenAiEndpoint,
@@ -51,6 +52,23 @@ test('uses HY3 official prompt and model context limits', () => {
     maxContextLength: 262144,
     source: '腾讯 TokenHub HY3 官方配置'
   })
+})
+
+test('upgrades a persisted 8K HY3 configuration automatically', () => {
+  assert.deepEqual(
+    applyKnownRemoteModelProfile({
+      ...hy3,
+      connectionId: 'legacy-hy3',
+      contextLength: 8192,
+      maxContextLength: 8192
+    }),
+    {
+      ...hy3,
+      connectionId: 'legacy-hy3',
+      contextLength: 196608,
+      maxContextLength: 262144
+    }
+  )
 })
 
 test('maps the conversation Thinking selector to HY3 reasoning_effort', () => {
