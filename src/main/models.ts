@@ -17,6 +17,12 @@ import {
   stripPrivateModelOutput
 } from './protocol-output'
 import {
+  isTokenHubHy3Model,
+  knownRemoteModelContext,
+  resolveOpenAiEndpoint,
+  tokenHubHy3ReasoningOptions
+} from '../shared/model-profiles'
+import {
   cachedPromptTokensFromOpenAiPayload,
   type OpenAiTimingsPayload,
   type OpenAiUsagePayload
@@ -135,8 +141,7 @@ function normalizeBaseUrl(value: string): string {
 }
 
 function openAiEndpoint(baseUrl: string, suffix: string): string {
-  const base = normalizeBaseUrl(baseUrl)
-  return base.endsWith('/v1') ? `${base}${suffix}` : `${base}/v1${suffix}`
+  return resolveOpenAiEndpoint(baseUrl, suffix)
 }
 
 let systemProxySession: Promise<Session> | null = null
@@ -1006,6 +1011,9 @@ function openAiThinkingOptions(
   const enableThinking =
     typeof overrideEnabled === 'boolean' ? overrideEnabled : resolveThinkingEnabled(model)
   if (typeof enableThinking !== 'boolean') return {}
+  if (isTokenHubHy3Model(model)) {
+    return tokenHubHy3ReasoningOptions(model, enableThinking)
+  }
   if (/dashscope\.aliyuncs\.com|dashscope-intl\.aliyuncs\.com/i.test(model.baseUrl)) {
     return isQwenModel(model) ? { enable_thinking: enableThinking } : {}
   }
@@ -2147,6 +2155,8 @@ export async function inspectModelContext(
       source: 'Kimi Code 官方配置'
     }
   }
+  const knownContext = knownRemoteModelContext(model)
+  if (knownContext) return knownContext
   const fallback = Math.max(2048, model.contextLength || 8192)
   if (!model.baseUrl || !model.model) {
     return { contextLength: fallback, maxContextLength: fallback, source: '保守默认值' }

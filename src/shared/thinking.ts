@@ -1,4 +1,5 @@
 import type { ModelConfig, ThinkingMode } from './types'
+import { isTokenHubHy3Model } from './model-profiles.ts'
 
 export type ThinkingCapability = 'supported' | 'unsupported' | 'always' | 'unknown'
 
@@ -23,6 +24,7 @@ export function inferThinkingCapability(
   const name = normalizedModelName(model)
   if (!name) return 'unknown'
   if (model.preset === 'kimi-code') return 'always'
+  if (isTokenHubHy3Model(model)) return 'supported'
   if (/(?:^|[-_.\s])(?:qwq|deepseek[-_.]?r1|reasoner)(?:$|[-_.\s])/.test(name)) return 'always'
   if (/(?:embed|embedding|rerank|whisper|speech|tts|image|vision-encoder)/.test(name)) {
     return 'unsupported'
