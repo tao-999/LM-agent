@@ -49,7 +49,11 @@ import {
   workflowToolChoice,
   type AgentWorkflowStage
 } from './agent-workflow'
-import { expandReadFileWindow, MIN_READ_FILE_LINES } from './read-file-window'
+import {
+  expandReadFileWindow,
+  MIN_READ_FILE_LINES,
+  readFileMinimumLines
+} from './read-file-window'
 
 const execAsync = promisify(exec)
 
@@ -374,7 +378,9 @@ function describeToolCall(
       title: `read_file · ${pathValue || '未指定文件'}`,
       detail: `正在读取 ${pathValue}${
           args.around_line
-          ? ` 第 ${String(args.around_line)} 行附近至少 ${MIN_READ_FILE_LINES} 行`
+          ? args.__edit_context
+            ? ` 第 ${String(args.around_line)} 行附近的编辑校验上下文`
+            : ` 第 ${String(args.around_line)} 行附近至少 ${MIN_READ_FILE_LINES} 行`
           : args.start_line
           ? ` 第 ${String(args.start_line)}-${String(args.end_line || '末尾')} 行`
           : ''
@@ -2228,7 +2234,7 @@ export async function runAgent(
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
   const requiresWorkspaceEdit =
     request.permissionMode !== 'read-only' &&
-    /(?:修改|修复|改写|润色|替换|编辑|写入|更新|补写|补充|删除|添加|新增|实现)/i.test(
+    /(?:修改|修复|改写|润色|替换|编辑|写入|更新|补写|补充|删除|删掉|去掉|添加|新增|实现|调整|纠正|改掉)/i.test(
       currentTaskText
     )
   const hasWritingFileContext =
@@ -2380,14 +2386,17 @@ export async function runAgent(
           args.end_line,
           args.around_line
         ].some((value) => Number.isSafeInteger(Number(value)) && Number(value) >= 1)
-        if (!selectedRange || hasExplicitRange) return { arguments: args }
+        if (!selectedRange || hasExplicitRange) {
+          return {
+            arguments: args,
+            presentation: requiresWorkspaceEdit ? { ...args, __edit_context: true } : undefined
+          }
+        }
         const current = await readTextFile(request.workspaceRoot, relative)
         const totalLines = current.split(/\r?\n/).length
-        const expanded = expandReadFileWindow(
-          totalLines,
-          selectedRange.startLine,
-          selectedRange.endLine
-        )
+        const expanded = requiresWorkspaceEdit
+          ? { start: selectedRange.startLine, end: selectedRange.endLine }
+          : expandReadFileWindow(totalLines, selectedRange.startLine, selectedRange.endLine)
         const normalizedArguments = {
           ...args,
           start_line: expanded.start,
@@ -2396,7 +2405,9 @@ export async function runAgent(
         return {
           arguments: normalizedArguments,
           note: `已根据用户选区自动补充上下文：${relative} 第 ${normalizedArguments.start_line}-${normalizedArguments.end_line} 行；选区仅作为初始锚点，读取后仍需判断是否检索其他文件或网页资料。`,
-          presentation: normalizedArguments
+          presentation: requiresWorkspaceEdit
+            ? { ...normalizedArguments, __edit_context: true }
+            : normalizedArguments
         }
       } catch {
         return { arguments: args }
@@ -2986,7 +2997,7 @@ export async function runAgent(
       function: {
         name: 'read_file',
         description:
-          `按行读取 grep 返回的本地资料路径并返回行号。path 支持 CWD 相对路径、@history/ 会话历史虚拟路径与 @papers/ 论文缓存虚拟路径。每次至少返回 ${MIN_READ_FILE_LINES} 行；文件不足 ${MIN_READ_FILE_LINES} 行时返回全文。默认优先提供 around_line+context_lines，或 start_line+end_line 定位区间；位置未知时必须先调用 grep 全局定位。`,
+          `按行读取 grep 返回的本地资料路径并返回行号。path 支持 CWD 相对路径、@history/ 会话历史虚拟路径与 @papers/ 论文缓存虚拟路径。普通资料读取每次至少返回 ${MIN_READ_FILE_LINES} 行，文件不足 ${MIN_READ_FILE_LINES} 行时返回全文；文件编辑前的校验读取保持模型指定的精确区间，不强制扩展。默认优先提供 around_line+context_lines，或 start_line+end_line 定位区间；位置未知时必须先调用 grep 全局定位。`,
         parameters: {
           type: 'object',
           required: ['path'],
@@ -3002,7 +3013,7 @@ export async function runAgent(
             context_lines: {
               type: 'integer',
               minimum: 1,
-              description: `around_line 上下各读取多少行，默认 ${Math.floor(MIN_READ_FILE_LINES / 2)}；最终区间不足 ${MIN_READ_FILE_LINES} 行时自动扩展`
+              description: `around_line 上下各读取多少行；普通资料读取默认 ${Math.floor(MIN_READ_FILE_LINES / 2)} 并自动扩展到至少 ${MIN_READ_FILE_LINES} 行，编辑校验读取默认 50 且保持精确区间`
             }
           }
         }
@@ -3045,7 +3056,9 @@ export async function runAgent(
       const contextLines =
         Number.isSafeInteger(Number(args.context_lines)) && Number(args.context_lines) >= 1
           ? Number(args.context_lines)
-          : Math.floor(MIN_READ_FILE_LINES / 2)
+          : requiresWorkspaceEdit
+            ? 50
+            : Math.floor(MIN_READ_FILE_LINES / 2)
       const hasStart = Number.isSafeInteger(Number(args.start_line)) && Number(args.start_line) >= 1
       const hasEnd = Number.isSafeInteger(Number(args.end_line)) && Number(args.end_line) >= 1
       const hasExplicitInterval = aroundLine > 0 || (hasStart && hasEnd)
@@ -3076,7 +3089,12 @@ export async function runAgent(
       const requestedEnd = aroundLine
         ? Math.min(lines.length, aroundLine + contextLines)
         : Math.min(lines.length, hasEnd ? Number(args.end_line) : lines.length)
-      const { start, end } = expandReadFileWindow(lines.length, requestedStart, requestedEnd)
+      const { start, end } = expandReadFileWindow(
+        lines.length,
+        requestedStart,
+        requestedEnd,
+        readFileMinimumLines(requiresWorkspaceEdit)
+      )
       if (end < start) throw new Error(`读取区间无效：${start}-${end}`)
       if (!isVirtualSource) {
         markFileRead(relative, { startLine: start, endLine: end, totalLines: lines.length }, content)
@@ -3779,7 +3797,7 @@ export async function runAgent(
   const systemPrompt = [
     '执行控制最高优先级：只处理最后一个 <current_task>；禁止复盘、分析、续做或评价任何已完成历史请求。',
     '推理控制最高优先级：只进行完成当前任务所需的最短必要推理，确认目标后立即执行；禁止反复解释意图、复述历史、模拟多套方案、自我辩论或为了展示过程延长思考。',
-    '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认上下文；未读取时工具层会拒绝写入。',
+    '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认目标区间上下文；此类编辑校验读取保持精确区间，不受普通资料读取至少 1000 行规则限制。未读取时工具层会拒绝写入。',
     '用户编辑锁最高优先级：用户可能在你思考或等待确认期间亲自修改文件。工具若返回“用户编辑锁”，当前 edit 必须失败；必须按错误提示重新 read_file 读取用户修改区间，基于最新文本重新分析后才能发起新的 edit，严禁直接重试或覆盖用户改动。',
     '编辑工具最高优先级：完成 read_file 后，目标文件已存在且非空时，必须优先调用 replace_in_file；已知精确行号时可调用 replace_lines，仅插入内容时调用 insert_lines。create_file 仅可创建新文件或初始化已读取过的空文件，严禁用它编辑非空文件。',
     `资料检索最高优先级：本地资料库的重要性高于网页。grep 是唯一的本地检索工具；默认必须省略 path，全局检索当前 CWD 全部项目文件、会话历史虚拟文件与论文缓存。只有用户明确限定单个文件，或全局命中后需要二次收窄时才允许传 path。query 使用 a | b 表示 OR，a & b 表示同一文件内 AND。查最新剧情或文件末尾信息使用 order=desc，查久远剧情或文件开头信息使用 order=asc，默认 asc。grep 每个命中返回前后各 5 行窗口及可读取 path；确认相关后调用 read_file 扩读至少 ${MIN_READ_FILE_LINES} 行，文件不足 ${MIN_READ_FILE_LINES} 行时读取全文。已有用户选区或明确行号只能作为定位锚点，不能替代对其他本地资料的检索。`,

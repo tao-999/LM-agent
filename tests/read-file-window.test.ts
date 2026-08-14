@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 import {
   expandReadFileWindow,
-  MIN_READ_FILE_LINES
+  MIN_READ_FILE_LINES,
+  readFileMinimumLines
 } from '../src/main/read-file-window.ts'
 
 test('小于最小区间的文件始终读取全文', () => {
@@ -23,4 +26,23 @@ test('文件开头和结尾仍保持一千行完整窗口', () => {
 
 test('模型主动请求超过一千行时保留原区间', () => {
   assert.deepEqual(expandReadFileWindow(5000, 800, 2200), { start: 800, end: 2200 })
+})
+
+test('编辑前置读取保持精确区间且不触发千行扩展', () => {
+  assert.equal(readFileMinimumLines(true), 1)
+  assert.deepEqual(
+    expandReadFileWindow(5000, 2400, 2410, readFileMinimumLines(true)),
+    { start: 2400, end: 2410 }
+  )
+})
+
+test('普通资料读取继续执行千行规则', () => {
+  assert.equal(readFileMinimumLines(false), MIN_READ_FILE_LINES)
+})
+
+test('Agent 将编辑意图接入精确读取分支', async () => {
+  const source = await fs.readFile(path.resolve('src/main/agent.ts'), 'utf8')
+  assert.match(source, /readFileMinimumLines\(requiresWorkspaceEdit\)/)
+  assert.match(source, /requiresWorkspaceEdit\s*\?\s*50/)
+  assert.match(source, /编辑校验读取保持精确区间/)
 })

@@ -1,5 +1,9 @@
 export const MIN_READ_FILE_LINES = 1000
 
+export function readFileMinimumLines(editContext: boolean): number {
+  return editContext ? 1 : MIN_READ_FILE_LINES
+}
+
 export interface ReadFileWindow {
   start: number
   end: number
