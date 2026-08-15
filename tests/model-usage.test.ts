@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   cachedPromptTokensFromOpenAiPayload,
+  generationDurationFromOpenAiTimings,
   mergeOpenAiTimingsPayload,
   mergeOpenAiUsagePayload
 } from '../src/main/model-usage.ts'
@@ -67,4 +68,42 @@ test('Responses API 的 input_tokens_details.cached_tokens 会被保留', () => 
   assert.equal(usage.output_tokens, 8)
   assert.equal(usage.total_tokens, 696)
   assert.equal(cachedPromptTokensFromOpenAiPayload(usage), 667)
+})
+
+test('LM Studio 输出速度只采用模型生成耗时，不包含预加载与提示词处理', () => {
+  assert.equal(
+    generationDurationFromOpenAiTimings(400, {
+      prompt_n: 20_000,
+      predicted_n: 400,
+      predicted_ms: 10_000,
+      predicted_per_second: 40
+    }),
+    10_000
+  )
+})
+
+test('缺少 predicted_ms 时按 LM Studio predicted_per_second 还原纯生成耗时', () => {
+  assert.equal(
+    generationDurationFromOpenAiTimings(600, {
+      predicted_n: 600,
+      predicted_per_second: 40
+    }),
+    15_000
+  )
+})
+
+test('合并流式 timings 时保留最终生成速度', () => {
+  assert.deepEqual(
+    mergeOpenAiTimingsPayload(
+      { predicted_n: 100, predicted_ms: 2_500, predicted_per_second: 40 },
+      { predicted_n: 200, predicted_ms: 5_000, predicted_per_second: 41.25 }
+    ),
+    {
+      cache_n: undefined,
+      prompt_n: undefined,
+      predicted_n: 200,
+      predicted_ms: 5_000,
+      predicted_per_second: 41.25
+    }
+  )
 })

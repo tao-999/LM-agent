@@ -26,38 +26,36 @@ test('Qwen3.8 使用会话选择的思考等级', () => {
   assert.equal(qwen38ReasoningEffort({ ...qwen38, reasoningEffort: 'low' }, true), 'low')
 })
 
-test('LM Studio 仅公布 on/off 时只发送 Thinking 开关', () => {
+test('LM Studio 的 on/off 能力声明不影响 Qwen3.8 模板思考等级', () => {
   assert.deepEqual(
     qwen38LmStudioThinkingOptions({
       ...qwen38,
-      reasoningEffort: 'xhigh',
-      reasoningOptions: ['off', 'on']
+      reasoningEffort: 'xhigh'
     }, true),
     {
       chat_template_kwargs: {
         enable_thinking: true,
-        preserve_thinking: true
+        preserve_thinking: true,
+        reasoning_effort: 'xhigh'
       }
     }
   )
-  assert.deepEqual(qwen38LmStudioThinkingOptions({ ...qwen38, reasoningOptions: ['off', 'on'] }, false), {
+  assert.deepEqual(qwen38LmStudioThinkingOptions(qwen38, false), {
     chat_template_kwargs: {
       enable_thinking: false,
       preserve_thinking: false
     }
   })
-  assert.equal(supportsReasoningEffort({ reasoningOptions: ['off', 'on'] }), false)
+  assert.equal(supportsReasoningEffort({ ...qwen38, reasoningOptions: ['off', 'on'] }), true)
 })
 
-test('LM Studio 公布分级能力时才发送 reasoning_effort', () => {
+test('Qwen3.8 仅通过 chat_template_kwargs 发送 reasoning_effort', () => {
   assert.deepEqual(
     qwen38LmStudioThinkingOptions({
       ...qwen38,
-      reasoningEffort: 'low',
-      reasoningOptions: ['off', 'low', 'medium', 'high']
+      reasoningEffort: 'low'
     }, true),
     {
-      reasoning_effort: 'low',
       chat_template_kwargs: {
         enable_thinking: true,
         preserve_thinking: true,
@@ -65,7 +63,10 @@ test('LM Studio 公布分级能力时才发送 reasoning_effort', () => {
       }
     }
   )
-  assert.equal(supportsReasoningEffort({ reasoningOptions: ['off', 'low', 'high'] }), true)
+  assert.equal(
+    supportsReasoningEffort({ ...qwen38, reasoningOptions: ['off', 'low', 'high'] }),
+    true
+  )
 })
 
 test('关闭 Thinking 或使用旧版 Qwen 时不发送 Qwen3.8 思考等级', () => {
@@ -76,7 +77,7 @@ test('关闭 Thinking 或使用旧版 Qwen 时不发送 Qwen3.8 思考等级', (
 test('输入栏仅为 Qwen3.8 展示会话级思考等级并压缩自动控件', () => {
   const panel = readFileSync('src/renderer/src/components/ChatPanel.tsx', 'utf8')
   const styles = readFileSync('src/renderer/src/macos.css', 'utf8')
-  assert.match(panel, /isQwen38Model\(model\) && supportsReasoningEffort\(model\)/)
+  assert.match(panel, /const qwen38Reasoning = isQwen38Model\(model\)/)
   assert.match(panel, /className="reasoning-effort-picker"/)
   assert.match(panel, /setConversationReasoningEffort/)
   assert.match(styles, /\.permission-picker \.mac-select-trigger span[\s\S]*font-size:8px/)

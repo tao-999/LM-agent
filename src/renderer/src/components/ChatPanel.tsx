@@ -78,7 +78,6 @@ import type {
 import {
   inferThinkingCapability,
   isQwen38Model,
-  supportsReasoningEffort,
   thinkingModelKey
 } from '../../../shared/thinking'
 import { shouldShowSavedModelFallback } from '../../../shared/model-options'
@@ -786,11 +785,10 @@ const AgentStepBlock = memo(function AgentStepBlock({
   const running = messageStatus === 'streaming'
   if (block.type === 'operation') {
     const title = block.title || block.toolName || '执行操作'
-    const active = running && (block.status === 'running' || block.status === 'waiting')
     return (
       <CollapsibleStep
         className={`agent-step-card operation ${block.status}`}
-        initiallyOpen={active}
+        initiallyOpen={false}
       >
         <summary>
           <i>
@@ -890,7 +888,7 @@ const AgentStepBlock = memo(function AgentStepBlock({
   if (block.type === 'thinking') {
     const thinking = messageStatus === 'streaming' && block.status !== 'done'
     return (
-      <CollapsibleStep className="agent-step-card thinking" initiallyOpen={thinking}>
+      <CollapsibleStep className="agent-step-card thinking" initiallyOpen>
         <summary>
           <i>
             {thinking ? <LoaderCircle size={12} className="spin" /> : <Check size={12} />}
@@ -1683,7 +1681,7 @@ export function ChatPanel(): React.JSX.Element {
   const reasoningEffort = conversation?.reasoningEffort ?? 'xhigh'
   const useAgentWorkflow = conversation?.useAgentWorkflow !== false
   const thinkingCapability = inferThinkingCapability(model)
-  const qwen38Reasoning = isQwen38Model(model) && supportsReasoningEffort(model)
+  const qwen38Reasoning = isQwen38Model(model)
   const requestModel = { ...model, thinkingMode, reasoningEffort }
   const floatingTaskState = useMemo(() => {
     const latestAssistant = [...renderedMessages]
@@ -2244,7 +2242,7 @@ export function ChatPanel(): React.JSX.Element {
   ): string => {
     const totalLines = content.split(/\r?\n/).length
     if (mode === 'agent' && totalLines > 200) {
-      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 grep 全局定位关键词，再用 read_file 读取命中附近至少 1000 行。</file_reference>`
+      return `\n\n<file_reference path="${filePath}" total_lines="${totalLines}">长文件未直接载入全文。请先调用 grep 定位关键词，再由 AI 使用 read_file 自主选择必要区间或读取全文。</file_reference>`
     }
     return `\n\n<${tag} path="${filePath}">\n${content}\n</${tag}>`
   }

@@ -21,30 +21,23 @@ export function qwen38ReasoningEffort(
 }
 
 export function qwen38LmStudioThinkingOptions(
-  model: Pick<ModelConfig, 'model' | 'reasoningEffort' | 'reasoningOptions'>,
+  model: Pick<ModelConfig, 'model' | 'reasoningEffort'>,
   enabled: boolean
 ): Record<string, unknown> {
   const effort = qwen38ReasoningEffort(model, enabled)
-  const supportsEffort = Boolean(
-    model.reasoningOptions?.some((option) =>
-      ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(option)
-    )
-  )
   return {
-    ...(supportsEffort
-      ? { reasoning_effort: enabled ? (effort ?? 'xhigh') : 'none' }
-      : {}),
     chat_template_kwargs: {
       enable_thinking: enabled,
       preserve_thinking: enabled,
-      ...(supportsEffort && effort ? { reasoning_effort: effort } : {})
+      ...(effort ? { reasoning_effort: effort } : {})
     }
   }
 }
 
 export function supportsReasoningEffort(
-  model: Pick<ModelConfig, 'reasoningOptions'>
+  model: Pick<ModelConfig, 'model' | 'reasoningOptions'>
 ): boolean {
+  if (isQwen38Model(model)) return true
   return Boolean(
     model.reasoningOptions?.some((option) =>
       ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(option)

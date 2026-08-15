@@ -15,6 +15,8 @@ export type OpenAiTimingsPayload = {
   cache_n?: number
   prompt_n?: number
   predicted_n?: number
+  predicted_ms?: number
+  predicted_per_second?: number
 }
 
 function maxDefined(left?: number, right?: number): number | undefined {
@@ -65,8 +67,28 @@ export function mergeOpenAiTimingsPayload(
   return {
     cache_n: maxDefined(previous?.cache_n, incoming.cache_n),
     prompt_n: maxDefined(previous?.prompt_n, incoming.prompt_n),
-    predicted_n: maxDefined(previous?.predicted_n, incoming.predicted_n)
+    predicted_n: maxDefined(previous?.predicted_n, incoming.predicted_n),
+    predicted_ms: maxDefined(previous?.predicted_ms, incoming.predicted_ms),
+    predicted_per_second:
+      incoming.predicted_per_second ?? previous?.predicted_per_second
   }
+}
+
+export function generationDurationFromOpenAiTimings(
+  completionTokens: number,
+  timings?: OpenAiTimingsPayload
+): number | undefined {
+  if (typeof timings?.predicted_ms === 'number' && timings.predicted_ms > 0) {
+    return timings.predicted_ms
+  }
+  if (
+    completionTokens > 0 &&
+    typeof timings?.predicted_per_second === 'number' &&
+    timings.predicted_per_second > 0
+  ) {
+    return (completionTokens / timings.predicted_per_second) * 1000
+  }
+  return undefined
 }
 
 export function cachedPromptTokensFromOpenAiPayload(

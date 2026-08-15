@@ -2,47 +2,28 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import {
-  expandReadFileWindow,
-  MIN_READ_FILE_LINES,
-  readFileMinimumLines
-} from '../src/main/read-file-window.ts'
+import { expandReadFileWindow } from '../src/main/read-file-window.ts'
 
-test('小于最小区间的文件始终读取全文', () => {
-  assert.deepEqual(expandReadFileWindow(420, 200, 210), { start: 1, end: 420 })
+test('模型指定的窄区间保持原样', () => {
+  assert.deepEqual(expandReadFileWindow(420, 200, 210), { start: 200, end: 210 })
 })
 
-test('窄区间围绕目标扩展为至少一千行', () => {
-  const window = expandReadFileWindow(5000, 2400, 2410)
-  assert.equal(window.end - window.start + 1, MIN_READ_FILE_LINES)
-  assert.ok(window.start <= 2400)
-  assert.ok(window.end >= 2410)
-})
-
-test('文件开头和结尾仍保持一千行完整窗口', () => {
-  assert.deepEqual(expandReadFileWindow(5000, 1, 10), { start: 1, end: 1000 })
-  assert.deepEqual(expandReadFileWindow(5000, 4990, 5000), { start: 4001, end: 5000 })
-})
-
-test('模型主动请求超过一千行时保留原区间', () => {
+test('模型指定的大区间保持原样', () => {
   assert.deepEqual(expandReadFileWindow(5000, 800, 2200), { start: 800, end: 2200 })
 })
 
-test('编辑前置读取保持精确区间且不触发千行扩展', () => {
-  assert.equal(readFileMinimumLines(true), 1)
-  assert.deepEqual(
-    expandReadFileWindow(5000, 2400, 2410, readFileMinimumLines(true)),
-    { start: 2400, end: 2410 }
-  )
+test('越界行号只做安全截取，不扩大区间', () => {
+  assert.deepEqual(expandReadFileWindow(5000, -20, 10), { start: 1, end: 10 })
+  assert.deepEqual(expandReadFileWindow(5000, 4990, 9000), { start: 4990, end: 5000 })
 })
 
-test('普通资料读取继续执行千行规则', () => {
-  assert.equal(readFileMinimumLines(false), MIN_READ_FILE_LINES)
+test('起止行反向时自动排序', () => {
+  assert.deepEqual(expandReadFileWindow(5000, 2410, 2400), { start: 2400, end: 2410 })
 })
 
-test('Agent 将编辑意图接入精确读取分支', async () => {
+test('Agent 不再强制最小读取行数，但保留全文 50% 防爆拦截', async () => {
   const source = await fs.readFile(path.resolve('src/main/agent.ts'), 'utf8')
-  assert.match(source, /readFileMinimumLines\(requiresWorkspaceEdit\)/)
-  assert.match(source, /requiresWorkspaceEdit\s*\?\s*50/)
-  assert.match(source, /编辑校验读取保持精确区间/)
+  assert.doesNotMatch(source, /MIN_READ_FILE_LINES|readFileMinimumLines/)
+  assert.match(source, /超过当前模型上下文 50% 阈值/)
+  assert.match(source, /工具不会强制扩展读取范围/)
 })

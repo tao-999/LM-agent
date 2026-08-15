@@ -25,6 +25,7 @@ import {
 } from '../shared/model-profiles'
 import {
   cachedPromptTokensFromOpenAiPayload,
+  generationDurationFromOpenAiTimings,
   mergeOpenAiTimingsPayload,
   mergeOpenAiUsagePayload,
   type OpenAiTimingsPayload,
@@ -115,7 +116,7 @@ function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: numb
     usage.promptTokens,
     usage.completionTokens,
     Boolean(usage.estimated),
-    generationDurationMs,
+    usage.generationDurationMs ?? generationDurationMs,
     usage.cachedPromptTokens ?? 0
   )
 }
@@ -142,7 +143,13 @@ export function tokenUsageFromOpenAiPayload(
     Math.max(0, (timings?.prompt_n ?? 0) + cachedPromptTokens)
   )
   const completionTokens = usage?.completion_tokens ?? usage?.output_tokens ?? timings?.predicted_n ?? 0
-  return createUsage(promptTokens, completionTokens, false, undefined, cachedPromptTokens)
+  return createUsage(
+    promptTokens,
+    completionTokens,
+    false,
+    generationDurationFromOpenAiTimings(completionTokens, timings),
+    cachedPromptTokens
+  )
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -1012,6 +1019,9 @@ function isQwenModel(model: ModelConfig): boolean {
 
 function responsesThinkingOptions(model: ModelConfig): Record<string, unknown> {
   const enabled = resolveThinkingEnabled(model)
+  if (isLmStudioEndpoint(model) && isQwen38Model(model) && typeof enabled === 'boolean') {
+    return qwen38LmStudioThinkingOptions(model, enabled)
+  }
   if (enabled === false) return { reasoning: { effort: 'none' } }
   const available = model.reasoningOptions ?? []
   const selected = model.reasoningEffort
