@@ -468,6 +468,7 @@ export default function App(): React.JSX.Element {
   const workspaceRoot = useAppStore((state) => state.workspaceRoot)
   const workspaceRoots = useAppStore((state) => state.workspaceRoots)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
   const [projectWidth, setProjectWidth] = useState(() =>
     Number(localStorage.getItem('layout-project-width') || 260)
   )
@@ -512,6 +513,16 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem('layout-chat-width', String(chatWidth))
   }, [chatWidth])
+
+  useEffect(() => {
+    let active = true
+    void window.localAgent.app.getVersion().then((version) => {
+      if (active) setAppVersion(version)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
 
   const openFile = async (filePath: string, line?: number): Promise<void> => {
     const state = useAppStore.getState()
@@ -1206,7 +1217,7 @@ export default function App(): React.JSX.Element {
             <h2>星伴 AI</h2>
             <p>你的本地 AI 工作伙伴</p>
             <dl>
-                <div><dt>版本</dt><dd>0.7.147</dd></div>
+              <div><dt>版本</dt><dd>{appVersion || '读取中…'}</dd></div>
               <div><dt>运行方式</dt><dd>本地优先</dd></div>
               <div><dt>数据存储</dt><dd>仅保存在本机</dd></div>
             </dl>

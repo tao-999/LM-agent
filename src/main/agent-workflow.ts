@@ -2,6 +2,10 @@ export type AgentWorkflowStage = 'understand' | 'tasks' | 'execute'
 export type AgentToolRisk = 'read' | 'write' | 'create' | 'delete' | 'command'
 export type AgentPermissionMode = 'read-only' | 'read-write-manual' | 'read-write-auto'
 
+export function initialWorkflowStage(useWorkflow: boolean): AgentWorkflowStage {
+  return useWorkflow ? 'understand' : 'execute'
+}
+
 export function toolAvailableInStage(
   stage: AgentWorkflowStage,
   toolName: string

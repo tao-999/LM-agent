@@ -35,8 +35,15 @@ export function MacSelect({
   menuMinWidth = 0
 }: MacSelectProps): React.JSX.Element {
   const anchorRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
-  const [position, setPosition] = useState({ left: 0, top: 0, width: 340, maxHeight: 300 })
+  const [position, setPosition] = useState(() => ({
+    left: 0,
+    top: 0,
+    minWidth: 0,
+    maxWidth: typeof window === 'undefined' ? 340 : Math.max(0, window.innerWidth - 16),
+    maxHeight: 300
+  }))
   const flatOptions = useMemo(() => groups.flatMap((group) => group.options), [groups])
   const selected = flatOptions.find((option) => option.value === value)
 
@@ -50,14 +57,15 @@ export function MacSelect({
       const menuHeight = Math.min(300, Math.max(86, flatOptions.length * 28 + groups.filter((group) => group.label).length * 22 + 10))
       const opensUp = roomBelow < Math.min(220, menuHeight) && rect.top > roomBelow
       const maxHeight = Math.min(300, opensUp ? roomAbove : roomBelow)
-      const menuWidth = Math.min(
-        Math.max(rect.width, menuMinWidth),
-        window.innerWidth - 16
-      )
+      const maxWidth = Math.max(0, window.innerWidth - 16)
+      const minWidth = Math.min(Math.max(rect.width, menuMinWidth), maxWidth)
+      const measuredWidth = menuRef.current?.getBoundingClientRect().width ?? minWidth
+      const menuWidth = Math.min(Math.max(measuredWidth, minWidth), maxWidth)
       setPosition({
         left: Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)),
         top: opensUp ? Math.max(8, rect.top - Math.min(menuHeight, maxHeight) - 2) : rect.bottom + 2,
-        width: menuWidth,
+        minWidth,
+        maxWidth,
         maxHeight: Math.max(86, maxHeight)
       })
     }
@@ -99,9 +107,17 @@ export function MacSelect({
       </button>
       {open && createPortal(
         <div
+          ref={menuRef}
           className="mac-select-menu"
           role="listbox"
-          style={{ left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight }}
+          style={{
+            left: position.left,
+            top: position.top,
+            width: 'max-content',
+            minWidth: position.minWidth,
+            maxWidth: position.maxWidth,
+            maxHeight: position.maxHeight
+          }}
         >
           {groups.map((group, groupIndex) => (
             <section className="mac-select-group" key={`${group.label ?? 'group'}-${groupIndex}`}>

@@ -44,6 +44,7 @@ import {
   unloadLocalModel,
   type LlmMessage
 } from './models'
+import { GenerationInterruptLatch } from './generation-interrupt'
 import type {
   AgentApproval,
   AgentGuideRequest,
@@ -64,6 +65,7 @@ import type {
 let mainWindow: BrowserWindow | null = null
 const chatControllers = new Map<string, AbortController>()
 const agentControllers = new Map<string, AbortController>()
+const generationInterrupts = new GenerationInterruptLatch()
 const imageControllers = new Map<string, AbortController>()
 const agentGuidanceQueues = new Map<string, AgentGuideRequest[]>()
 const agentUserFileEditStates = new Map<
@@ -603,6 +605,7 @@ function registerIpc(): void {
   ipcMain.handle('app:openExternal', async (_event, url: string) =>
     openExternalUrl(url)
   )
+  ipcMain.handle('app:getVersion', () => app.getVersion())
   ipcMain.handle('credentials:getKimiCodeApiKey', async () =>
     (await readSecureCredentials()).kimiCodeApiKey ?? ''
   )
@@ -910,7 +913,8 @@ function registerIpc(): void {
       request.workspaceRoot,
       Boolean(request.forceWebSearch),
       request.historyArchive ?? [],
-      request.webSearch
+      request.webSearch,
+      () => generationInterrupts.take(request.requestId)
     )
     void chatTask
       .then((usage) =>
@@ -931,7 +935,10 @@ function registerIpc(): void {
           })
         }
       })
-      .finally(() => chatControllers.delete(request.requestId))
+      .finally(() => {
+        chatControllers.delete(request.requestId)
+        generationInterrupts.clear(request.requestId)
+      })
     return true
   })
 
@@ -939,6 +946,9 @@ function registerIpc(): void {
     chatControllers.get(requestId)?.abort()
     return true
   })
+  ipcMain.handle('chat:interrupt-repetition', (_event, requestId: string) =>
+    generationInterrupts.request(requestId)
+  )
 
   ipcMain.handle('agent:start', async (_event, request: AgentStartRequest) => {
     await prepareSingleModelRuntime(request.model)
@@ -997,7 +1007,8 @@ function registerIpc(): void {
         if (!normalized || !state) return
         const lock = state.locks.get(normalized)
         if (lock?.revision === revision) state.locks.delete(normalized)
-      }
+      },
+      () => generationInterrupts.take(request.requestId)
     )
       .catch((error) => {
         send('agent:event', {
@@ -1011,6 +1022,7 @@ function registerIpc(): void {
       })
       .finally(() => {
         agentControllers.delete(request.requestId)
+        generationInterrupts.clear(request.requestId)
         agentGuidanceQueues.delete(request.requestId)
         agentUserFileEditStates.delete(request.requestId)
       })
@@ -1052,6 +1064,9 @@ function registerIpc(): void {
     agentControllers.get(requestId)?.abort()
     return true
   })
+  ipcMain.handle('agent:interrupt-repetition', (_event, requestId: string) =>
+    generationInterrupts.request(requestId)
+  )
   ipcMain.handle(
     'agent:approve',
     (_event, requestId: string, approvalId: string, approved: boolean) => {

@@ -37,6 +37,17 @@ export type ModelPreset = 'kimi-code'
 
 export type ThinkingMode = 'auto' | 'on' | 'off'
 
+export type ReasoningEffort = 'xhigh' | 'medium' | 'low'
+
+export type PublicReasoningOption =
+  | 'off'
+  | 'on'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+
 export type ModelConfig = {
   provider: ModelProvider
   baseUrl: string
@@ -47,6 +58,9 @@ export type ModelConfig = {
   contextLength?: number
   maxContextLength?: number
   thinkingMode?: ThinkingMode
+  reasoningEffort?: ReasoningEffort
+  reasoningOptions?: PublicReasoningOption[]
+  defaultReasoningOption?: PublicReasoningOption
 }
 
 export type SkillDefinition = {
@@ -68,6 +82,8 @@ export type ModelOption = {
   connectionId?: string
   contextLength?: number
   maxContextLength?: number
+  reasoningOptions?: PublicReasoningOption[]
+  defaultReasoningOption?: PublicReasoningOption
 }
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
@@ -329,6 +345,7 @@ export type AgentStartRequest = {
   skills: SkillDefinition[]
   attachments: ChatAttachment[]
   permissionMode: AgentPermissionMode
+  useWorkflow?: boolean
   confirmCreateDelete?: boolean
   contextMessages: ChatContextMessage[]
   historyArchive?: ChatContextMessage[]
@@ -432,7 +449,9 @@ export type PersistedConversation = {
   mode: ConversationMode
   model?: ModelConfig
   thinkingMode?: ThinkingMode
+  reasoningEffort?: ReasoningEffort
   skillIds?: string[]
+  useAgentWorkflow?: boolean
   messages: ChatMessage[]
   contextMemory?: {
     summary: string

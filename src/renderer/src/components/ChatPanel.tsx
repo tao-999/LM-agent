@@ -72,12 +72,16 @@ import type {
   ConversationMode,
   FileNode,
   ModelOption,
+  ReasoningEffort,
   ThinkingMode
 } from '../../../shared/types'
 import {
   inferThinkingCapability,
+  isQwen38Model,
+  supportsReasoningEffort,
   thinkingModelKey
 } from '../../../shared/thinking'
+import { shouldShowSavedModelFallback } from '../../../shared/model-options'
 import { MacSelect } from './MacSelect'
 import { markdownKatexOptions, normalizeMarkdownMath } from '../markdown'
 import { useAppStore } from '../store'
@@ -1600,8 +1604,14 @@ export function ChatPanel(): React.JSX.Element {
   const createConversation = useAppStore((state) => state.createConversation)
   const setConversationMode = useAppStore((state) => state.setConversationMode)
   const setConversationSkillIds = useAppStore((state) => state.setConversationSkillIds)
+  const setConversationAgentWorkflow = useAppStore(
+    (state) => state.setConversationAgentWorkflow
+  )
   const setConversationThinkingMode = useAppStore(
     (state) => state.setConversationThinkingMode
+  )
+  const setConversationReasoningEffort = useAppStore(
+    (state) => state.setConversationReasoningEffort
   )
   const setActiveConversation = useAppStore((state) => state.setActiveConversation)
   const deleteConversation = useAppStore((state) => state.deleteConversation)
@@ -1657,7 +1667,6 @@ export function ChatPanel(): React.JSX.Element {
   const comfyScanStartedRef = useRef(false)
   const skillButtonRef = useRef<HTMLButtonElement>(null)
   const skillMenuRef = useRef<HTMLDivElement>(null)
-  const retryAfterLoopStopRef = useRef(false)
 
   const conversation =
     conversations.find((item) => item.id === activeConversationId) ?? conversations[0]
@@ -1671,8 +1680,11 @@ export function ChatPanel(): React.JSX.Element {
     [skills, conversation?.skillIds]
   )
   const thinkingMode = conversation?.thinkingMode ?? 'auto'
+  const reasoningEffort = conversation?.reasoningEffort ?? 'xhigh'
+  const useAgentWorkflow = conversation?.useAgentWorkflow !== false
   const thinkingCapability = inferThinkingCapability(model)
-  const requestModel = { ...model, thinkingMode }
+  const qwen38Reasoning = isQwen38Model(model) && supportsReasoningEffort(model)
+  const requestModel = { ...model, thinkingMode, reasoningEffort }
   const floatingTaskState = useMemo(() => {
     const latestAssistant = [...renderedMessages]
       .reverse()
@@ -1881,12 +1893,17 @@ export function ChatPanel(): React.JSX.Element {
       if (
         matched &&
         (matched.contextLength !== current.contextLength ||
-          matched.maxContextLength !== current.maxContextLength)
+          matched.maxContextLength !== current.maxContextLength ||
+          JSON.stringify(matched.reasoningOptions ?? []) !==
+            JSON.stringify(current.reasoningOptions ?? []) ||
+          matched.defaultReasoningOption !== current.defaultReasoningOption)
       ) {
         setModel({
           ...current,
           contextLength: matched.contextLength,
-          maxContextLength: matched.maxContextLength
+          maxContextLength: matched.maxContextLength,
+          reasoningOptions: matched.reasoningOptions,
+          defaultReasoningOption: matched.defaultReasoningOption
         })
       }
     } finally {
@@ -2097,18 +2114,12 @@ export function ChatPanel(): React.JSX.Element {
         source: '自定义',
         connectionId: item.connectionId,
         contextLength: item.contextLength,
-        maxContextLength: item.maxContextLength
+        maxContextLength: item.maxContextLength,
+        reasoningOptions: item.reasoningOptions,
+        defaultReasoningOption: item.defaultReasoningOption
       }))
     const available = [...KIMI_CODE_MODELS, ...customModelOptions, ...modelOptions]
-    if (
-      model.model &&
-      !available.some(
-        (item) =>
-          item.name === model.model &&
-          item.provider === model.provider &&
-          item.baseUrl === model.baseUrl
-      )
-    ) {
+    if (shouldShowSavedModelFallback(model, available, modelOptions)) {
       return [
         {
           id: `saved:${model.model}`,
@@ -2126,7 +2137,9 @@ export function ChatPanel(): React.JSX.Element {
           preset: model.preset,
           connectionId: model.connectionId,
           contextLength: model.contextLength,
-          maxContextLength: model.maxContextLength
+          maxContextLength: model.maxContextLength,
+          reasoningOptions: model.reasoningOptions,
+          defaultReasoningOption: model.defaultReasoningOption
         },
         ...available
       ]
@@ -2483,6 +2496,7 @@ export function ChatPanel(): React.JSX.Element {
         skills: selectedSkills,
         attachments: requestAttachments,
         permissionMode: agentPermissionMode,
+        useWorkflow: requestConversation.useAgentWorkflow !== false,
         contextMessages: contextHistory.recent,
         historyArchive: contextHistory.archive
       })
@@ -2537,64 +2551,21 @@ export function ChatPanel(): React.JSX.Element {
     if (info.kind === 'image') return
     setRestartingAfterLoopStop(true)
     try {
-      const assistantIndex = conversation.messages.findIndex(
-        (message) => message.id === info.assistantId
+      const accepted =
+        info.kind === 'agent'
+          ? await window.localAgent.agent.interruptRepetition(requestId)
+          : await window.localAgent.chat.interruptRepetition(requestId)
+      setActionNotice(
+        accepted
+          ? '已手动截断当前输出，将在本会话原地继续'
+          : '当前生成已结束，无需截断'
       )
-      const previousUser = [...conversation.messages]
-        .slice(0, assistantIndex < 0 ? undefined : assistantIndex)
-        .reverse()
-        .find((message) => message.role === 'user')
-      if (!previousUser) {
-        setActionNotice('未找到本轮用户消息，无法重新发送')
-        return
-      }
-
-      if (info.kind === 'agent') await window.localAgent.agent.stop(requestId)
-      else await window.localAgent.chat.stop(requestId)
-      updateMessage(info.conversationId, info.assistantId, (message) => ({
-        ...message,
-        status: 'done',
-        meta: '用户手动终止疑似复读，正在重新发送本轮消息',
-        stoppedByUser: true,
-        excludeFromContext: true,
-        completedAt: Date.now(),
-        agentBlocks: message.agentBlocks?.map((block) => {
-          if (block.type === 'thinking' && block.status !== 'done') {
-            return { ...block, status: 'done' as const, updatedAt: Date.now() }
-          }
-          if (
-            block.type === 'operation' &&
-            (block.status === 'running' || block.status === 'waiting')
-          ) {
-            return { ...block, status: 'done' as const, completedAt: Date.now() }
-          }
-          return block
-        })
-      }))
-      updateMessage(info.conversationId, previousUser.id, (message) => ({
-        ...message,
-        excludeFromContext: true
-      }))
-      clearPending(requestId)
-      const retryText = previousUser.content
-      setComposerInput(retryText)
-      setAttachments(
-        (previousUser.attachments ?? []).map((attachment) => ({ ...attachment }))
-      )
-      setActionNotice('已终止疑似复读，正在重新发送本轮消息')
-      retryAfterLoopStopRef.current = true
-      inputValueRef.current = retryText
     } catch (error) {
-      setRestartingAfterLoopStop(false)
       setActionNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      window.setTimeout(() => setRestartingAfterLoopStop(false), 500)
     }
   }
-
-  useEffect(() => {
-    if (running || !retryAfterLoopStopRef.current) return
-    retryAfterLoopStopRef.current = false
-    void sendMessage().finally(() => setRestartingAfterLoopStop(false))
-  }, [running])
 
   const resolveApproval = async (approved: boolean): Promise<void> => {
     if (!agentApproval) return
@@ -3102,16 +3073,34 @@ export function ChatPanel(): React.JSX.Element {
                   Skill{enabledSelectedSkillIds.length ? ` · ${enabledSelectedSkillIds.length}` : ''}
                 </button>
               </div>
+              {mode === 'agent' && (
+                <button
+                  type="button"
+                  className={`composer-tool workflow-toggle ${useAgentWorkflow ? 'active' : ''}`}
+                  onClick={() => {
+                    if (!conversation) return
+                    setConversationAgentWorkflow(conversation.id, !useAgentWorkflow)
+                  }}
+                  title={
+                    useAgentWorkflow
+                      ? '工作流已开启：理解任务、制定 Tasks 后执行'
+                      : '工作流已关闭：仅开放工具，由 AI 自主安排'
+                  }
+                >
+                  <BrainCircuit size={14} />
+                  工作流{useAgentWorkflow ? '开' : '关'}
+                </button>
+              )}
               {running && activePending?.[1].kind !== 'image' && (
                 <button
                   type="button"
                   className="composer-tool loop-stop-retry"
                   onClick={() => void stopLoopAndRetry()}
                   disabled={restartingAfterLoopStop}
-                  title="终止当前疑似复读并重新发送本轮消息"
+                  title="手动截断当前输出，并在本会话原地继续"
                 >
                   <RotateCcw size={14} />
-                  {restartingAfterLoopStop ? '重发中' : '终止重发'}
+                  {restartingAfterLoopStop ? '截断中' : '终止重发'}
                 </button>
               )}
             </>
@@ -3355,6 +3344,29 @@ export function ChatPanel(): React.JSX.Element {
               }}
             />
           </div>
+          {qwen38Reasoning && thinkingMode !== 'off' && (
+            <div
+              className="reasoning-effort-picker"
+              title="Qwen3.8 思考等级"
+            >
+              <MacSelect
+                value={reasoningEffort}
+                ariaLabel="Qwen3.8 思考等级"
+                groups={[{ options: [
+                  { value: 'xhigh', label: '极高' },
+                  { value: 'medium', label: '中等' },
+                  { value: 'low', label: '较低' }
+                ] }]}
+                onChange={(value) => {
+                  if (!conversation) return
+                  setConversationReasoningEffort(
+                    conversation.id,
+                    value as ReasoningEffort
+                  )
+                }}
+              />
+            </div>
+          )}
           <div className="model-picker">
             <span
               className={`status-dot ${
@@ -3391,6 +3403,8 @@ export function ChatPanel(): React.JSX.Element {
                     connectionId: undefined,
                     contextLength: undefined,
                     maxContextLength: undefined,
+                    reasoningOptions: undefined,
+                    defaultReasoningOption: undefined,
                     thinkingMode: undefined
                   }
                   setModel(clearedModel)
@@ -3418,7 +3432,9 @@ export function ChatPanel(): React.JSX.Element {
                     preset: selected.preset,
                     connectionId: selected.connectionId,
                     contextLength: selected.contextLength,
-                    maxContextLength: selected.maxContextLength
+                    maxContextLength: selected.maxContextLength,
+                    reasoningOptions: selected.reasoningOptions,
+                    defaultReasoningOption: selected.defaultReasoningOption
                   }
                   setModel(nextModel)
                   if (conversation) {

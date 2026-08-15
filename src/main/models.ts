@@ -5,13 +5,14 @@ import type {
   TokenUsage
 } from '../shared/types'
 import { createLiveTokenUsageTracker } from './live-token-usage'
-import { resolveThinkingEnabled } from '../shared/thinking'
+import {
+  isQwen38Model,
+  qwen38LmStudioThinkingOptions,
+  qwen38ReasoningEffort,
+  resolveThinkingEnabled
+} from '../shared/thinking'
 import { session, type Session } from 'electron'
 import { parseToolArgumentsJson } from './tool-json'
-import {
-  createStreamRepetitionGuard,
-  type StreamRepetitionStop
-} from './repetition-guard'
 import {
   PRIVATE_MODEL_TOOL_BLOCK_TAGS,
   stripPrivateModelOutput
@@ -24,9 +25,17 @@ import {
 } from '../shared/model-profiles'
 import {
   cachedPromptTokensFromOpenAiPayload,
+  mergeOpenAiTimingsPayload,
+  mergeOpenAiUsagePayload,
   type OpenAiTimingsPayload,
   type OpenAiUsagePayload
 } from './model-usage'
+import { normalizeSystemMessageOrder } from './message-order'
+import {
+  buildResponsesRequest,
+  parseResponsesOutput,
+  type ResponsesOutputItem
+} from './responses-api'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -64,7 +73,6 @@ export type CompletionResult = {
   compressed: boolean
   contextMemory?: ContextCompressionMemory
   finishReason?: string
-  repetitionStop?: StreamRepetitionStop
 }
 
 function createUsage(
@@ -130,9 +138,10 @@ export function tokenUsageFromOpenAiPayload(
   const cachedPromptTokens = cachedPromptTokensFromOpenAiPayload(usage, timings)
   const promptTokens = Math.max(
     usage?.prompt_tokens ?? 0,
+    usage?.input_tokens ?? 0,
     Math.max(0, (timings?.prompt_n ?? 0) + cachedPromptTokens)
   )
-  const completionTokens = usage?.completion_tokens ?? timings?.predicted_n ?? 0
+  const completionTokens = usage?.completion_tokens ?? usage?.output_tokens ?? timings?.predicted_n ?? 0
   return createUsage(promptTokens, completionTokens, false, undefined, cachedPromptTokens)
 }
 
@@ -1001,6 +1010,29 @@ function isQwenModel(model: ModelConfig): boolean {
   return /(?:^|[^a-z0-9])qwen(?:[^a-z0-9]|$)/i.test(model.model)
 }
 
+function responsesThinkingOptions(model: ModelConfig): Record<string, unknown> {
+  const enabled = resolveThinkingEnabled(model)
+  if (enabled === false) return { reasoning: { effort: 'none' } }
+  const available = model.reasoningOptions ?? []
+  const selected = model.reasoningEffort
+  return enabled === true && selected && available.includes(selected)
+    ? { reasoning: { effort: selected } }
+    : {}
+}
+
+function responsesRequestParts(messages: LlmMessage[], tools: ToolDefinition[]) {
+  const serialized = normalizeToolMessageSequence(normalizeSystemMessageOrder(messages)).map(
+    (message) => ({
+      ...message,
+      content:
+        message.role === 'tool'
+          ? message.content
+          : serializeHostMarkupForModel(message.content)
+    })
+  )
+  return buildResponsesRequest(serialized, tools)
+}
+
 function openAiThinkingOptions(
   model: ModelConfig,
   overrideEnabled?: boolean
@@ -1015,13 +1047,28 @@ function openAiThinkingOptions(
     return tokenHubHy3ReasoningOptions(model, enableThinking)
   }
   if (/dashscope\.aliyuncs\.com|dashscope-intl\.aliyuncs\.com/i.test(model.baseUrl)) {
-    return isQwenModel(model) ? { enable_thinking: enableThinking } : {}
+    const reasoningEffort = qwen38ReasoningEffort(model, enableThinking)
+    return isQwenModel(model)
+      ? {
+          enable_thinking: enableThinking,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+        }
+      : {}
   }
   const lmStudioOpenAiEndpoint = isLmStudioEndpoint(model)
+  if (lmStudioOpenAiEndpoint && isQwen38Model(model)) {
+    return qwen38LmStudioThinkingOptions(model, enableThinking)
+  }
   if (!lmStudioOpenAiEndpoint && !isQwenModel(model)) return {}
   return {
-    ...(lmStudioOpenAiEndpoint
-      ? { reasoning_effort: enableThinking ? 'medium' : 'none' }
+    ...(lmStudioOpenAiEndpoint || isQwen38Model(model)
+      ? {
+          reasoning_effort: enableThinking
+            ? isQwen38Model(model)
+              ? qwen38ReasoningEffort(model, true)
+              : 'medium'
+            : 'none'
+        }
       : {}),
     chat_template_kwargs: {
       enable_thinking: enableThinking,
@@ -1440,7 +1487,7 @@ export function normalizeToolMessageSequence(messages: LlmMessage[]): LlmMessage
 }
 
 function providerMessages(model: ModelConfig, messages: LlmMessage[]): unknown[] {
-  const serialized = normalizeToolMessageSequence(messages).map((message) => ({
+  const serialized = normalizeToolMessageSequence(normalizeSystemMessageOrder(messages)).map((message) => ({
     ...message,
     content:
       message.role === 'tool' ? message.content : serializeHostMarkupForModel(message.content)
@@ -1809,8 +1856,12 @@ async function generateSemanticSummary(
             textField(delta?.thinking)
           if (reasoning) reasoningStream.push(reasoning)
           if (delta?.content) contentStream.push(delta.content)
-          if (data.usage) latestUsagePayload = data.usage
-          if (data.timings) latestTimingsPayload = data.timings
+          if (data.usage) {
+            latestUsagePayload = mergeOpenAiUsagePayload(latestUsagePayload, data.usage)
+          }
+          if (data.timings) {
+            latestTimingsPayload = mergeOpenAiTimingsPayload(latestTimingsPayload, data.timings)
+          }
           const reportedUsage = tokenUsageFromOpenAiPayload(
             latestUsagePayload,
             latestTimingsPayload
@@ -1893,6 +1944,7 @@ async function prepareMessages(
   compressed: boolean
   contextMemory?: ContextCompressionMemory
 }> {
+  messages = normalizeSystemMessageOrder(messages)
   const contextLength = Math.max(2048, model.contextLength || 8192)
   const totalTokens =
     messages.reduce(
@@ -2288,6 +2340,40 @@ export async function discoverLocalModels(): Promise<ModelOption[]> {
           source
         })
       }
+      if (source === 'LM Studio') {
+        const nativeResponse = await fetch(`${new URL(baseUrl).origin}/api/v1/models`, {
+          signal: AbortSignal.timeout(1800)
+        })
+        if (nativeResponse.ok) {
+          const nativeData = (await nativeResponse.json()) as {
+            models?: Array<{
+              key?: string
+              display_name?: string
+              loaded_instances?: Array<{ id?: string }>
+              capabilities?: {
+                reasoning?: {
+                  allowed_options?: ModelOption['reasoningOptions']
+                  default?: ModelOption['defaultReasoningOption']
+                }
+              }
+            }>
+          }
+          for (const option of discovered.filter((entry) => entry.source === source)) {
+            const metadata = (nativeData.models ?? []).find((item) => {
+              const identifiers = [
+                item.key,
+                item.display_name,
+                ...(item.loaded_instances ?? []).map((instance) => instance.id)
+              ]
+                .filter(Boolean)
+                .map((value) => String(value).toLocaleLowerCase())
+              return identifiers.includes(option.name.toLocaleLowerCase())
+            })
+            option.reasoningOptions = metadata?.capabilities?.reasoning?.allowed_options
+            option.defaultReasoningOption = metadata?.capabilities?.reasoning?.default
+          }
+        }
+      }
     } catch {
       // Local service is optional.
     }
@@ -2332,7 +2418,6 @@ export async function streamChat(
     disableThinking?: boolean
     maxOutputTokens?: number
     onContextCompressed?: (memory: ContextCompressionMemory) => void
-    onRepetitionStopped?: (stop: StreamRepetitionStop) => void
   } = {}
 ): Promise<TokenUsage> {
   const prepared = await prepareMessages(model, messages, [], signal, onReasoning)
@@ -2342,21 +2427,11 @@ export async function streamChat(
     0
   )
   let output = ''
-  let repetitionStop: StreamRepetitionStop | null = null
-  const stopForRepetition = (stop: StreamRepetitionStop): void => {
-    if (repetitionStop) return
-    repetitionStop = stop
-    options.onRepetitionStopped?.(stop)
-  }
-  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition)
-  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition)
   const visibleContent = createToolMarkupFilter((content) => {
-    if (contentRepetitionGuard.push(content)) return
     output += content
     onChunk(content)
   })
   const visibleReasoning = createToolMarkupFilter((content) => {
-    if (reasoningRepetitionGuard.push(content)) return
     onReasoning(content)
   })
   const reasoningTagFilter = createReasoningTagFilter((content) =>
@@ -2424,10 +2499,6 @@ export async function streamChat(
         if (data.message?.content) {
           if (!firstOutputAt) firstOutputAt = Date.now()
           normalizedContent.push(data.message.content)
-        }
-        if (repetitionStop) {
-          await reader.cancel().catch(() => undefined)
-          break ollamaChatStream
         }
         if (
           typeof data.prompt_eval_count === 'number' ||
@@ -2523,12 +2594,12 @@ export async function streamChat(
         if (!firstOutputAt) firstOutputAt = Date.now()
         normalizedContent.push(content)
       }
-      if (repetitionStop) {
-        await reader.cancel().catch(() => undefined)
-        break openAiChatStream
+      if (data.usage) {
+        latestUsagePayload = mergeOpenAiUsagePayload(latestUsagePayload, data.usage)
       }
-      if (data.usage) latestUsagePayload = data.usage
-      if (data.timings) latestTimingsPayload = data.timings
+      if (data.timings) {
+        latestTimingsPayload = mergeOpenAiTimingsPayload(latestTimingsPayload, data.timings)
+      }
       providerUsage =
         tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
     }
@@ -2562,10 +2633,8 @@ async function streamCompleteWithTools(
   options: {
     stopStrings?: string[]
     onUsageProgress?: (usage: TokenUsage) => void
-    repetitionSamples?: {
-      content?: string[]
-      reasoning?: string[]
-    }
+    shouldInterruptGeneration?: () => boolean
+    useResponsesApi?: boolean
   } = {}
 ): Promise<CompletionResult> {
   const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
@@ -2580,21 +2649,17 @@ async function streamCompleteWithTools(
   )
   let content = ''
   let reasoning = ''
-  let repetitionStop: StreamRepetitionStop | null = null
-  const stopForRepetition = (stop: StreamRepetitionStop): void => {
-    if (!repetitionStop) repetitionStop = stop
+  let manuallyInterrupted = false
+  const stopForManualInterrupt = (): boolean => {
+    if (!manuallyInterrupted && options.shouldInterruptGeneration?.()) {
+      manuallyInterrupted = true
+    }
+    return manuallyInterrupted
   }
-  const contentRepetitionGuard = createStreamRepetitionGuard('content', stopForRepetition, {
-    priorSamples: options.repetitionSamples?.content
-  })
-  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning', stopForRepetition, {
-    priorSamples: options.repetitionSamples?.reasoning
-  })
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
   const appendReasoning = (value: string): void => {
     if (!value) return
-    if (reasoningRepetitionGuard.push(value)) return
     reasoning += value
     visibleReasoning.push(value)
   }
@@ -2602,7 +2667,6 @@ async function streamCompleteWithTools(
   const emitReasoning = (value: string): void => reasoningTagFilter.push(value)
   const thinkRouter = createThinkRouter(
     (value) => {
-      if (contentRepetitionGuard.push(value)) return
       content += value
       visibleContent.push(value)
     },
@@ -2616,6 +2680,189 @@ async function streamCompleteWithTools(
     channelRouter.push(value)
   )
   const normalizedReasoning = createStreamingTextNormalizer(emitReasoning)
+
+  if (options.useResponsesApi && isLmStudioEndpoint(model)) {
+    const parts = responsesRequestParts(compatible.messages, tools)
+    const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/responses'), {
+      method: 'POST',
+      headers: headers(model),
+      signal,
+      body: safeJsonBody({
+        model: model.model,
+        ...parts,
+        ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
+        stream: true,
+        ...responsesThinkingOptions(model)
+      })
+    })
+    if (!response.ok || !response.body) {
+      throw new Error(`模型请求失败：${await responseError(response)}`)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let firstOutputAt = 0
+    let latestUsagePayload: OpenAiUsagePayload | undefined
+    let responseStatus = ''
+    const pendingToolCalls = new Map<number, { id?: string; name: string; arguments: string }>()
+
+    responsesStream: while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (stopForManualInterrupt()) {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        const event = JSON.parse(payload) as {
+          type?: string
+          delta?: string
+          output_index?: number
+          item?: ResponsesOutputItem
+          arguments?: string
+          response?: {
+            status?: string
+            output?: ResponsesOutputItem[]
+            usage?: OpenAiUsagePayload
+            error?: { message?: string }
+          }
+          error?: { message?: string } | string
+        }
+        if (event.error || event.type === 'error' || event.type === 'response.failed') {
+          const message =
+            typeof event.error === 'string'
+              ? event.error
+              : event.error?.message || event.response?.error?.message || payload
+          throw new Error(`模型流返回错误：${message}`)
+        }
+        if (
+          event.type === 'response.reasoning_text.delta' ||
+          event.type === 'response.reasoning_summary_text.delta'
+        ) {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          liveUsage.push(event.delta ?? '')
+          normalizedReasoning.push(event.delta ?? '')
+        } else if (event.type === 'response.output_text.delta') {
+          if (!firstOutputAt) firstOutputAt = Date.now()
+          liveUsage.push(event.delta ?? '')
+          normalizedContent.push(event.delta ?? '')
+        }
+        if (
+          (event.type === 'response.output_item.added' ||
+            event.type === 'response.output_item.done') &&
+          event.item?.type === 'function_call'
+        ) {
+          const index = event.output_index ?? pendingToolCalls.size
+          const call = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
+          call.id = event.item.call_id || event.item.id || call.id
+          call.name = event.item.name || call.name
+          if (event.item.arguments !== undefined) call.arguments = event.item.arguments
+          pendingToolCalls.set(index, call)
+        }
+        if (event.type === 'response.function_call_arguments.delta') {
+          const index = event.output_index ?? 0
+          const call = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
+          call.arguments = mergeStreamingFragment(call.arguments, event.delta ?? '')
+          pendingToolCalls.set(index, call)
+          liveUsage.push(event.delta ?? '')
+        } else if (event.type === 'response.function_call_arguments.done') {
+          const index = event.output_index ?? 0
+          const call = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
+          if (event.arguments !== undefined) call.arguments = event.arguments
+          pendingToolCalls.set(index, call)
+        }
+        if (event.type === 'response.completed') {
+          responseStatus = event.response?.status ?? 'completed'
+          latestUsagePayload = mergeOpenAiUsagePayload(
+            latestUsagePayload,
+            event.response?.usage ?? {}
+          )
+          const parsed = parseResponsesOutput(event.response?.output ?? [])
+          if (!content && parsed.content) normalizedContent.push(parsed.content)
+          if (!reasoning && parsed.reasoning) normalizedReasoning.push(parsed.reasoning)
+          for (const [index, rawCall] of parsed.rawToolCalls.entries()) {
+            pendingToolCalls.set(index, {
+              id: rawCall.id,
+              name: rawCall.function?.name ?? '',
+              arguments: rawCall.function?.arguments ?? '{}'
+            })
+          }
+        }
+        if (manuallyInterrupted) {
+          await reader.cancel().catch(() => undefined)
+          break responsesStream
+        }
+      }
+    }
+    normalizedContent.flush()
+    normalizedReasoning.flush()
+    channelRouter.flush()
+    thinkRouter.flush()
+    reasoningTagFilter.flush()
+    const rawToolCalls = [...pendingToolCalls.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([index, call]) => ({
+        id: call.id ?? `responses-${Date.now()}-${index}`,
+        type: 'function',
+        function: { name: call.name, arguments: call.arguments || '{}' }
+      }))
+    const parsedTextCalls = parseTextToolCalls(content, reasoning, tools, model.model)
+    visibleContent.flush(rawToolCalls.length > 0 || parsedTextCalls.toolCalls.length > 0)
+    visibleReasoning.flush(rawToolCalls.length > 0 || parsedTextCalls.toolCalls.length > 0)
+    const structuredToolCalls = rawToolCalls.map((call, index) =>
+      normalizeStructuredToolCall(call, index, 'responses')
+    )
+    const toolCalls =
+      structuredToolCalls.length > 0 ? structuredToolCalls : parsedTextCalls.toolCalls
+    const finalRawToolCalls =
+      structuredToolCalls.length > 0
+        ? rawToolCalls
+        : toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) }
+          }))
+    const providerUsage =
+      tokenUsageFromOpenAiPayload(latestUsagePayload) ??
+      createUsage(
+        estimatedPrompt,
+        estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
+        true
+      )
+    const providerFinalUsage = attachGenerationDuration(
+      providerUsage,
+      firstOutputAt ? Date.now() - firstOutputAt : undefined
+    )
+    options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
+    return {
+      content: parsedTextCalls.content,
+      reasoning: parsedTextCalls.reasoning,
+      toolCalls,
+      toolCallParseError: parsedTextCalls.toolCallParseError,
+      rawMessage: {
+        role: 'assistant',
+        content: parsedTextCalls.content,
+        reasoning_content: parsedTextCalls.reasoning,
+        tool_calls: finalRawToolCalls
+      },
+      usage: addUsage(prepared.compressionUsage, providerFinalUsage),
+      contextTokens: providerFinalUsage.promptTokens,
+      contextEstimated: Boolean(providerFinalUsage.estimated),
+      compressed: prepared.compressed,
+      contextMemory: prepared.contextMemory,
+      finishReason: manuallyInterrupted
+        ? 'manual_interrupt'
+        : toolCalls.length
+          ? 'tool_calls'
+          : responseStatus || 'completed'
+    }
+  }
 
   if (model.provider === 'ollama') {
     const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
@@ -2648,6 +2895,10 @@ async function streamCompleteWithTools(
     ollamaToolStream: while (true) {
       const { value, done } = await reader.read()
       if (done) break
+      if (stopForManualInterrupt()) {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
@@ -2690,7 +2941,7 @@ async function streamCompleteWithTools(
           liveUsage.push(JSON.stringify(data.message.tool_calls))
           rawToolCalls = data.message.tool_calls
         }
-        if (repetitionStop) {
+        if (manuallyInterrupted) {
           await reader.cancel().catch(() => undefined)
           break ollamaToolStream
         }
@@ -2764,9 +3015,8 @@ async function streamCompleteWithTools(
       contextTokens: providerFinalUsage.promptTokens,
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
-      repetitionStop: repetitionStop ?? undefined,
-      finishReason: repetitionStop
-        ? 'repetition_guard'
+      finishReason: manuallyInterrupted
+        ? 'manual_interrupt'
         : toolCalls.length
           ? 'tool_calls'
           : finishReason
@@ -2807,6 +3057,10 @@ async function streamCompleteWithTools(
   openAiToolStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
+    if (stopForManualInterrupt()) {
+      await reader.cancel().catch(() => undefined)
+      break
+    }
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() ?? ''
@@ -2878,13 +3132,17 @@ async function streamCompleteWithTools(
         }
         pendingToolCalls.set(index, current)
       }
-      if (repetitionStop) {
+      if (manuallyInterrupted) {
         await reader.cancel().catch(() => undefined)
         break openAiToolStream
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason
-      if (data.usage) latestUsagePayload = data.usage
-      if (data.timings) latestTimingsPayload = data.timings
+      if (data.usage) {
+        latestUsagePayload = mergeOpenAiUsagePayload(latestUsagePayload, data.usage)
+      }
+      if (data.timings) {
+        latestTimingsPayload = mergeOpenAiTimingsPayload(latestTimingsPayload, data.timings)
+      }
       providerUsage =
         tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
     }
@@ -2953,9 +3211,8 @@ async function streamCompleteWithTools(
     contextEstimated: Boolean(providerFinalUsage.estimated),
     compressed: prepared.compressed,
     contextMemory: prepared.contextMemory,
-    repetitionStop: repetitionStop ?? undefined,
-    finishReason: repetitionStop
-      ? 'repetition_guard'
+    finishReason: manuallyInterrupted
+      ? 'manual_interrupt'
       : toolCalls.length
         ? 'tool_calls'
         : finishReason
@@ -2973,10 +3230,8 @@ export async function completeWithTools(
   options: {
     stopStrings?: string[]
     onUsageProgress?: (usage: TokenUsage) => void
-    repetitionSamples?: {
-      content?: string[]
-      reasoning?: string[]
-    }
+    shouldInterruptGeneration?: () => boolean
+    useResponsesApi?: boolean
   } = {}
 ): Promise<CompletionResult> {
   if (onReasoning || onContent) {
@@ -2997,7 +3252,74 @@ export async function completeWithTools(
     compatible.messages.reduce(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
-    ) + estimateTextTokens(JSON.stringify(tools))
+  ) + estimateTextTokens(JSON.stringify(tools))
+  if (options.useResponsesApi && isLmStudioEndpoint(model)) {
+    const parts = responsesRequestParts(compatible.messages, tools)
+    const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/responses'), {
+      method: 'POST',
+      headers: headers(model),
+      signal,
+      body: safeJsonBody({
+        model: model.model,
+        ...parts,
+        ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
+        stream: false,
+        ...responsesThinkingOptions(model)
+      })
+    })
+    if (!response.ok) throw new Error(`模型请求失败：${await responseError(response)}`)
+    const data = (await response.json()) as {
+      status?: string
+      output?: ResponsesOutputItem[]
+      usage?: OpenAiUsagePayload
+    }
+    const parsed = parseResponsesOutput(data.output ?? [])
+    const structuredToolCalls = parsed.rawToolCalls.map((call, index) =>
+      normalizeStructuredToolCall(call, index, 'responses')
+    )
+    const parsedTextCalls = parseTextToolCalls(
+      parsed.content,
+      parsed.reasoning,
+      tools,
+      model.model
+    )
+    const toolCalls =
+      structuredToolCalls.length > 0 ? structuredToolCalls : parsedTextCalls.toolCalls
+    const finalRawToolCalls =
+      structuredToolCalls.length > 0
+        ? parsed.rawToolCalls
+        : toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: JSON.stringify(call.arguments) }
+          }))
+    const providerUsage =
+      tokenUsageFromOpenAiPayload(data.usage) ??
+      createUsage(
+        estimatedPrompt,
+        estimateTextTokens(parsed.content) +
+          estimateTextTokens(JSON.stringify(parsed.rawToolCalls)),
+        true
+      )
+    return {
+      content: parsedTextCalls.content,
+      reasoning: parsedTextCalls.reasoning,
+      toolCalls,
+      toolCallParseError: parsedTextCalls.toolCallParseError,
+      rawMessage: {
+        role: 'assistant',
+        content: parsedTextCalls.content,
+        reasoning_content: parsedTextCalls.reasoning,
+        tool_calls: finalRawToolCalls
+      },
+      usage: addUsage(prepared.compressionUsage, providerUsage),
+      contextTokens: providerUsage.promptTokens,
+      contextEstimated: Boolean(providerUsage.estimated),
+      compressed: prepared.compressed,
+      contextMemory: prepared.contextMemory,
+      finishReason: toolCalls.length ? 'tool_calls' : data.status
+    }
+  }
   if (model.provider === 'ollama') {
     const response = await fetchModel(model, `${normalizeBaseUrl(model.baseUrl)}/api/chat`, {
       method: 'POST',

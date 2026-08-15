@@ -14,6 +14,7 @@ import type {
   FileEncoding,
   ModelConfig,
   PersistedConversation,
+  ReasoningEffort,
   SkillDefinition,
   ThinkingMode,
   TokenUsageRecord
@@ -250,7 +251,9 @@ type AppStore = {
   createConversation: () => string
   setConversationMode: (id: string, mode: ConversationMode) => void
   setConversationSkillIds: (id: string, skillIds: string[]) => void
+  setConversationAgentWorkflow: (id: string, enabled: boolean) => void
   setConversationThinkingMode: (id: string, modelKey: string, mode: ThinkingMode) => void
+  setConversationReasoningEffort: (id: string, effort: ReasoningEffort) => void
   setConversationContextMemory: (id: string, memory: ContextCompressionMemory) => void
   setActiveConversation: (id: string) => void
   deleteConversation: (id: string) => void
@@ -272,7 +275,9 @@ const initialConversation: PersistedConversation = {
   title: '新会话',
   mode: 'chat',
   thinkingMode: 'auto',
+  reasoningEffort: 'xhigh',
   skillIds: [],
+  useAgentWorkflow: true,
   messages: [],
   createdAt: now,
   updatedAt: now
@@ -838,7 +843,9 @@ export const useAppStore = create<AppStore>()(
           mode: 'chat',
           model: persistedModel(currentModel),
           thinkingMode: 'auto',
+          reasoningEffort: 'xhigh',
           skillIds: [],
+          useAgentWorkflow: true,
           messages: [],
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -865,6 +872,14 @@ export const useAppStore = create<AppStore>()(
               : conversation
           )
         })),
+      setConversationAgentWorkflow: (id, enabled) =>
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id
+              ? { ...conversation, useAgentWorkflow: enabled, updatedAt: Date.now() }
+              : conversation
+          )
+        })),
       setConversationThinkingMode: (id, modelKey, thinkingMode) =>
         set((state) => ({
           modelThinkingModes: modelKey
@@ -873,6 +888,14 @@ export const useAppStore = create<AppStore>()(
           conversations: state.conversations.map((conversation) =>
             conversation.id === id
               ? { ...conversation, thinkingMode, updatedAt: Date.now() }
+              : conversation
+          )
+        })),
+      setConversationReasoningEffort: (id, reasoningEffort) =>
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id
+              ? { ...conversation, reasoningEffort, updatedAt: Date.now() }
               : conversation
           )
         })),
@@ -1018,7 +1041,8 @@ export const useAppStore = create<AppStore>()(
             model: applyKnownRemoteModelProfile(
               conversation.model ?? persistedModel(state.model ?? defaultModel)
             ),
-            thinkingMode: conversation.thinkingMode ?? 'auto'
+            thinkingMode: conversation.thinkingMode ?? 'auto',
+            reasoningEffort: conversation.reasoningEffort ?? 'xhigh'
           })
         )
         const activeConversation = state.conversations.find(

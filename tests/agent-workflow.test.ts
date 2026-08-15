@@ -2,10 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   commandContainsDestructiveOperation,
+  initialWorkflowStage,
   shouldRequestToolApproval,
   toolAvailableInStage,
   workflowToolChoice
 } from '../src/main/agent-workflow.ts'
+
+test('会话关闭工作流后直接进入全工具执行阶段', () => {
+  assert.equal(initialWorkflowStage(true), 'understand')
+  assert.equal(initialWorkflowStage(false), 'execute')
+})
 
 test('理解阶段不向模型暴露操作工具', () => {
   for (const tool of ['replace_in_file', 'read_file', 'grep', 'update_tasks']) {

@@ -135,6 +135,7 @@ const api = {
     openExternal: (filePath: string) => ipcRenderer.invoke('files:openExternal', filePath)
   },
   app: {
+    getVersion: () => ipcRenderer.invoke('app:getVersion') as Promise<string>,
     openConversationCache: () => ipcRenderer.invoke('app:openConversationCache') as Promise<string>,
     openExternal: (url: string) =>
       ipcRenderer.invoke('app:openExternal', url) as Promise<boolean>
@@ -185,6 +186,8 @@ const api = {
   chat: {
     start: (request: ChatStartRequest) => ipcRenderer.invoke('chat:start', request),
     stop: (requestId: string) => ipcRenderer.invoke('chat:stop', requestId),
+    interruptRepetition: (requestId: string) =>
+      ipcRenderer.invoke('chat:interrupt-repetition', requestId) as Promise<boolean>,
     onEvent: (callback: (event: ChatEvent) => void) =>
       bufferedEvents('chat:event', callback, new Set(['chunk', 'reasoning']))
   },
@@ -199,6 +202,8 @@ const api = {
       endLine: number
     ) => ipcRenderer.send('agent:userFileEdit', root, filePath, revision, startLine, endLine),
     stop: (requestId: string) => ipcRenderer.invoke('agent:stop', requestId),
+    interruptRepetition: (requestId: string) =>
+      ipcRenderer.invoke('agent:interrupt-repetition', requestId) as Promise<boolean>,
     approve: (requestId: string, approvalId: string, approved: boolean) =>
       ipcRenderer.invoke('agent:approve', requestId, approvalId, approved),
     onEvent: (callback: (event: AgentEvent) => void) =>

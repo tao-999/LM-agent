@@ -44,6 +44,7 @@ import {
 } from './paper-cache'
 import {
   commandContainsDestructiveOperation,
+  initialWorkflowStage,
   shouldRequestToolApproval,
   toolAvailableInStage,
   workflowToolChoice,
@@ -1812,7 +1813,8 @@ export async function runWebChat(
   workspaceRoot = '',
   forceWebSearch = false,
   historyArchive: ChatContextMessage[] = [],
-  allowWebSearch = true
+  allowWebSearch = true,
+  takeManualGenerationInterrupt: () => boolean = () => false
 ): Promise<TokenUsage> {
   const currentTime = new Date().toLocaleString('zh-CN', {
     timeZone: 'Asia/Shanghai',
@@ -1962,7 +1964,8 @@ export async function runWebChat(
           onEvent({
             type: 'context',
             usage: addUsage(totalUsage, usage)
-          })
+          }),
+        shouldInterruptGeneration: takeManualGenerationInterrupt
       }
     )
     if (completion.contextMemory) {
@@ -1989,22 +1992,22 @@ export async function runWebChat(
         content: completion.reasoning
       })
     }
-    if (completion.finishReason === 'repetition_guard') {
+    if (completion.finishReason === 'manual_interrupt') {
       onEvent({
         type: 'status',
-        title: '异常思考段已停止，任务继续',
+        title: '已手动截断当前输出，本轮继续',
         content:
-          '程序仅丢弃当前失控的思考段，已保留网页结果与服务确认的 Token 统计，并要求模型从当前目标继续。'
+          '已保留当前会话、网页结果与服务确认的 Token 统计，将从本轮目标原地继续。'
       })
       const recoveryMessage: LlmMessage = {
-        role: 'user',
+        role: 'system',
         content:
-          '运行时纠错：上一轮思考出现重复输出，程序已终止该生成段。请保留已经取得的网页结果，跳过重复总结，直接继续当前目标；任务完成时只输出一次简洁结论。'
+          '运行时状态：用户手动截断了当前生成段。保留已有工具结果、当前目标与会话状态，从尚未完成的位置继续；若目标已经完成，直接给出一次简洁结论并结束。'
       }
       const lastMessage = workingMessages.at(-1)
       if (
-        lastMessage?.role === 'user' &&
-        lastMessage.content.startsWith('运行时纠错：上一轮思考出现重复输出')
+        lastMessage?.role === 'system' &&
+        lastMessage.content.startsWith('运行时状态：用户手动截断了当前生成段')
       ) {
         workingMessages[workingMessages.length - 1] = recoveryMessage
       } else {
@@ -2197,13 +2200,17 @@ export async function runAgent(
   readGuidance: () => AgentGuideRequest[] = () => [],
   readUserFileEditLock: (relative: string) => AgentUserFileEditLock | undefined = () =>
     undefined,
-  acknowledgeUserFileEditLock: (relative: string, revision: number) => void = () => undefined
+  acknowledgeUserFileEditLock: (relative: string, revision: number) => void = () => undefined,
+  takeManualGenerationInterrupt: () => boolean = () => false
 ): Promise<void> {
+  const useWorkflow = request.useWorkflow !== false
   const changes = new Map<string, AgentChange>()
   const tools = new Map<string, RegisteredTool>()
   const permissionMode = request.permissionMode || 'read-write-manual'
   let activeTasks: AgentTask[] = []
-  const workflow: { stage: AgentWorkflowStage } = { stage: 'understand' }
+  const workflow: { stage: AgentWorkflowStage } = {
+    stage: initialWorkflowStage(useWorkflow)
+  }
   let progressRevision = 0
   const taskStateSignature = (): string =>
     activeTasks.length
@@ -2264,8 +2271,11 @@ export async function runAgent(
   const restrictedWebInstruction = restrictedWebHosts.length
     ? `用户已指定网页来源，只允许搜索、读取和引用 ${restrictedWebHosts.join('、')}，禁止访问其他网站，也禁止为了凑来源跨站核验。`
     : '用户未指定网页来源时，才执行多网站交叉核验。'
-  const modelToolScopeInstruction =
-    permissionMode === 'read-only'
+  const modelToolScopeInstruction = !useWorkflow
+    ? permissionMode === 'read-only'
+      ? '自主模式已开启：从首轮开始开放全部读取、检索与网页工具，写入类工具不发送给模型。'
+      : '自主模式已开启：从首轮开始开放当前权限允许的全部工具，由模型自主决定是否调用及调用顺序。'
+    : permissionMode === 'read-only'
       ? '进入执行阶段后仅开放读取、检索、网页查询与任务清单工具；编辑、创建、复制、移动、删除及命令工具不会发送给模型。'
       : '理解阶段不开放工具，任务清单阶段只开放 update_tasks，进入执行阶段后开放当前权限允许的完整工具。'
 
@@ -3794,7 +3804,8 @@ export async function runAgent(
     request.workspaceRoot,
     request.historyArchive
   )
-  const systemPrompt = [
+  const systemPrompt = (useWorkflow
+    ? [
     '执行控制最高优先级：只处理最后一个 <current_task>；禁止复盘、分析、续做或评价任何已完成历史请求。',
     '推理控制最高优先级：只进行完成当前任务所需的最短必要推理，确认目标后立即执行；禁止反复解释意图、复述历史、模拟多套方案、自我辩论或为了展示过程延长思考。',
     '编辑前置最高优先级：任何编辑现有文本文件的写入工具之前，必须先调用 read_file 读取同一路径并确认目标区间上下文；此类编辑校验读取保持精确区间，不受普通资料读取至少 1000 行规则限制。未读取时工具层会拒绝写入。',
@@ -3854,8 +3865,22 @@ export async function runAgent(
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
     `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求写入、创建、复制与命令逐次确认；读写自动模式允许上述普通操作自动执行。删除工具、删除命令及包含删除逻辑的项目脚本始终逐次确认。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
-    '文件工具中的路径必须使用工作区相对路径。'
-  ]
+        '文件工具中的路径必须使用工作区相对路径。'
+      ]
+    : [
+        request.instructions,
+        '你是运行在个人电脑中的星伴 AI。当前为自主 Agent 模式：程序不规定理解、Tasks 或执行阶段，也不要求建立任务清单。当前权限允许的工具从首轮起全部开放，请依据用户目标自行决定是否调用、调用顺序和结束时机。',
+        '只处理最后一个 <current_task>，历史内容仅作参考，禁止重新执行已经完成的旧任务。',
+        `当前工作区：${request.workspaceRoot}`,
+        `系统当前时间：${currentTime}（Asia/Shanghai）。`,
+        localResourceIndex,
+        '工具调用必须使用工具列表中的真实函数名与符合 JSON Schema 的参数。工具执行结果属于当前任务上下文，请结合结果自主继续或结束。',
+        '内部思考与可见推理过程默认使用简体中文；工具名、代码、路径与必要技术名词可保留原文。',
+        `当前权限模式：${permissionMode}。${modelToolScopeInstruction}`,
+        '全部文件与命令工具只能在当前 CWD 内运行；删除文件、删除目录及包含删除逻辑的命令始终需要用户确认。',
+        '用户未表达写入意图时不得修改文件。文件工具路径使用工作区相对路径。',
+        '任务完成后直接给出简洁结果并结束，禁止等待下一个任务。'
+      ])
     .filter(Boolean)
     .join('\n')
 
@@ -3916,40 +3941,6 @@ export async function runAgent(
       images: attachmentImages
     }
   ]
-  let modelRepetitionStateKey = ''
-  const modelRepetitionSamples: { content: string[]; reasoning: string[] } = {
-    content: [],
-    reasoning: []
-  }
-  const currentModelRepetitionSamples = (): {
-    content: string[]
-    reasoning: string[]
-  } => {
-    const key = `${workflow.stage}|${taskStateSignature()}|${progressRevision}`
-    if (key !== modelRepetitionStateKey) {
-      modelRepetitionStateKey = key
-      modelRepetitionSamples.content = []
-      modelRepetitionSamples.reasoning = []
-    }
-    return modelRepetitionSamples
-  }
-  const rememberModelOutput = (content: string, reasoning = ''): void => {
-    const samples = currentModelRepetitionSamples()
-    if (content.trim().length >= 24) samples.content.push(content)
-    if (reasoning.trim().length >= 24) samples.reasoning.push(reasoning)
-    if (samples.content.length > 8) samples.content.shift()
-    if (samples.reasoning.length > 8) samples.reasoning.shift()
-  }
-  const discardLatestModelTurnFromContext = (): number => {
-    for (let index = messages.length - 1; index > 0; index -= 1) {
-      if (messages[index].role !== 'assistant') continue
-      const removed = messages.length - index
-      messages.splice(index, removed)
-      return removed
-    }
-    return 0
-  }
-
   const appendQueuedGuidance = (): boolean => {
     const queued = readGuidance()
     for (const guidance of queued) {
@@ -4060,11 +4051,13 @@ export async function runAgent(
     | 'web-search'
     | 'complete'
   const pendingAnchorPaths = new Set(selectedLineRanges.keys())
-  let knowledgeResearchStage: KnowledgeResearchStage = pendingAnchorPaths.size
-    ? 'anchor-read'
-    : requiresWritingLoreResearch
-      ? 'local-search'
-      : 'complete'
+  let knowledgeResearchStage: KnowledgeResearchStage = !useWorkflow
+    ? 'complete'
+    : pendingAnchorPaths.size
+      ? 'anchor-read'
+      : requiresWritingLoreResearch
+        ? 'local-search'
+        : 'complete'
   let forceToolNext = false
   let consecutiveToolFailures = 0
   const recentToolFailures: string[] = []
@@ -4127,11 +4120,12 @@ export async function runAgent(
     const toolChoice = workflowToolChoice(workflow.stage, forceToolNext)
     forceToolNext = false
     const editToolsNeedRead =
+      useWorkflow &&
       workflow.stage === 'execute' &&
       permissionMode !== 'read-only' &&
       readFilePaths.size === 0
     const runtimeSystemMessages: LlmMessage[] = [
-      ...(activeTasks.length
+      ...(useWorkflow && activeTasks.length
         ? [
             {
               role: 'system' as const,
@@ -4170,7 +4164,7 @@ export async function runAgent(
           : replaceFailureGuidance
             ? [{ role: 'system' as const, content: replaceFailureGuidance }]
             : []),
-      ...(workflow.stage === 'execute' && knowledgeResearchStage !== 'complete'
+      ...(useWorkflow && workflow.stage === 'execute' && knowledgeResearchStage !== 'complete'
         ? [
             {
               role: 'system' as const,
@@ -4209,7 +4203,6 @@ export async function runAgent(
       ...messages.slice(1)
     ]
     const modelToolDefinitions = buildModelToolDefinitions()
-    const repetitionSamples = currentModelRepetitionSamples()
     let streamedReasoning = false
     let streamedContent = false
     let completion: Awaited<ReturnType<typeof completeWithTools>>
@@ -4247,16 +4240,14 @@ export async function runAgent(
           }
         },
         {
+          useResponsesApi: true,
           stopStrings:
             workflow.stage === 'execute' &&
             activeTasks.length > 0 &&
             activeTasks.every((task) => task.status === 'completed')
               ? ['等待用户下一个任务', '等待下一个任务']
               : undefined,
-          repetitionSamples: {
-            content: [...repetitionSamples.content],
-            reasoning: [...repetitionSamples.reasoning]
-          }
+          shouldInterruptGeneration: takeManualGenerationInterrupt
         }
       )
       modelRequestFailures = 0
@@ -4335,14 +4326,14 @@ export async function runAgent(
         content: completion.reasoning
       })
     }
-    if (completion.finishReason === 'repetition_guard') {
+    if (completion.finishReason === 'manual_interrupt') {
       if (allTasksCompleted()) {
         send({
           requestId: request.requestId,
           type: 'status',
-          title: '任务完成，异常尾流已收束',
+          title: '已手动截断输出，任务状态为完成',
           content:
-            '程序确认真实任务清单与文件改动均已完成，已停止模型继续生成的重复总结、等待指令或异常尾流，并正常结束任务。'
+            '用户已手动截断当前输出；程序确认任务清单与文件改动均已完成，本轮正常结束。'
         })
         send({
           requestId: request.requestId,
@@ -4353,38 +4344,28 @@ export async function runAgent(
         })
         return
       }
-      const crossTurnRepeat = completion.repetitionStop?.kind === 'cross-turn-repeat'
-      const discardedContextMessages = crossTurnRepeat
-        ? discardLatestModelTurnFromContext()
-        : 0
       send({
         requestId: request.requestId,
         type: 'status',
-        title: crossTurnRepeat
-          ? '检测到跨轮内容复读，已切断当前输出'
-          : '异常思考段已停止，状态已恢复',
+        title: '已手动截断当前输出，本轮继续',
         content:
-          crossTurnRepeat
-            ? `程序依据模型连续多轮生成的实际文字重复度进行判断，并未根据工具调用次数判断。当前复读输出已丢弃，同时清理最近 ${discardedContextMessages} 条重复轮次上下文；Tasks、首份有效工具结果、文件改动与 Token 统计均已保留。`
-            : '程序仅丢弃当前失控输出，Tasks、工具结果、文件改动与服务确认的 Token 统计均已保留。'
+          '已保留 Tasks、工具结果、文件改动与服务确认的 Token 统计，将在当前会话和当前任务中原地继续。'
       })
       const recoveryMessage: LlmMessage = {
         role: 'system',
         content: [
-          crossTurnRepeat
-            ? '运行时状态快照：模型连续多轮生成了高度重复的实际内容，当前重复输出已截断。'
-            : '运行时状态快照：上一轮模型输出因重复生成被截断。',
-          '用户在此期间没有发送新请求；本条状态不是新任务，也不代表必须继续执行。',
+          '运行时状态快照：用户手动截断了当前生成段。',
+          '本条状态不是新任务，也没有创建新会话。',
           `工作流阶段：${workflow.stage}。`,
           `任务清单：${activeTasks.length ? activeTasks.map((task) => `${task.id}=${task.status}`).join('；') : '尚未建立'}。`,
           `已记录文件改动：${changes.size} 个。`,
-          '请只依据以上真实状态自主判断本轮应当结束，或仍有未完成目标需要处理。'
+          '保留已取得的有效结果，从当前任务尚未完成的位置继续；若目标已经完成，直接给出一次简洁结论并结束。'
         ].join('\n')
       }
       const lastMessage = messages.at(-1)
       if (
         lastMessage?.role === 'system' &&
-        lastMessage.content.startsWith('运行时状态快照：上一轮模型输出因重复生成被截断')
+        lastMessage.content.startsWith('运行时状态快照：用户手动截断了当前生成段')
       ) {
         messages[messages.length - 1] = recoveryMessage
       } else {
@@ -4393,7 +4374,6 @@ export async function runAgent(
       forceToolNext = false
       continue
     }
-    rememberModelOutput(completion.content, completion.reasoning)
     const missingStructuredToolCall =
       completion.finishReason === 'tool_calls' && completion.toolCalls.length === 0
     const emptyCompletion =
@@ -4505,8 +4485,11 @@ export async function runAgent(
         forceToolNext = true
         continue
       }
-      const incompleteTasks = activeTasks.filter((task) => task.status !== 'completed')
+      const incompleteTasks = useWorkflow
+        ? activeTasks.filter((task) => task.status !== 'completed')
+        : []
       const missingEditEvidence =
+        useWorkflow &&
         requiresWorkspaceEdit &&
         changes.size === 0 &&
         !allTasksCompleted()

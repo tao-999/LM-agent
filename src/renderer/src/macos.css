@@ -280,14 +280,14 @@ input[type=checkbox], input[type=radio] { accent-color:var(--mac-blue); }
 .mac-select.open .mac-select-trigger { border-color:rgba(10,132,255,.72); box-shadow:0 0 0 3px rgba(10,132,255,.22); }
 .mac-select.open .mac-select-trigger svg { transform:rotate(180deg); }
 .mac-select-menu {
-  position:fixed; z-index:10000; overflow:auto; padding:5px; border:1px solid rgba(255,255,255,.16); border-radius:11px;
+  position:fixed; z-index:10000; overflow:auto; box-sizing:border-box; padding:5px; border:1px solid rgba(255,255,255,.16); border-radius:11px;
   background:rgba(48,52,64,.93); box-shadow:0 24px 58px rgba(0,0,0,.62),inset 0 1px rgba(255,255,255,.11);
   backdrop-filter:blur(46px) saturate(185%); animation:mac-menu-in 120ms ease-out;
 }
 .mac-select-group + .mac-select-group { margin-top:4px; padding-top:4px; border-top:1px solid rgba(255,255,255,.08); }
 .mac-select-group>header { padding:5px 9px 4px; color:var(--mac-tertiary); font-size:10px; font-weight:600; }
 .mac-select-group>button { display:flex; width:100%; min-height:26px; align-items:center; justify-content:space-between; gap:10px; padding:0 9px; border:0; border-radius:6px; background:transparent; color:var(--mac-label); cursor:default; font-size:11px; line-height:1.2; text-align:left; }
-.mac-select-group>button span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mac-select-group>button span { min-width:max-content; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .mac-select-group>button:hover { background:var(--mac-blue); color:#fff; }
 .mac-select-group>button.selected { font-weight:600; }
 .mac-select-group>button svg { color:#fff; }
@@ -298,6 +298,7 @@ input[type=checkbox], input[type=radio] { accent-color:var(--mac-blue); }
 .composer-footer-controls .mode-switch,
 .composer-footer-controls .permission-picker,
 .composer-footer-controls .thinking-picker,
+.composer-footer-controls .reasoning-effort-picker,
 .composer-footer-controls .model-picker,
 .composer-footer-controls .creation-confirm-toggle { min-height:27px; border:0; border-radius:7px; background:transparent; box-shadow:none; }
 .composer-footer-controls .mode-switch { padding:0; }
@@ -305,12 +306,23 @@ input[type=checkbox], input[type=radio] { accent-color:var(--mac-blue); }
 .composer-footer-controls .mode-switch button.active { background:rgba(255,255,255,.13); box-shadow:none; }
 .composer-footer-controls .permission-picker,
 .composer-footer-controls .thinking-picker { gap:4px; padding:0 4px 0 7px; }
+.composer-footer-controls .reasoning-effort-picker { display:flex; flex:0 0 auto; width:max-content; min-width:max-content; align-items:center; padding:0 3px; white-space:nowrap; }
+.composer-footer-controls .reasoning-effort-picker .mac-select { flex:0 0 auto; width:max-content; min-width:max-content; }
 .composer-footer-controls .permission-picker:hover,
 .composer-footer-controls .thinking-picker:hover,
+.composer-footer-controls .reasoning-effort-picker:hover,
 .composer-footer-controls .model-picker:hover,
 .composer-footer-controls .creation-confirm-toggle:hover { background:rgba(255,255,255,.075); }
 .composer-footer-controls .creation-confirm-toggle { padding:0 7px; }
 .composer-footer-controls .mac-select-trigger { height:25px; padding:0 4px; border:0; background:transparent; box-shadow:none; }
+.composer-footer-controls .permission-picker .mac-select-trigger,
+.composer-footer-controls .thinking-picker .mac-select-trigger { gap:2px; padding:0 1px; }
+.composer-footer-controls .permission-picker .mac-select-trigger span,
+.composer-footer-controls .thinking-picker .mac-select-trigger span { font-size:8px; }
+.composer-footer-controls .reasoning-effort-picker .mac-select-trigger { width:auto; min-width:max-content; gap:2px; padding:0 2px; color:#c5bcff; font-size:9px; white-space:nowrap; }
+.composer-footer-controls .reasoning-effort-picker .mac-select-trigger span { overflow:visible; text-overflow:clip; }
+.composer-footer-controls .permission-picker>svg,
+.composer-footer-controls .thinking-picker>svg { width:11px; height:11px; }
 .composer-footer-controls .mac-select.open .mac-select-trigger { box-shadow:none; }
 .composer-footer-controls .model-picker { min-width:150px; padding:0 3px 0 8px; }
 .composer-footer-controls .model-refresh { width:26px; height:26px; border:0; border-radius:6px; background:transparent; }

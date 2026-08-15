@@ -228,7 +228,7 @@ test('Chat 回复底部在流式状态展示实时 Tok 速度', async () => {
   assert.match(chatSource, /实时 \$\{liveSpeed\.toFixed\(2\)\} Tok\/s/)
 })
 
-test('生成期间在 Skill 右侧提供手动终止复读并重发入口', async () => {
+test('生成期间在 Skill 右侧提供当前会话原地截断入口', async () => {
   const chatSource = await fs.readFile(
     path.resolve('src/renderer/src/components/ChatPanel.tsx'),
     'utf8'
@@ -236,6 +236,7 @@ test('生成期间在 Skill 右侧提供手动终止复读并重发入口', asyn
   assert.match(chatSource, /running && activePending\?\.\[1\]\.kind !== 'image'/)
   assert.match(chatSource, /className="composer-tool loop-stop-retry"/)
   assert.match(chatSource, /stopLoopAndRetry/)
-  assert.match(chatSource, /excludeFromContext: true/)
+  assert.match(chatSource, /interruptRepetition/)
+  assert.doesNotMatch(chatSource, /retryAfterLoopStopRef/)
   assert.match(chatSource, /终止重发/)
 })

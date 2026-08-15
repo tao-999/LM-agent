@@ -1,10 +1,56 @@
-import type { ModelConfig, ThinkingMode } from './types'
+import type { ModelConfig, ReasoningEffort, ThinkingMode } from './types'
 import { isTokenHubHy3Model } from './model-profiles.ts'
 
 export type ThinkingCapability = 'supported' | 'unsupported' | 'always' | 'unknown'
 
 const normalizedModelName = (model: Pick<ModelConfig, 'model'>): string =>
   model.model.trim().toLocaleLowerCase()
+
+export function isQwen38Model(model: Pick<ModelConfig, 'model'>): boolean {
+  return /(?:^|[^a-z0-9])qwen[-_. ]?3[._-]?8(?:[^a-z0-9]|$)/i.test(
+    normalizedModelName(model)
+  )
+}
+
+export function qwen38ReasoningEffort(
+  model: Pick<ModelConfig, 'model' | 'reasoningEffort'>,
+  enabled: boolean
+): ReasoningEffort | undefined {
+  if (!enabled || !isQwen38Model(model)) return undefined
+  return model.reasoningEffort ?? 'xhigh'
+}
+
+export function qwen38LmStudioThinkingOptions(
+  model: Pick<ModelConfig, 'model' | 'reasoningEffort' | 'reasoningOptions'>,
+  enabled: boolean
+): Record<string, unknown> {
+  const effort = qwen38ReasoningEffort(model, enabled)
+  const supportsEffort = Boolean(
+    model.reasoningOptions?.some((option) =>
+      ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(option)
+    )
+  )
+  return {
+    ...(supportsEffort
+      ? { reasoning_effort: enabled ? (effort ?? 'xhigh') : 'none' }
+      : {}),
+    chat_template_kwargs: {
+      enable_thinking: enabled,
+      preserve_thinking: enabled,
+      ...(supportsEffort && effort ? { reasoning_effort: effort } : {})
+    }
+  }
+}
+
+export function supportsReasoningEffort(
+  model: Pick<ModelConfig, 'reasoningOptions'>
+): boolean {
+  return Boolean(
+    model.reasoningOptions?.some((option) =>
+      ['minimal', 'low', 'medium', 'high', 'xhigh'].includes(option)
+    )
+  )
+}
 
 export function thinkingModelKey(
   model: Pick<ModelConfig, 'provider' | 'baseUrl' | 'model' | 'preset' | 'connectionId'>
