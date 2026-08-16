@@ -2222,15 +2222,14 @@ export async function runAgent(
   let hasConfirmedUsage = false
   let latestUnconfirmedUsage: TokenUsage | undefined
   const recordAgentUsage = (usage: TokenUsage): void => {
-    if (usage.estimated) {
-      latestUnconfirmedUsage = usage
-      return
-    }
     totalUsage = addUsage(totalUsage, usage)
-    hasConfirmedUsage = true
+    if (!usage.estimated) hasConfirmedUsage = true
+    latestUnconfirmedUsage = undefined
   }
-  const visibleAgentUsage = (): TokenUsage | undefined =>
-    hasConfirmedUsage ? totalUsage : latestUnconfirmedUsage
+  const visibleAgentUsage = (): TokenUsage | undefined => {
+    if (latestUnconfirmedUsage) return addUsage(totalUsage, latestUnconfirmedUsage)
+    return hasConfirmedUsage || totalUsage.totalTokens > 0 ? totalUsage : undefined
+  }
   const restrictedWebHosts = requestedWebHosts(request.objective)
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
   const requiresWorkspaceEdit =
@@ -2360,9 +2359,9 @@ export async function runAgent(
     }
     if (info.kind !== 'file') throw new Error(`编辑目标不是文本文件：${relative}`)
     const expectedFingerprint = readFileFingerprints.get(normalized)
-    if (!readFilePaths.has(normalized) || !expectedFingerprint) {
-      throw new Error(`编辑前必须先调用 read_file 读取同一文件：${relative}`)
-    }
+    // 精准编辑可以直接尝试，不再强制要求模型先调用 read_file。
+    // 如果本轮确实读取过文件，仍使用指纹保护用户在读取后的并发修改。
+    if (!readFilePaths.has(normalized) || !expectedFingerprint) return
     const current = currentContent ?? (await readTextFile(request.workspaceRoot, relative))
     if (fingerprintText(current) === expectedFingerprint) return
     throwEditConflict(relative, normalized)
@@ -2775,7 +2774,7 @@ export async function runAgent(
     const relative = text(args.path).trim() || '未指定文件'
     if (!search) {
       throw new Error(
-        `replace_in_file 参数错误：${relative} 的 search 不能为空；文件未修改。请先调用 read_file 读取目标区间，再从返回的最新原文中逐字复制待替换文本。`
+        `replace_in_file 参数错误：${relative} 的 search 不能为空；文件未修改。请提供准确的待替换原文。`
       )
     }
     const occurrenceLines: number[] = []
@@ -2791,8 +2790,7 @@ export async function runAgent(
       throw new Error(
         [
           `replace_in_file 匹配失败：${relative} 中待替换文本出现 0 次，文件未修改。`,
-          '禁止原样重复本次调用。下一步必须重新调用 read_file 读取同一文件的最新目标区间。',
-          '读取成功后，从 read_file 返回的原文中逐字复制 search，去掉行号与分隔符后再调用 replace_in_file；若已掌握准确行号，改用 replace_lines。',
+          '请修正 search 后重试；可自主选择 grep、read_file 定位原文，已掌握准确行号时可改用 replace_lines。',
           '常见原因：原文已变化、空格或换行不同、中文引号与英文引号不同、search 携带了 read_file 的行号。'
         ].join('\n')
       )
@@ -2804,7 +2802,7 @@ export async function runAgent(
         [
           `replace_in_file 匹配失败：${relative} 中待替换文本出现 ${count} 次，文件未修改。`,
           `匹配起始行：${visibleLines}${more}。`,
-          '禁止原样重复本次调用。下一步必须重新调用 read_file 读取目标位置上下文，再扩大 search 使其唯一；若目标行号明确，改用 replace_lines。'
+          '请扩大 search 使其唯一，或在目标行号明确时改用 replace_lines。'
         ].join('\n')
       )
     }
@@ -3815,7 +3813,7 @@ export async function runAgent(
     '咨询解释任务：可直接回答；需要项目事实时只使用读取与搜索工具，禁止修改文件。',
     '搜索定位与代码审查任务：读取、搜索并给出结论；除非用户明确要求修复，否则禁止修改文件。',
     '运行验证任务：仅执行与目标直接相关的检查或测试，禁止顺手修改无关内容。',
-    '文件修改任务：位置未知时先 grep 定位行号，再调用 read_file 读取命中区间上下文；已有选区、明确行号或可靠命中位置时直接读取该区间上下文。读取后仍需判断是否检索其他文件、会话历史或网页资料。已有非空文件默认先使用 replace_in_file 精准替换，搜索文本不唯一或已知行号时使用 replace_lines，仅新增片段时使用 insert_lines。简单修改直接执行，禁止先输出冗长计划。',
+    '文件修改任务：位置未知时可先 grep 定位行号，再按需调用 read_file 读取命中区间上下文；已有准确原文、选区、明确行号或可靠命中位置时允许直接调用精准编辑工具，不强制前置读取。需要理解前后逻辑时仍应自主检索或读取必要资料。已有非空文件优先使用 replace_in_file 精准替换，搜索文本不唯一或已知行号时使用 replace_lines，仅新增片段时使用 insert_lines。简单修改直接执行，禁止先输出冗长计划。',
     '中文文稿规范化任务：若目标是修复英文双引号或英文单引号，先调用 read_file，再调用 normalize_chinese_quotes；该工具会跳过 Markdown 代码块、行内代码和英文单词撇号，禁止慢慢手工替换。',
     '用户没有表达创建、修改、修复、删除、移动或重命名意图时，不得调用任何写入类工具。',
     '工具只为完成目标服务，禁止为了展示流程而调用工具，禁止为了显得完整而强行编辑。',
@@ -4037,21 +4035,6 @@ export async function runAgent(
   let forceToolNext = false
   let consecutiveToolFailures = 0
   const recentToolFailures: string[] = []
-  type ReplaceRecovery = {
-    path: string
-    failedSearch: string
-    failure: string
-  }
-  let replaceRecovery: ReplaceRecovery | null = null
-  let replaceLinesFallbackPath = ''
-  let replaceFailureGuidance = ''
-  const failedReplaceSignatures = new Set<string>()
-  const replaceSignature = (args: Record<string, unknown>): string =>
-    JSON.stringify({
-      path: normalizedWorkspacePath(text(args.path).trim()),
-      search: text(args.search),
-      replacement: text(args.replacement)
-    })
   const toolPriority = new Map([
     ['grep', 0],
     ['read_file', 1],
@@ -4095,11 +4078,6 @@ export async function runAgent(
 
     const toolChoice = workflowToolChoice(workflow.stage, forceToolNext)
     forceToolNext = false
-    const editToolsNeedRead =
-      useWorkflow &&
-      workflow.stage === 'execute' &&
-      permissionMode !== 'read-only' &&
-      readFilePaths.size === 0
     const runtimeSystemMessages: LlmMessage[] = [
       ...(useWorkflow && activeTasks.length
         ? [
@@ -4111,35 +4089,9 @@ export async function runAgent(
             }
           ]
         : []),
-      ...(editToolsNeedRead
-        ? [
-            {
-              role: 'system' as const,
-              content:
-                `编辑工具前置条件：${modelToolScopeInstruction} 修改现有文件前仍必须先用 read_file 读取同一路径的最新目标区间，否则工具层会返回明确失败。grep 始终可用且检索优先级高于 read_file；优先定位关键词与行号，再读取目标区间上下文。已知用户选区时可直接读取选区上下文，也可继续检索其他文件、会话历史或网页资料。`
-            }
-          ]
-        : []),
       ...(invalidToolCorrection
         ? [{ role: 'system' as const, content: invalidToolCorrection }]
         : []),
-      ...(replaceRecovery
-        ? [
-            {
-              role: 'system' as const,
-              content: `replace_in_file 恢复建议：刚才对 ${replaceRecovery.path} 的精确匹配失败。${modelToolScopeInstruction} 建议先用 grep 定位最新文本，再用 read_file 读取同一文件的最新目标区间，也可依据任务选择其他有效工具。禁止再次提交完全相同的失败参数。失败原因：${replaceRecovery.failure}`
-            }
-          ]
-        : replaceLinesFallbackPath
-          ? [
-              {
-                role: 'system' as const,
-                content: `replace_in_file 重复参数已被拦截。${modelToolScopeInstruction} 若最新行号已经明确，优先用 replace_lines 修改 ${replaceLinesFallbackPath}，也可重新检索或读取后构造新的精准参数。`
-              }
-            ]
-          : replaceFailureGuidance
-            ? [{ role: 'system' as const, content: replaceFailureGuidance }]
-            : []),
       ...(useWorkflow && workflow.stage === 'execute' && knowledgeResearchStage !== 'complete'
         ? [
             {
@@ -4223,7 +4175,15 @@ export async function runAgent(
             activeTasks.every((task) => task.status === 'completed')
               ? ['等待用户下一个任务', '等待下一个任务']
               : undefined,
-          shouldInterruptGeneration: takeManualGenerationInterrupt
+          shouldInterruptGeneration: takeManualGenerationInterrupt,
+          onUsageProgress: (usage) => {
+            latestUnconfirmedUsage = usage
+            send({
+              requestId: request.requestId,
+              type: 'context',
+              usage: addUsage(totalUsage, usage)
+            })
+          }
         }
       )
       modelRequestFailures = 0
@@ -4533,7 +4493,6 @@ export async function runAgent(
       })
     }
 
-    let restartAfterReplaceRecovery = false
     for (let callIndex = 0; callIndex < completion.toolCalls.length; callIndex += 1) {
       const call = completion.toolCalls[callIndex]
       if (signal.aborted) throw new Error('任务已停止')
@@ -4558,18 +4517,8 @@ export async function runAgent(
       let result = ''
       let toolSucceeded = false
       let preview: AgentChange[] | undefined
-      let duplicateReplaceBlocked = false
       try {
         if (argumentError) throw new Error(argumentError)
-        if (
-          call.name === 'replace_in_file' &&
-          failedReplaceSignatures.has(replaceSignature(call.arguments))
-        ) {
-          duplicateReplaceBlocked = true
-          throw new Error(
-            `replace_in_file 已拦截完全相同的失败参数：${text(call.arguments.path)}。必须重新读取最新原文并修改 search；若行号明确，请改用 replace_lines。`
-          )
-        }
         {
           if (webVerificationExhausted && isWebTool(call.name)) {
             blockedWebToolCalls += 1
@@ -4677,52 +4626,6 @@ export async function runAgent(
       const replaceMatchFailed =
         call.name === 'replace_in_file' &&
         result.includes('replace_in_file 匹配失败：')
-      if (replaceMatchFailed) {
-        const relative = text(call.arguments.path).trim()
-        const failedSearch = text(call.arguments.search)
-        failedReplaceSignatures.add(replaceSignature(call.arguments))
-        replaceRecovery = {
-          path: relative,
-          failedSearch,
-          failure: result.slice('工具执行失败：'.length, 2400)
-        }
-        replaceFailureGuidance = [
-          `replace_in_file 纠错约束：${relative} 最近一次精确匹配失败。`,
-          '禁止再次提交完全相同的 path、search、replacement 参数。',
-          '必须依据最新 read_file 返回内容重新构造 search；search 需要去掉行号与分隔符，并保留原始空格、换行及引号。',
-          '若准确行号已经明确，优先改用 replace_lines 完成修改。'
-        ].join('\n')
-        restartAfterReplaceRecovery = true
-        forceToolNext = true
-      }
-      if (duplicateReplaceBlocked) {
-        replaceLinesFallbackPath = text(call.arguments.path).trim()
-        replaceFailureGuidance = `replace_in_file 的同一组失败参数已被程序拦截。必须调用 replace_lines，依据最新 read_file 结果提供准确的 start_line、end_line 与 content，目标文件：${replaceLinesFallbackPath}。`
-        restartAfterReplaceRecovery = true
-        forceToolNext = true
-      }
-      const recoveredReplacePath = replaceRecovery?.path
-      if (
-        toolSucceeded &&
-        call.name === 'read_file' &&
-        recoveredReplacePath &&
-        normalizedWorkspacePath(text(call.arguments.path).trim()) ===
-          normalizedWorkspacePath(recoveredReplacePath)
-      ) {
-        replaceRecovery = null
-        restartAfterReplaceRecovery = true
-        forceToolNext = false
-      }
-      if (
-        toolSucceeded &&
-        call.name === 'replace_lines' &&
-        replaceLinesFallbackPath &&
-        normalizedWorkspacePath(text(call.arguments.path).trim()) ===
-          normalizedWorkspacePath(replaceLinesFallbackPath)
-      ) {
-        replaceLinesFallbackPath = ''
-        replaceFailureGuidance = ''
-      }
       if (webVerificationExhausted && isWebTool(call.name) && blockedWebToolCalls >= 2) {
         send({
           requestId: request.requestId,
@@ -4819,21 +4722,7 @@ export async function runAgent(
       if (replaceMatchFailed) {
         messages.push({
           role: 'user',
-          content: `<runtime_replace_recovery path="${text(call.arguments.path)}">精确替换失败，文件未修改。下一步必须重新调用 read_file 读取同一文件的最新目标区间；读取前禁止再次编辑。读取后从工具返回的真实原文逐字构造新的 search，或在行号明确时改用 replace_lines。禁止重复上一组参数。</runtime_replace_recovery>`
-        })
-      } else if (duplicateReplaceBlocked) {
-        messages.push({
-          role: 'user',
-          content: `<runtime_replace_recovery path="${text(call.arguments.path)}" fallback="replace_lines">完全相同的失败参数已被拦截。下一步必须只调用 replace_lines，并依据最新 read_file 返回的行号提供准确区间与完整替换内容。</runtime_replace_recovery>`
-        })
-      } else if (
-        toolSucceeded &&
-        call.name === 'read_file' &&
-        recoveredReplacePath
-      ) {
-        messages.push({
-          role: 'user',
-          content: `<runtime_replace_recovery path="${recoveredReplacePath}" refreshed="true">目标文件已经重新读取。现在必须基于上一条最新工具结果修正参数：禁止使用此前失败的 search；精确文本唯一时调用 replace_in_file，行号明确时调用 replace_lines。</runtime_replace_recovery>`
+          content: `<runtime_replace_result path="${text(call.arguments.path)}" status="not_modified">精确替换未命中，文件未修改。请根据真实错误自主调整 search、改用行号替换，或选择其他合适工具继续。</runtime_replace_result>`
         })
       }
       if (
@@ -4991,19 +4880,7 @@ export async function runAgent(
         })
         return
       }
-      if (restartAfterReplaceRecovery) {
-        for (const skippedCall of completion.toolCalls.slice(callIndex + 1)) {
-          messages.push({
-            role: 'tool',
-            content:
-              '工具调用已取消：replace_in_file 进入纠错恢复流程，必须先重新读取目标文件并依据最新原文修正参数。',
-            tool_call_id: skippedCall.id
-          })
-        }
-        break
-      }
     }
-    if (restartAfterReplaceRecovery) continue
   }
 
   throw new Error('任务已停止')

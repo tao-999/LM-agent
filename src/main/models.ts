@@ -122,13 +122,18 @@ function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: numb
 }
 
 export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
-  return createUsage(
+  const combined = createUsage(
     left.promptTokens + right.promptTokens,
     left.completionTokens + right.completionTokens,
     Boolean(left.estimated || right.estimated),
     (left.generationDurationMs ?? 0) + (right.generationDurationMs ?? 0) || undefined,
     (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0)
   )
+  // 流式阶段展示当前请求近 3 秒速度，避免被之前已完成调用的累计均速稀释。
+  if (right.estimated && right.tokensPerSecond !== undefined) {
+    combined.tokensPerSecond = right.tokensPerSecond
+  }
+  return combined
 }
 
 export function tokenUsageFromOpenAiPayload(
@@ -2713,6 +2718,7 @@ async function streamCompleteWithTools(
     let buffer = ''
     let firstOutputAt = 0
     let latestUsagePayload: OpenAiUsagePayload | undefined
+    let latestTimingsPayload: OpenAiTimingsPayload | undefined
     let responseStatus = ''
     const pendingToolCalls = new Map<number, { id?: string; name: string; arguments: string }>()
 
@@ -2740,7 +2746,19 @@ async function streamCompleteWithTools(
             status?: string
             output?: ResponsesOutputItem[]
             usage?: OpenAiUsagePayload
+            timings?: OpenAiTimingsPayload
+            stats?: {
+              input_tokens?: number
+              total_output_tokens?: number
+              tokens_per_second?: number
+            }
             error?: { message?: string }
+          }
+          timings?: OpenAiTimingsPayload
+          stats?: {
+            input_tokens?: number
+            total_output_tokens?: number
+            tokens_per_second?: number
           }
           error?: { message?: string } | string
         }
@@ -2789,9 +2807,28 @@ async function streamCompleteWithTools(
         }
         if (event.type === 'response.completed') {
           responseStatus = event.response?.status ?? 'completed'
+          const stats = event.response?.stats ?? event.stats
           latestUsagePayload = mergeOpenAiUsagePayload(
             latestUsagePayload,
-            event.response?.usage ?? {}
+            {
+              ...(event.response?.usage ?? {}),
+              ...(stats?.input_tokens !== undefined ? { input_tokens: stats.input_tokens } : {}),
+              ...(stats?.total_output_tokens !== undefined
+                ? { output_tokens: stats.total_output_tokens }
+                : {})
+            }
+          )
+          latestTimingsPayload = mergeOpenAiTimingsPayload(
+            latestTimingsPayload,
+            {
+              ...(event.response?.timings ?? event.timings ?? {}),
+              ...(stats?.total_output_tokens !== undefined
+                ? { predicted_n: stats.total_output_tokens }
+                : {}),
+              ...(stats?.tokens_per_second !== undefined
+                ? { predicted_per_second: stats.tokens_per_second }
+                : {})
+            }
           )
           const parsed = parseResponsesOutput(event.response?.output ?? [])
           if (!content && parsed.content) normalizedContent.push(parsed.content)
@@ -2815,6 +2852,7 @@ async function streamCompleteWithTools(
     channelRouter.flush()
     thinkRouter.flush()
     reasoningTagFilter.flush()
+    liveUsage.flush()
     const rawToolCalls = [...pendingToolCalls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([index, call]) => ({
@@ -2839,7 +2877,8 @@ async function streamCompleteWithTools(
             function: { name: call.name, arguments: JSON.stringify(call.arguments) }
           }))
     const providerUsage =
-      tokenUsageFromOpenAiPayload(latestUsagePayload) ??
+      tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ??
+      liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
       createUsage(
         estimatedPrompt,
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
@@ -2977,6 +3016,7 @@ async function streamCompleteWithTools(
     channelRouter.flush()
     thinkRouter.flush()
     reasoningTagFilter.flush()
+    liveUsage.flush()
     const parsedTextCalls = parseTextToolCalls(
       content,
       reasoning,
@@ -3003,7 +3043,7 @@ async function streamCompleteWithTools(
           providerUsage,
           providerGenerationDurationMs ?? (firstOutputAt ? Date.now() - firstOutputAt : undefined)
         )
-      :
+      : liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
       createUsage(
         estimatedPrompt,
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
@@ -3162,6 +3202,7 @@ async function streamCompleteWithTools(
   channelRouter.flush()
   thinkRouter.flush()
   reasoningTagFilter.flush()
+  liveUsage.flush()
   const parsedTextCalls = parseTextToolCalls(
     content,
     reasoning,
@@ -3198,7 +3239,7 @@ async function streamCompleteWithTools(
         providerUsage,
         firstOutputAt ? Date.now() - firstOutputAt : undefined
       )
-    :
+    : liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
     createUsage(
       estimatedPrompt,
       estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
