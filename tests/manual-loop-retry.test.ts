@@ -23,8 +23,9 @@ test('终止重发在当前请求内触发截断，不停止请求或重发用�
   assert.doesNotMatch(implementation, /excludeFromContext/)
 })
 
-test('模型流只保留手动截断，不再加载自动重复检测器', () => {
+test('模型流保留手动截断，并只恢复单模块高重复 n-gram 检测', () => {
   assert.match(modelsSource, /finishReason:\s*manuallyInterrupted\s*\?\s*'manual_interrupt'/)
-  assert.doesNotMatch(modelsSource, /createStreamRepetitionGuard/)
+  assert.match(modelsSource, /createStreamRepetitionGuard/)
+  assert.match(modelsSource, /repetition_interrupt/)
   assert.doesNotMatch(modelsSource, /repetitionSamples/)
 })

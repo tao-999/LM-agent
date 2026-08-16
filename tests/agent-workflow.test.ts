@@ -13,8 +13,9 @@ test('会话关闭工作流后直接进入全工具执行阶段', () => {
   assert.equal(initialWorkflowStage(false), 'execute')
 })
 
-test('理解阶段不向模型暴露操作工具', () => {
-  for (const tool of ['replace_in_file', 'read_file', 'grep', 'update_tasks']) {
+test('理解阶段始终暴露 tasks，但暂不暴露其他操作工具', () => {
+  assert.equal(toolAvailableInStage('understand', 'update_tasks'), true)
+  for (const tool of ['replace_in_file', 'read_file', 'grep']) {
     assert.equal(toolAvailableInStage('understand', tool), false)
   }
   assert.equal(workflowToolChoice('understand', true), 'auto')

@@ -11,6 +11,7 @@ import {
 import {
   CHAT_BOTTOM_TOLERANCE_PX,
   isScrollViewportAtBottom,
+  shouldRestoreBottomAfterLayoutGrowth,
   scrollViewportBottomTop
 } from '../src/renderer/src/utils/scroll-position.ts'
 import {
@@ -173,8 +174,11 @@ test('会话底部使用真实阈值并保留完整可见留白', async () => {
   const styleSource = await fs.readFile(path.resolve('src/renderer/src/styles.css'), 'utf8')
   assert.match(chatSource, /atBottomThreshold=\{CHAT_BOTTOM_TOLERANCE_PX\}/)
   assert.match(chatSource, /scrollerRef=\{setChatScrollerRef\}/)
-  assert.match(chatSource, /totalListHeightChanged=\{scheduleChatBottomSync\}/)
+  assert.match(chatSource, /totalListHeightChanged=\{handleTotalListHeightChanged\}/)
   assert.match(chatSource, /new ResizeObserver\(handleResize\)/)
+  assert.match(chatSource, /resizeObserver\.observe\(composer\)/)
+  assert.match(chatSource, /previousComposerHeightRef/)
+  assert.match(chatSource, /shouldRestoreBottomAfterLayoutGrowth\(scroller, growth\)/)
   assert.match(chatSource, /scrollViewportBottomTop\(chatScrollerElement\)/)
   assert.match(styleSource, /\.message-list-footer\s*\{\s*height:\s*36px;/)
 })
@@ -198,6 +202,20 @@ test('会话底部判定容忍小数像素误差且离开底部后恢复箭头',
       scrollViewportBottomTop({ scrollHeight: 1000.4, scrollTop: 0, clientHeight: 400.2 }) -
         600.2
     ) < 0.0001
+  )
+  assert.equal(
+    shouldRestoreBottomAfterLayoutGrowth(
+      { scrollHeight: 1200, scrollTop: 680, clientHeight: 400 },
+      108
+    ),
+    true
+  )
+  assert.equal(
+    shouldRestoreBottomAfterLayoutGrowth(
+      { scrollHeight: 1200, scrollTop: 500, clientHeight: 400 },
+      108
+    ),
+    false
   )
 })
 

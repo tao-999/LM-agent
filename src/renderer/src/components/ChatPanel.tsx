@@ -59,6 +59,7 @@ import { markComposerInputActive } from '../utils/composer-input-activity'
 import {
   CHAT_BOTTOM_TOLERANCE_PX,
   isScrollViewportAtBottom,
+  shouldRestoreBottomAfterLayoutGrowth,
   scrollViewportBottomTop
 } from '../utils/scroll-position'
 import type {
@@ -1651,10 +1652,13 @@ export function ChatPanel(): React.JSX.Element {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const chatScrollerRef = useRef<HTMLElement | null>(null)
   const bottomSyncFrameRef = useRef<number | null>(null)
+  const previousComposerHeightRef = useRef(0)
+  const previousListHeightRef = useRef(0)
   const [chatScrollerElement, setChatScrollerElement] = useState<HTMLElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollRegionRef = useRef<HTMLDivElement>(null)
+  const composerWrapRef = useRef<HTMLDivElement>(null)
   const sessionPanelRef = useRef<HTMLDivElement>(null)
   const comfyScanStartedRef = useRef(false)
   const skillButtonRef = useRef<HTMLButtonElement>(null)
@@ -2625,6 +2629,31 @@ export function ChatPanel(): React.JSX.Element {
     })
   }, [syncChatBottomState])
 
+  const restoreBottomAfterLayoutGrowth = useCallback((growth = 0): void => {
+    const scroller = chatScrollerRef.current
+    if (!scroller) return
+    const shouldRestore =
+      atBottomRef.current || shouldRestoreBottomAfterLayoutGrowth(scroller, growth)
+    if (!shouldRestore) return
+    const restore = (): void => {
+      scroller.scrollTop = scrollViewportBottomTop(scroller)
+      atBottomRef.current = true
+      setAtBottom((current) => (current ? current : true))
+    }
+    restore()
+    window.requestAnimationFrame(restore)
+  }, [])
+
+  const handleTotalListHeightChanged = useCallback(
+    (height: number): void => {
+      const previousHeight = previousListHeightRef.current
+      previousListHeightRef.current = height
+      restoreBottomAfterLayoutGrowth(Math.max(0, height - previousHeight))
+      scheduleChatBottomSync()
+    },
+    [restoreBottomAfterLayoutGrowth, scheduleChatBottomSync]
+  )
+
   const setChatScrollerRef = useCallback(
     (ref: HTMLElement | Window | null): void => {
       const element = ref instanceof HTMLElement ? ref : null
@@ -2657,6 +2686,29 @@ export function ChatPanel(): React.JSX.Element {
       }
     }
   }, [chatScrollerElement, scheduleChatBottomSync])
+
+  useLayoutEffect(() => {
+    const composer = composerWrapRef.current
+    if (!composer) return
+    const syncComposerHeight = (): void => {
+      const nextHeight = composer.getBoundingClientRect().height
+      const previousHeight = previousComposerHeightRef.current
+      previousComposerHeightRef.current = nextHeight
+      restoreBottomAfterLayoutGrowth(Math.max(0, nextHeight - previousHeight))
+      scheduleChatBottomSync()
+    }
+    syncComposerHeight()
+    const resizeObserver = new ResizeObserver(syncComposerHeight)
+    resizeObserver.observe(composer)
+    return () => resizeObserver.disconnect()
+  }, [restoreBottomAfterLayoutGrowth, scheduleChatBottomSync])
+
+  useEffect(() => {
+    previousListHeightRef.current = 0
+    previousComposerHeightRef.current = 0
+    atBottomRef.current = true
+    setAtBottom(true)
+  }, [conversation?.id])
 
   return (
     <section className="chat-panel">
@@ -2797,7 +2849,7 @@ export function ChatPanel(): React.JSX.Element {
               increaseViewportBy={{ top: 500, bottom: 700 }}
               rangeChanged={setVisibleRange}
               atBottomStateChange={handleVirtuosoAtBottomStateChange}
-              totalListHeightChanged={scheduleChatBottomSync}
+              totalListHeightChanged={handleTotalListHeightChanged}
               itemContent={(index, message) => (
                 <MessageCard
                   message={message}
@@ -2879,6 +2931,7 @@ export function ChatPanel(): React.JSX.Element {
       )}
 
       <div
+        ref={composerWrapRef}
         className={`composer-wrap mode-${mode}`}
         onDragOver={(event) => {
           event.preventDefault()

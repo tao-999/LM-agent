@@ -40,6 +40,10 @@ import {
   subscribeLmStudioLiveStats,
   type LmStudioLiveStats
 } from './lm-studio-live-stats'
+import {
+  createStreamRepetitionGuard,
+  type StreamRepetitionDetection
+} from './stream-repetition-guard'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -2688,26 +2692,35 @@ async function streamCompleteWithTools(
   let content = ''
   let reasoning = ''
   let manuallyInterrupted = false
+  let repetitionDetection: StreamRepetitionDetection | null = null
+  const reasoningRepetitionGuard = createStreamRepetitionGuard('reasoning')
+  const contentRepetitionGuard = createStreamRepetitionGuard('content')
   const stopForManualInterrupt = (): boolean => {
     if (!manuallyInterrupted && options.shouldInterruptGeneration?.()) {
       manuallyInterrupted = true
     }
     return manuallyInterrupted
   }
+  const stopForGenerationInterrupt = (): boolean =>
+    stopForManualInterrupt() || Boolean(repetitionDetection)
   const visibleContent = createToolMarkupFilter(onContent)
   const visibleReasoning = createToolMarkupFilter(onReasoning)
+  const appendContent = (value: string): void => {
+    if (!value) return
+    content += value
+    visibleContent.push(value)
+    repetitionDetection ??= contentRepetitionGuard.push(value)
+  }
   const appendReasoning = (value: string): void => {
     if (!value) return
     reasoning += value
     visibleReasoning.push(value)
+    repetitionDetection ??= reasoningRepetitionGuard.push(value)
   }
   const reasoningTagFilter = createReasoningTagFilter(appendReasoning)
   const emitReasoning = (value: string): void => reasoningTagFilter.push(value)
   const thinkRouter = createThinkRouter(
-    (value) => {
-      content += value
-      visibleContent.push(value)
-    },
+    appendContent,
     emitReasoning
   )
   const channelRouter = createChannelRouter(
@@ -2753,7 +2766,7 @@ async function streamCompleteWithTools(
     responsesStream: while (true) {
       const { value, done } = await reader.read()
       if (done) break
-      if (stopForManualInterrupt()) {
+      if (stopForGenerationInterrupt()) {
         await reader.cancel().catch(() => undefined)
         break
       }
@@ -2867,7 +2880,7 @@ async function streamCompleteWithTools(
             })
           }
         }
-        if (manuallyInterrupted) {
+        if (manuallyInterrupted || repetitionDetection) {
           await reader.cancel().catch(() => undefined)
           break responsesStream
         }
@@ -2934,6 +2947,8 @@ async function streamCompleteWithTools(
         contextMemory: prepared.contextMemory,
         finishReason: manuallyInterrupted
           ? 'manual_interrupt'
+          : repetitionDetection
+            ? 'repetition_interrupt'
           : toolCalls.length
             ? 'tool_calls'
             : responseStatus || 'completed'
@@ -2973,7 +2988,7 @@ async function streamCompleteWithTools(
     ollamaToolStream: while (true) {
       const { value, done } = await reader.read()
       if (done) break
-      if (stopForManualInterrupt()) {
+      if (stopForGenerationInterrupt()) {
         await reader.cancel().catch(() => undefined)
         break
       }
@@ -3013,7 +3028,7 @@ async function streamCompleteWithTools(
         if (data.message?.tool_calls?.length) {
           rawToolCalls = data.message.tool_calls
         }
-        if (manuallyInterrupted) {
+        if (manuallyInterrupted || repetitionDetection) {
           await reader.cancel().catch(() => undefined)
           break ollamaToolStream
         }
@@ -3092,6 +3107,8 @@ async function streamCompleteWithTools(
       compressed: prepared.compressed,
       finishReason: manuallyInterrupted
         ? 'manual_interrupt'
+        : repetitionDetection
+          ? 'repetition_interrupt'
         : toolCalls.length
           ? 'tool_calls'
           : finishReason
@@ -3139,7 +3156,7 @@ async function streamCompleteWithTools(
   openAiToolStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
-    if (stopForManualInterrupt()) {
+    if (stopForGenerationInterrupt()) {
       await reader.cancel().catch(() => undefined)
       break
     }
@@ -3207,7 +3224,7 @@ async function streamCompleteWithTools(
         }
         pendingToolCalls.set(index, current)
       }
-      if (manuallyInterrupted) {
+      if (manuallyInterrupted || repetitionDetection) {
         await reader.cancel().catch(() => undefined)
         break openAiToolStream
       }
@@ -3292,6 +3309,8 @@ async function streamCompleteWithTools(
       contextMemory: prepared.contextMemory,
       finishReason: manuallyInterrupted
         ? 'manual_interrupt'
+        : repetitionDetection
+          ? 'repetition_interrupt'
         : toolCalls.length
           ? 'tool_calls'
           : finishReason

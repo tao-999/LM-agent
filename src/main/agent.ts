@@ -1986,6 +1986,30 @@ export async function runWebChat(
         content: completion.reasoning
       })
     }
+    if (completion.finishReason === 'repetition_interrupt') {
+      onEvent({
+        type: 'status',
+        title: '检测到高重复输出，已自动截断重发',
+        content:
+          '单个思考或正文模块的滑动区间出现高比例重复 n-gram；当前会话、网页结果与 Token 统计均已保留。'
+      })
+      const recoveryMessage: LlmMessage = {
+        role: 'system',
+        content:
+          '运行时状态：上一生成段因单模块高重复 n-gram 已被自动截断。当前会话、用户目标与工具结果未变化，被截断文本不作为有效结果。'
+      }
+      const lastMessage = workingMessages.at(-1)
+      if (
+        lastMessage?.role === 'system' &&
+        lastMessage.content.startsWith('运行时状态：上一生成段因单模块高重复 n-gram')
+      ) {
+        workingMessages[workingMessages.length - 1] = recoveryMessage
+      } else {
+        workingMessages.push(recoveryMessage)
+      }
+      step -= 1
+      continue
+    }
     if (completion.finishReason === 'manual_interrupt') {
       onEvent({
         type: 'status',
@@ -2260,11 +2284,11 @@ export async function runAgent(
     : '用户未指定网页来源时，才执行多网站交叉核验。'
   const modelToolScopeInstruction = !useWorkflow
     ? permissionMode === 'read-only'
-      ? '自主模式已开启：从首轮开始开放全部读取、检索与网页工具，写入类工具不发送给模型。'
-      : '自主模式已开启：从首轮开始开放当前权限允许的全部工具，由模型自主决定是否调用及调用顺序。'
+      ? '自主模式已开启：从首轮开始开放 update_tasks 与全部读取、检索、网页工具，写入类工具不发送给模型；任务清单由模型自主决定是否调用。'
+      : '自主模式已开启：从首轮开始开放 update_tasks 与当前权限允许的全部工具，由模型自主决定是否建立任务清单、调用其他工具及调用顺序。'
     : permissionMode === 'read-only'
-      ? '进入执行阶段后仅开放读取、检索、网页查询与任务清单工具；编辑、创建、复制、移动、删除及命令工具不会发送给模型。'
-      : '理解阶段不开放工具，任务清单阶段只开放 update_tasks，进入执行阶段后开放当前权限允许的完整工具。'
+      ? 'update_tasks 始终可见；进入执行阶段后仅开放读取、检索与网页查询工具，编辑、创建、复制、移动、删除及命令工具不会发送给模型。'
+      : 'update_tasks 从首轮起始终可见；理解阶段暂不开放其他操作工具，进入执行阶段后开放当前权限允许的完整工具。'
 
   const recordChanges = (nextChanges: AgentChange[]): void => {
     for (const change of nextChanges) {
@@ -3841,7 +3865,7 @@ export async function runAgent(
       ]
     : [
         request.instructions,
-        '你是运行在个人电脑中的星伴 AI。当前为自主 Agent 模式：程序不规定理解、Tasks 或执行阶段，也不要求建立任务清单。当前权限允许的工具从首轮起全部开放，请依据用户目标自行决定是否调用、调用顺序和结束时机。',
+        '你是运行在个人电脑中的星伴 AI。当前为自主 Agent 模式：程序不规定理解、Tasks 或执行阶段，也不强制建立任务清单。update_tasks 与当前权限允许的其他工具从首轮起全部开放，请依据用户目标自行决定是否建立清单、调用顺序和结束时机。',
         '只处理最后一个 <current_task>，历史内容仅作参考，禁止重新执行已经完成的旧任务。',
         `当前工作区：${request.workspaceRoot}`,
         `系统当前时间：${currentTime}（Asia/Shanghai）。`,
@@ -4110,7 +4134,7 @@ export async function runAgent(
             {
               role: 'system' as const,
               content:
-                '当前阶段仅用于理解本轮 current_task。请用简体中文归纳目标、约束、已知信息与可验证完成标准；本阶段没有工具调用，也不得输出最终答复。完成理解后，程序会切换到任务清单阶段。'
+                '当前阶段用于理解本轮 current_task。update_tasks 已始终开放；请先形成足够的目标、约束、已知信息与完成标准，再自主决定是否立即建立清单。本阶段暂不开放其他操作工具，也不得输出最终答复。'
             }
           ]
         : workflow.stage === 'tasks'
@@ -4259,6 +4283,38 @@ export async function runAgent(
         title: workflow.stage === 'understand' ? '理解任务' : '思考',
         content: completion.reasoning
       })
+    }
+    if (completion.finishReason === 'repetition_interrupt') {
+      send({
+        requestId: request.requestId,
+        type: 'status',
+        title: '检测到高重复输出，已自动截断重发',
+        content:
+          '单个思考或正文模块的滑动区间出现高比例重复 n-gram；Tasks、工具结果、文件改动与 Token 统计均已保留。'
+      })
+      const recoveryMessage: LlmMessage = {
+        role: 'system',
+        content: [
+          '运行时状态快照：上一生成段因单模块高重复 n-gram 已被自动截断。',
+          `工作流阶段：${workflow.stage}。`,
+          `任务清单：${activeTasks.length ? activeTasks.map((task) => `${task.id}=${task.status}`).join('；') : '尚未建立'}。`,
+          `已记录文件改动：${changes.size} 个。`,
+          '当前会话、用户目标、工具结果与文件状态未变化，被截断文本不作为有效结果。'
+        ].join('\n')
+      }
+      const lastMessage = messages.at(-1)
+      if (
+        lastMessage?.role === 'system' &&
+        lastMessage.content.startsWith(
+          '运行时状态快照：上一生成段因单模块高重复 n-gram'
+        )
+      ) {
+        messages[messages.length - 1] = recoveryMessage
+      } else {
+        messages.push(recoveryMessage)
+      }
+      forceToolNext = false
+      continue
     }
     if (completion.finishReason === 'manual_interrupt') {
       if (allTasksCompleted()) {
@@ -4717,6 +4773,95 @@ export async function runAgent(
         content: toolResultForModel(result),
         tool_call_id: call.id
       })
+      const toolCallFailed =
+        result.startsWith('工具执行失败：') || result.startsWith('工具参数格式无效：')
+      if (toolCallFailed) {
+        const skippedCalls = completion.toolCalls.slice(callIndex + 1)
+        for (const skippedCall of skippedCalls) {
+          messages.push({
+            role: 'tool',
+            content:
+              '本次工具未执行：同批次中前一个工具已经失败，程序已停止继续执行旧方案，等待模型读取失败原因后重新规划。',
+            tool_call_id: skippedCall.id
+          })
+          const skippedDescription = describeToolCall(
+            skippedCall.name,
+            toolPresentationArguments.get(skippedCall.id) ?? skippedCall.arguments
+          )
+          send({
+            requestId: request.requestId,
+            type: 'tool',
+            title: `${skippedDescription.title} · 未执行`,
+            toolName: skippedCall.name,
+            content: '同批次前一个工具失败，已取消旧方案并交回模型重新判断'
+          })
+        }
+        messages.push({
+          role: 'user',
+          content: [
+            '工具失败运行时反馈：',
+            result,
+            skippedCalls.length
+              ? `同批次其余 ${skippedCalls.length} 个工具调用均未执行。`
+              : '',
+            '请先读取并理解真实失败原因，再重新选择参数、补充读取最新文件内容或改用合适工具。禁止继续沿用本轮尚未执行的旧调用。'
+          ]
+            .filter(Boolean)
+            .join('\n')
+        })
+        send({
+          requestId: request.requestId,
+          type: 'tool',
+          title: `${description.title} · 失败`,
+          toolName: call.name,
+          content: toolResultPreview(result)
+        })
+        if (invalidToolArgumentRetries >= 3) {
+          send({
+            requestId: request.requestId,
+            type: 'message',
+            content:
+              '模型连续三次生成无法安全恢复的工具参数 JSON，任务已停止。工具本身没有执行失败；请检查该模型的 Harmony 聊天模板或换用兼容模板后重试。'
+          })
+          send({
+            requestId: request.requestId,
+            type: 'done',
+            title: '模型工具参数格式连续错误',
+            changes: [...changes.values()],
+            usage: visibleAgentUsage()
+          })
+          return
+        }
+        if (consecutiveToolFailures >= 3) {
+          send({
+            requestId: request.requestId,
+            type: 'status',
+            title: '工具连续失败三次，停止继续尝试',
+            content: '已触发失败熔断，Agent 不再重复调用工具'
+          })
+          send({
+            requestId: request.requestId,
+            type: 'message',
+            content: [
+              '工具连续失败三次，任务已安全终止，避免继续钻牛角尖。',
+              '',
+              '最近失败：',
+              ...recentToolFailures.map((failure) => `- ${failure}`),
+              '',
+              '当前已完成的改动会保留；未完成部分请根据失败原因调整环境或任务要求后再继续。'
+            ].join('\n')
+          })
+          send({
+            requestId: request.requestId,
+            type: 'done',
+            title: '连续失败，任务已安全终止',
+            changes: [...changes.values()],
+            usage: visibleAgentUsage()
+          })
+          return
+        }
+        break
+      }
       if (replaceMatchFailed) {
         messages.push({
           role: 'user',

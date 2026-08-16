@@ -10,8 +10,9 @@ export function toolAvailableInStage(
   stage: AgentWorkflowStage,
   toolName: string
 ): boolean {
+  if (toolName === 'update_tasks') return true
   if (stage === 'understand') return false
-  if (stage === 'tasks') return toolName === 'update_tasks'
+  if (stage === 'tasks') return false
   return true
 }
 
