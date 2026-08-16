@@ -207,8 +207,21 @@ test('Chat 回复底部只展示模型服务返回的真实 Token 用量', async
     'utf8'
   )
   assert.match(chatSource, /message\.usage && !message\.usage\.estimated/)
-  assert.doesNotMatch(chatSource, /近3秒|滑动窗口|interruptedUsage|liveUsage/)
+  assert.doesNotMatch(chatSource, /滑动窗口|interruptedUsage|liveUsage/)
+  assert.match(chatSource, /实时输出/)
   assert.match(chatSource, /当前模型服务未在本轮响应中返回真实 Token 用量/)
+})
+
+test('LM Studio 实时速度来自主进程官方日志流而非前端估算', async () => {
+  const modelSource = await fs.readFile(path.resolve('src/main/models.ts'), 'utf8')
+  const statsSource = await fs.readFile(
+    path.resolve('src/main/lm-studio-live-stats.ts'),
+    'utf8'
+  )
+  assert.match(modelSource, /subscribeLmStudioLiveStats/)
+  assert.match(statsSource, /spawn\(executable, \['log', 'stream'/)
+  assert.match(statsSource, /tg_3s/)
+  assert.doesNotMatch(statsSource, /performance\.now|Date\.now\(\).*decodedTokens/)
 })
 
 test('精准替换不强制前置读取，但用户编辑锁仍要求读取最新内容', async () => {

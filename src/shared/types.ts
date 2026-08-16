@@ -161,6 +161,7 @@ export type TokenUsage = {
   estimated?: boolean
   generationDurationMs?: number
   tokensPerSecond?: number
+  live?: boolean
 }
 
 export type ContextWindowState = {

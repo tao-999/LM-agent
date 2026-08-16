@@ -980,15 +980,20 @@ function AssistantMessageMetaActions({
   const exactUsage = message.usage && !message.usage.estimated ? message.usage : null
   const usageUnavailable =
     message.status !== 'streaming' && !exactUsage
+  const usageText = exactUsage
+    ? exactUsage.live
+      ? `实时输出 ${exactUsage.completionTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`
+      : `输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`
+    : ''
 
   return (
     <>
       {exactUsage && (
         <span
           className="token-usage"
-          title={`输入 ${exactUsage.promptTokens.toLocaleString()} Token，缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${exactUsage.completionTokens.toLocaleString()} Token，合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? `，生成速度 ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+          title={usageText}
         >
-          {`输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
+          {usageText}
         </span>
       )}
       {usageUnavailable && (

@@ -36,6 +36,10 @@ import {
   parseResponsesOutput,
   type ResponsesOutputItem
 } from './responses-api'
+import {
+  subscribeLmStudioLiveStats,
+  type LmStudioLiveStats
+} from './lm-studio-live-stats'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -80,7 +84,8 @@ function createUsage(
   completionTokens: number,
   estimated = false,
   generationDurationMs?: number,
-  cachedPromptTokens = 0
+  cachedPromptTokens = 0,
+  live = false
 ): TokenUsage {
   const safePromptTokens = Math.max(0, Math.round(promptTokens))
   const safeCompletionTokens = Math.max(0, Math.round(completionTokens))
@@ -101,6 +106,7 @@ function createUsage(
         }
       : {}),
     estimated,
+    ...(live ? { live: true } : {}),
     ...(safeDuration
       ? {
           generationDurationMs: safeDuration,
@@ -116,7 +122,8 @@ function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: numb
     usage.completionTokens,
     Boolean(usage.estimated),
     usage.generationDurationMs ?? generationDurationMs,
-    usage.cachedPromptTokens ?? 0
+    usage.cachedPromptTokens ?? 0,
+    Boolean(usage.live)
   )
 }
 
@@ -126,7 +133,38 @@ export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
     left.completionTokens + right.completionTokens,
     Boolean(left.estimated || right.estimated),
     (left.generationDurationMs ?? 0) + (right.generationDurationMs ?? 0) || undefined,
-    (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0)
+    (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0),
+    Boolean(right.live)
+  )
+}
+
+function usageFromLmStudioLiveStats(stats: LmStudioLiveStats): TokenUsage {
+  const speed = stats.final
+    ? stats.averageTokensPerSecond
+    : stats.recentTokensPerSecond
+  return createUsage(
+    0,
+    stats.decodedTokens,
+    false,
+    speed > 0 ? (stats.decodedTokens / speed) * 1000 : undefined,
+    0,
+    !stats.final
+  )
+}
+
+function attachLmStudioFinalStats(
+  usage: TokenUsage,
+  stats?: LmStudioLiveStats
+): TokenUsage {
+  if (!stats || usage.tokensPerSecond || stats.averageTokensPerSecond <= 0) return usage
+  return createUsage(
+    usage.promptTokens,
+    usage.completionTokens,
+    Boolean(usage.estimated),
+    usage.completionTokens > 0
+      ? (usage.completionTokens / stats.averageTokensPerSecond) * 1000
+      : undefined,
+    usage.cachedPromptTokens ?? 0
   )
 }
 
@@ -2687,19 +2725,25 @@ async function streamCompleteWithTools(
   const normalizedReasoning = createStreamingTextNormalizer(emitReasoning)
 
   if (options.useResponsesApi && isLmStudioEndpoint(model)) {
-    const parts = responsesRequestParts(compatible.messages, tools)
-    const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/responses'), {
-      method: 'POST',
-      headers: headers(model),
-      signal,
-      body: safeJsonBody({
-        model: model.model,
-        ...parts,
-        ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
-        stream: true,
-        ...responsesThinkingOptions(model)
+    const liveStatsSession = await subscribeLmStudioLiveStats(
+      model.model,
+      '/v1/responses',
+      (stats) => reportProviderUsage(usageFromLmStudioLiveStats(stats))
+    )
+    try {
+      const parts = responsesRequestParts(compatible.messages, tools)
+      const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/responses'), {
+        method: 'POST',
+        headers: headers(model),
+        signal,
+        body: safeJsonBody({
+          model: model.model,
+          ...parts,
+          ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
+          stream: true,
+          ...responsesThinkingOptions(model)
+        })
       })
-    })
     if (!response.ok || !response.body) {
       throw new Error(`模型请求失败：${await responseError(response)}`)
     }
@@ -2862,39 +2906,45 @@ async function streamCompleteWithTools(
             type: 'function',
             function: { name: call.name, arguments: JSON.stringify(call.arguments) }
           }))
-    const providerUsage =
+    const liveFinalStats = await liveStatsSession?.waitForFinal()
+    const providerUsage = attachLmStudioFinalStats(
       tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ??
-      createUsage(
-        estimatedPrompt,
-        estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
-        true
-      )
+        createUsage(
+          estimatedPrompt,
+          estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
+          true
+        ),
+      liveFinalStats ?? liveStatsSession?.latest()
+    )
     const providerFinalUsage = providerUsage
     reportProviderUsage(providerFinalUsage)
     const finalUsage = providerFinalUsage.estimated
       ? addUsage(prepared.compressionUsage, providerFinalUsage)
       : mergeConfirmedCompressionUsage(providerFinalUsage)
-    return {
-      content: parsedTextCalls.content,
-      reasoning: parsedTextCalls.reasoning,
-      toolCalls,
-      toolCallParseError: parsedTextCalls.toolCallParseError,
-      rawMessage: {
-        role: 'assistant',
+      return {
         content: parsedTextCalls.content,
-        reasoning_content: parsedTextCalls.reasoning,
-        tool_calls: finalRawToolCalls
-      },
-      usage: finalUsage,
-      contextTokens: providerFinalUsage.promptTokens,
-      contextEstimated: Boolean(providerFinalUsage.estimated),
-      compressed: prepared.compressed,
-      contextMemory: prepared.contextMemory,
-      finishReason: manuallyInterrupted
-        ? 'manual_interrupt'
-        : toolCalls.length
-          ? 'tool_calls'
-          : responseStatus || 'completed'
+        reasoning: parsedTextCalls.reasoning,
+        toolCalls,
+        toolCallParseError: parsedTextCalls.toolCallParseError,
+        rawMessage: {
+          role: 'assistant',
+          content: parsedTextCalls.content,
+          reasoning_content: parsedTextCalls.reasoning,
+          tool_calls: finalRawToolCalls
+        },
+        usage: finalUsage,
+        contextTokens: providerFinalUsage.promptTokens,
+        contextEstimated: Boolean(providerFinalUsage.estimated),
+        compressed: prepared.compressed,
+        contextMemory: prepared.contextMemory,
+        finishReason: manuallyInterrupted
+          ? 'manual_interrupt'
+          : toolCalls.length
+            ? 'tool_calls'
+            : responseStatus || 'completed'
+      }
+    } finally {
+      liveStatsSession?.close()
     }
   }
 
@@ -3053,10 +3103,18 @@ async function streamCompleteWithTools(
     }
   }
 
-  const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: headers(model),
-    signal,
+  const liveStatsSession = isLmStudioEndpoint(model)
+    ? await subscribeLmStudioLiveStats(
+        model.model,
+        '/v1/chat/completions',
+        (stats) => reportProviderUsage(usageFromLmStudioLiveStats(stats))
+      )
+    : null
+  try {
+    const response = await fetchModel(model, openAiEndpoint(model.baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: headers(model),
+      signal,
       body: safeJsonBody({
         model: model.model,
         messages: providerMessages(model, compatible.messages),
@@ -3064,11 +3122,11 @@ async function streamCompleteWithTools(
           ? { tools, tool_choice: compatible.toolChoice }
           : {}),
         stream: true,
-      stream_options: { include_usage: true },
-      ...openAiThinkingOptions(model),
-      ...(options.stopStrings?.length ? { stop: options.stopStrings } : {})
+        stream_options: { include_usage: true },
+        ...openAiThinkingOptions(model),
+        ...(options.stopStrings?.length ? { stop: options.stopStrings } : {})
+      })
     })
-  })
   if (!response.ok || !response.body) {
     throw new Error(`模型请求失败：${response.status} ${await response.text()}`)
   }
@@ -3206,38 +3264,45 @@ async function streamCompleteWithTools(
           type: 'function',
           function: { name: call.name, arguments: JSON.stringify(call.arguments) }
         }))
-  const providerFinalUsage = providerUsage
-    ? providerUsage
-    : createUsage(
-      estimatedPrompt,
-      estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
-      true
-    )
+  const liveFinalStats = await liveStatsSession?.waitForFinal()
+  const providerFinalUsage = attachLmStudioFinalStats(
+    providerUsage
+      ? providerUsage
+      : createUsage(
+          estimatedPrompt,
+          estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
+          true
+        ),
+    liveFinalStats ?? liveStatsSession?.latest()
+  )
   reportProviderUsage(providerFinalUsage)
   const finalUsage = providerFinalUsage.estimated
     ? addUsage(prepared.compressionUsage, providerFinalUsage)
     : mergeConfirmedCompressionUsage(providerFinalUsage)
-  return {
-    content: parsedTextCalls.content,
-    reasoning: parsedTextCalls.reasoning,
-    toolCalls,
-    toolCallParseError: parsedTextCalls.toolCallParseError,
-    rawMessage: {
-      role: 'assistant',
+    return {
       content: parsedTextCalls.content,
-      reasoning_content: parsedTextCalls.reasoning,
-      tool_calls: finalRawToolCalls
-    },
-    usage: finalUsage,
-    contextTokens: providerFinalUsage.promptTokens,
-    contextEstimated: Boolean(providerFinalUsage.estimated),
-    compressed: prepared.compressed,
-    contextMemory: prepared.contextMemory,
-    finishReason: manuallyInterrupted
-      ? 'manual_interrupt'
-      : toolCalls.length
-        ? 'tool_calls'
-        : finishReason
+      reasoning: parsedTextCalls.reasoning,
+      toolCalls,
+      toolCallParseError: parsedTextCalls.toolCallParseError,
+      rawMessage: {
+        role: 'assistant',
+        content: parsedTextCalls.content,
+        reasoning_content: parsedTextCalls.reasoning,
+        tool_calls: finalRawToolCalls
+      },
+      usage: finalUsage,
+      contextTokens: providerFinalUsage.promptTokens,
+      contextEstimated: Boolean(providerFinalUsage.estimated),
+      compressed: prepared.compressed,
+      contextMemory: prepared.contextMemory,
+      finishReason: manuallyInterrupted
+        ? 'manual_interrupt'
+        : toolCalls.length
+          ? 'tool_calls'
+          : finishReason
+    }
+  } finally {
+    liveStatsSession?.close()
   }
 }
 
