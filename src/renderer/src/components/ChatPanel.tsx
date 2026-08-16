@@ -981,9 +981,7 @@ function AssistantMessageMetaActions({
   const usageUnavailable =
     message.status !== 'streaming' && !exactUsage
   const usageText = exactUsage
-    ? exactUsage.live
-      ? `实时输出 ${exactUsage.completionTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`
-      : `输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`
+    ? `输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`
     : ''
 
   return (

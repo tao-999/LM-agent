@@ -84,8 +84,7 @@ function createUsage(
   completionTokens: number,
   estimated = false,
   generationDurationMs?: number,
-  cachedPromptTokens = 0,
-  live = false
+  cachedPromptTokens = 0
 ): TokenUsage {
   const safePromptTokens = Math.max(0, Math.round(promptTokens))
   const safeCompletionTokens = Math.max(0, Math.round(completionTokens))
@@ -106,7 +105,6 @@ function createUsage(
         }
       : {}),
     estimated,
-    ...(live ? { live: true } : {}),
     ...(safeDuration
       ? {
           generationDurationMs: safeDuration,
@@ -122,8 +120,7 @@ function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: numb
     usage.completionTokens,
     Boolean(usage.estimated),
     usage.generationDurationMs ?? generationDurationMs,
-    usage.cachedPromptTokens ?? 0,
-    Boolean(usage.live)
+    usage.cachedPromptTokens ?? 0
   )
 }
 
@@ -133,8 +130,7 @@ export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
     left.completionTokens + right.completionTokens,
     Boolean(left.estimated || right.estimated),
     (left.generationDurationMs ?? 0) + (right.generationDurationMs ?? 0) || undefined,
-    (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0),
-    Boolean(right.live)
+    (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0)
   )
 }
 
@@ -147,8 +143,7 @@ function usageFromLmStudioLiveStats(stats: LmStudioLiveStats): TokenUsage {
     stats.decodedTokens,
     false,
     speed > 0 ? (stats.decodedTokens / speed) * 1000 : undefined,
-    0,
-    !stats.final
+    0
   )
 }
 

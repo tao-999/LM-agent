@@ -208,7 +208,8 @@ test('Chat 回复底部只展示模型服务返回的真实 Token 用量', async
   )
   assert.match(chatSource, /message\.usage && !message\.usage\.estimated/)
   assert.doesNotMatch(chatSource, /滑动窗口|interruptedUsage|liveUsage/)
-  assert.match(chatSource, /实时输出/)
+  assert.doesNotMatch(chatSource, /实时输出/)
+  assert.match(chatSource, /输入.*缓存命中.*输出.*合计/)
   assert.match(chatSource, /当前模型服务未在本轮响应中返回真实 Token 用量/)
 })
 
