@@ -4,7 +4,6 @@ import type {
   ModelOption,
   TokenUsage
 } from '../shared/types'
-import { createLiveTokenUsageTracker } from './live-token-usage'
 import {
   isQwen38Model,
   qwen38LmStudioThinkingOptions,
@@ -122,18 +121,13 @@ function attachGenerationDuration(usage: TokenUsage, generationDurationMs?: numb
 }
 
 export function addUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
-  const combined = createUsage(
+  return createUsage(
     left.promptTokens + right.promptTokens,
     left.completionTokens + right.completionTokens,
     Boolean(left.estimated || right.estimated),
     (left.generationDurationMs ?? 0) + (right.generationDurationMs ?? 0) || undefined,
     (left.cachedPromptTokens ?? 0) + (right.cachedPromptTokens ?? 0)
   )
-  // 流式阶段展示当前请求近 3 秒速度，避免被之前已完成调用的累计均速稀释。
-  if (right.estimated && right.tokensPerSecond !== undefined) {
-    combined.tokensPerSecond = right.tokensPerSecond
-  }
-  return combined
 }
 
 export function tokenUsageFromOpenAiPayload(
@@ -2488,7 +2482,6 @@ export async function streamChat(
     const decoder = new TextDecoder()
     let buffer = ''
     let providerUsage: TokenUsage | null = null
-    let firstOutputAt = 0
     let providerGenerationDurationMs: number | undefined
     ollamaChatStream: while (true) {
       const { value, done } = await reader.read()
@@ -2508,11 +2501,9 @@ export async function streamChat(
         if (data.error) throw new Error(data.error)
         const reasoning = textField(data.message?.thinking) || textField(data.message?.reasoning_content)
         if (reasoning) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
           normalizedReasoning.push(reasoning)
         }
         if (data.message?.content) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
           normalizedContent.push(data.message.content)
         }
         if (
@@ -2543,7 +2534,7 @@ export async function streamChat(
       providerUsage
         ? attachGenerationDuration(
             providerUsage,
-            providerGenerationDurationMs ?? (firstOutputAt ? Date.now() - firstOutputAt : undefined)
+            providerGenerationDurationMs
           )
         : createUsage(estimatedPrompt, estimateTextTokens(output), true)
     )
@@ -2571,7 +2562,6 @@ export async function streamChat(
   let providerUsage: TokenUsage | null = null
   let latestUsagePayload: OpenAiUsagePayload | undefined
   let latestTimingsPayload: OpenAiTimingsPayload | undefined
-  let firstOutputAt = 0
   openAiChatStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
@@ -2601,12 +2591,10 @@ export async function streamChat(
       const reasoning =
         textField(delta?.reasoning_content) || textField(delta?.reasoning) || textField(delta?.thinking)
       if (reasoning) {
-        if (!firstOutputAt) firstOutputAt = Date.now()
         normalizedReasoning.push(reasoning)
       }
       const content = delta?.content
       if (content) {
-        if (!firstOutputAt) firstOutputAt = Date.now()
         normalizedContent.push(content)
       }
       if (data.usage) {
@@ -2629,10 +2617,7 @@ export async function streamChat(
   return addUsage(
     prepared.compressionUsage,
     providerUsage
-      ? attachGenerationDuration(
-          providerUsage,
-          firstOutputAt ? Date.now() - firstOutputAt : undefined
-        )
+      ? providerUsage
       : createUsage(estimatedPrompt, estimateTextTokens(output), true)
   )
 }
@@ -2658,10 +2643,15 @@ async function streamCompleteWithTools(
     compatible.messages.reduce(
       (sum, message) => sum + estimateTextTokens(message.content),
       0
-  ) + estimateTextTokens(JSON.stringify(tools))
-  const liveUsage = createLiveTokenUsageTracker(estimatedPrompt, (usage) =>
-    options.onUsageProgress?.(addUsage(prepared.compressionUsage, usage))
-  )
+    ) + estimateTextTokens(JSON.stringify(tools))
+  const mergeConfirmedCompressionUsage = (usage: TokenUsage): TokenUsage =>
+    prepared.compressionUsage.estimated
+      ? usage
+      : addUsage(prepared.compressionUsage, usage)
+  const reportProviderUsage = (usage: TokenUsage | null): void => {
+    if (!usage || usage.estimated) return
+    options.onUsageProgress?.(mergeConfirmedCompressionUsage(usage))
+  }
   let content = ''
   let reasoning = ''
   let manuallyInterrupted = false
@@ -2716,7 +2706,6 @@ async function streamCompleteWithTools(
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let firstOutputAt = 0
     let latestUsagePayload: OpenAiUsagePayload | undefined
     let latestTimingsPayload: OpenAiTimingsPayload | undefined
     let responseStatus = ''
@@ -2773,12 +2762,8 @@ async function streamCompleteWithTools(
           event.type === 'response.reasoning_text.delta' ||
           event.type === 'response.reasoning_summary_text.delta'
         ) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
-          liveUsage.push(event.delta ?? '')
           normalizedReasoning.push(event.delta ?? '')
         } else if (event.type === 'response.output_text.delta') {
-          if (!firstOutputAt) firstOutputAt = Date.now()
-          liveUsage.push(event.delta ?? '')
           normalizedContent.push(event.delta ?? '')
         }
         if (
@@ -2798,7 +2783,6 @@ async function streamCompleteWithTools(
           const call = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
           call.arguments = mergeStreamingFragment(call.arguments, event.delta ?? '')
           pendingToolCalls.set(index, call)
-          liveUsage.push(event.delta ?? '')
         } else if (event.type === 'response.function_call_arguments.done') {
           const index = event.output_index ?? 0
           const call = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
@@ -2830,6 +2814,9 @@ async function streamCompleteWithTools(
                 : {})
             }
           )
+          reportProviderUsage(
+            tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload)
+          )
           const parsed = parseResponsesOutput(event.response?.output ?? [])
           if (!content && parsed.content) normalizedContent.push(parsed.content)
           if (!reasoning && parsed.reasoning) normalizedReasoning.push(parsed.reasoning)
@@ -2852,7 +2839,6 @@ async function streamCompleteWithTools(
     channelRouter.flush()
     thinkRouter.flush()
     reasoningTagFilter.flush()
-    liveUsage.flush()
     const rawToolCalls = [...pendingToolCalls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([index, call]) => ({
@@ -2878,17 +2864,16 @@ async function streamCompleteWithTools(
           }))
     const providerUsage =
       tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ??
-      liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
       createUsage(
         estimatedPrompt,
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
         true
       )
-    const providerFinalUsage = attachGenerationDuration(
-      providerUsage,
-      firstOutputAt ? Date.now() - firstOutputAt : undefined
-    )
-    options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
+    const providerFinalUsage = providerUsage
+    reportProviderUsage(providerFinalUsage)
+    const finalUsage = providerFinalUsage.estimated
+      ? addUsage(prepared.compressionUsage, providerFinalUsage)
+      : mergeConfirmedCompressionUsage(providerFinalUsage)
     return {
       content: parsedTextCalls.content,
       reasoning: parsedTextCalls.reasoning,
@@ -2900,7 +2885,7 @@ async function streamCompleteWithTools(
         reasoning_content: parsedTextCalls.reasoning,
         tool_calls: finalRawToolCalls
       },
-      usage: addUsage(prepared.compressionUsage, providerFinalUsage),
+      usage: finalUsage,
       contextTokens: providerFinalUsage.promptTokens,
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
@@ -2934,7 +2919,6 @@ async function streamCompleteWithTools(
     const decoder = new TextDecoder()
     let buffer = ''
     let providerUsage: TokenUsage | null = null
-    let firstOutputAt = 0
     let providerGenerationDurationMs: number | undefined
     let finishReason: string | undefined
     let rawToolCalls: Array<{
@@ -2976,18 +2960,12 @@ async function streamCompleteWithTools(
           textField(data.message?.reasoning_content) ||
           textField(data.message?.reasoning)
         if (thought) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
-          liveUsage.push(thought)
           normalizedReasoning.push(thought)
         }
         if (data.message?.content) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
-          liveUsage.push(data.message.content)
           normalizedContent.push(data.message.content)
         }
         if (data.message?.tool_calls?.length) {
-          if (!firstOutputAt) firstOutputAt = Date.now()
-          liveUsage.push(JSON.stringify(data.message.tool_calls))
           rawToolCalls = data.message.tool_calls
         }
         if (manuallyInterrupted) {
@@ -3007,6 +2985,7 @@ async function streamCompleteWithTools(
             false,
             providerGenerationDurationMs
           )
+          reportProviderUsage(providerUsage)
         }
         if (data.done_reason) finishReason = data.done_reason
       }
@@ -3016,7 +2995,6 @@ async function streamCompleteWithTools(
     channelRouter.flush()
     thinkRouter.flush()
     reasoningTagFilter.flush()
-    liveUsage.flush()
     const parsedTextCalls = parseTextToolCalls(
       content,
       reasoning,
@@ -3041,15 +3019,17 @@ async function streamCompleteWithTools(
     const providerFinalUsage = providerUsage
       ? attachGenerationDuration(
           providerUsage,
-          providerGenerationDurationMs ?? (firstOutputAt ? Date.now() - firstOutputAt : undefined)
+          providerGenerationDurationMs
         )
-      : liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
-      createUsage(
+      : createUsage(
         estimatedPrompt,
         estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
         true
       )
-    options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
+    reportProviderUsage(providerFinalUsage)
+    const finalUsage = providerFinalUsage.estimated
+      ? addUsage(prepared.compressionUsage, providerFinalUsage)
+      : mergeConfirmedCompressionUsage(providerFinalUsage)
     return {
       content: parsedTextCalls.content,
       reasoning: parsedTextCalls.reasoning,
@@ -3061,7 +3041,7 @@ async function streamCompleteWithTools(
         reasoning_content: parsedTextCalls.reasoning,
         tool_calls: finalRawToolCalls
       },
-      usage: addUsage(prepared.compressionUsage, providerFinalUsage),
+      usage: finalUsage,
       contextTokens: providerFinalUsage.promptTokens,
       contextEstimated: Boolean(providerFinalUsage.estimated),
       compressed: prepared.compressed,
@@ -3098,7 +3078,6 @@ async function streamCompleteWithTools(
   let providerUsage: TokenUsage | null = null
   let latestUsagePayload: OpenAiUsagePayload | undefined
   let latestTimingsPayload: OpenAiTimingsPayload | undefined
-  let firstOutputAt = 0
   let finishReason: string | undefined
   const pendingToolCalls = new Map<
     number,
@@ -3155,26 +3134,19 @@ async function streamCompleteWithTools(
         textField(delta?.reasoning) ||
         textField(delta?.thinking)
       if (thought) {
-        if (!firstOutputAt) firstOutputAt = Date.now()
-        liveUsage.push(thought)
         normalizedReasoning.push(thought)
       }
       if (delta?.content) {
-        if (!firstOutputAt) firstOutputAt = Date.now()
-        liveUsage.push(delta.content)
         normalizedContent.push(delta.content)
       }
       for (const toolDelta of delta?.tool_calls ?? []) {
-        if (!firstOutputAt) firstOutputAt = Date.now()
         const index = toolDelta.index ?? 0
         const current = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
         if (toolDelta.id) current.id = toolDelta.id
         if (toolDelta.function?.name) {
-          liveUsage.push(toolDelta.function.name)
           current.name = mergeStreamingFragment(current.name, toolDelta.function.name)
         }
         if (toolDelta.function?.arguments) {
-          liveUsage.push(toolDelta.function.arguments)
           current.arguments = mergeStreamingFragment(
             current.arguments,
             toolDelta.function.arguments
@@ -3195,6 +3167,7 @@ async function streamCompleteWithTools(
       }
       providerUsage =
         tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
+      reportProviderUsage(providerUsage)
     }
   }
   normalizedContent.flush()
@@ -3202,7 +3175,6 @@ async function streamCompleteWithTools(
   channelRouter.flush()
   thinkRouter.flush()
   reasoningTagFilter.flush()
-  liveUsage.flush()
   const parsedTextCalls = parseTextToolCalls(
     content,
     reasoning,
@@ -3235,17 +3207,16 @@ async function streamCompleteWithTools(
           function: { name: call.name, arguments: JSON.stringify(call.arguments) }
         }))
   const providerFinalUsage = providerUsage
-    ? attachGenerationDuration(
-        providerUsage,
-        firstOutputAt ? Date.now() - firstOutputAt : undefined
-      )
-    : liveUsage.snapshot(manuallyInterrupted ? 'average' : 'rolling') ??
-    createUsage(
+    ? providerUsage
+    : createUsage(
       estimatedPrompt,
       estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
       true
     )
-  options.onUsageProgress?.(addUsage(prepared.compressionUsage, providerFinalUsage))
+  reportProviderUsage(providerFinalUsage)
+  const finalUsage = providerFinalUsage.estimated
+    ? addUsage(prepared.compressionUsage, providerFinalUsage)
+    : mergeConfirmedCompressionUsage(providerFinalUsage)
   return {
     content: parsedTextCalls.content,
     reasoning: parsedTextCalls.reasoning,
@@ -3257,7 +3228,7 @@ async function streamCompleteWithTools(
       reasoning_content: parsedTextCalls.reasoning,
       tool_calls: finalRawToolCalls
     },
-    usage: addUsage(prepared.compressionUsage, providerFinalUsage),
+    usage: finalUsage,
     contextTokens: providerFinalUsage.promptTokens,
     contextEstimated: Boolean(providerFinalUsage.estimated),
     compressed: prepared.compressed,

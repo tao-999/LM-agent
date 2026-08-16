@@ -1912,17 +1912,15 @@ export async function runWebChat(
     totalTokens: 0
   }
   let hasConfirmedUsage = false
-  let latestUnconfirmedUsage: TokenUsage | undefined
   const recordWebUsage = (usage: TokenUsage): void => {
-    if (usage.estimated) {
-      latestUnconfirmedUsage = usage
-      return
-    }
+    if (usage.estimated) return
     totalUsage = addUsage(totalUsage, usage)
     hasConfirmedUsage = true
   }
   const visibleWebUsage = (): TokenUsage =>
-    hasConfirmedUsage ? totalUsage : latestUnconfirmedUsage ?? totalUsage
+    hasConfirmedUsage
+      ? totalUsage
+      : { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: true }
   let forceTool = forceWebSearch
   let webSearchUsed = false
   let invalidRetries = 0
@@ -1954,11 +1952,13 @@ export async function runWebChat(
         onChunk(content)
       },
       {
-        onUsageProgress: (usage) =>
+        onUsageProgress: (usage) => {
+          if (usage.estimated) return
           onEvent({
             type: 'context',
             usage: addUsage(totalUsage, usage)
-          }),
+          })
+        },
         shouldInterruptGeneration: takeManualGenerationInterrupt
       }
     )
@@ -2220,15 +2220,13 @@ export async function runAgent(
     totalTokens: 0
   }
   let hasConfirmedUsage = false
-  let latestUnconfirmedUsage: TokenUsage | undefined
   const recordAgentUsage = (usage: TokenUsage): void => {
+    if (usage.estimated) return
     totalUsage = addUsage(totalUsage, usage)
-    if (!usage.estimated) hasConfirmedUsage = true
-    latestUnconfirmedUsage = undefined
+    hasConfirmedUsage = true
   }
   const visibleAgentUsage = (): TokenUsage | undefined => {
-    if (latestUnconfirmedUsage) return addUsage(totalUsage, latestUnconfirmedUsage)
-    return hasConfirmedUsage || totalUsage.totalTokens > 0 ? totalUsage : undefined
+    return hasConfirmedUsage ? totalUsage : undefined
   }
   const restrictedWebHosts = requestedWebHosts(request.objective)
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
@@ -4177,7 +4175,7 @@ export async function runAgent(
               : undefined,
           shouldInterruptGeneration: takeManualGenerationInterrupt,
           onUsageProgress: (usage) => {
-            latestUnconfirmedUsage = usage
+            if (usage.estimated) return
             send({
               requestId: request.requestId,
               type: 'context',

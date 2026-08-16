@@ -13,7 +13,6 @@ import {
   isScrollViewportAtBottom,
   scrollViewportBottomTop
 } from '../src/renderer/src/utils/scroll-position.ts'
-import { createLiveTokenUsageTracker } from '../src/main/live-token-usage.ts'
 import {
   composerInputIdleDelay,
   markComposerInputActive,
@@ -202,52 +201,14 @@ test('会话底部判定容忍小数像素误差且离开底部后恢复箭头',
   )
 })
 
-test('Chat 流式生成期间持续计算输出速度', () => {
-  let currentTime = 1000
-  const usages: Array<{ completionTokens: number; tokensPerSecond?: number }> = []
-  const tracker = createLiveTokenUsageTracker(
-    120,
-    (usage) => usages.push(usage),
-    { minIntervalMs: 250, now: () => currentTime }
-  )
-  tracker.push('abcd')
-  assert.equal(usages.length, 0)
-  currentTime = 1250
-  tracker.push('测试')
-  assert.equal(usages.length, 1)
-  assert.equal(usages[0].completionTokens, 3)
-  assert.equal(usages[0].tokensPerSecond, 12)
-})
-
-test('流式速度采用近三秒窗口，手动终止可取得完整生成均速', () => {
-  let currentTime = 0
-  const usages: Array<{ completionTokens: number; tokensPerSecond?: number }> = []
-  const tracker = createLiveTokenUsageTracker(10, (usage) => usages.push(usage), {
-    minIntervalMs: 50,
-    now: () => currentTime
-  })
-  tracker.push('abcdefgh')
-  currentTime = 2_000
-  tracker.push('测试')
-  currentTime = 4_000
-  tracker.push('ijkl')
-
-  const rolling = tracker.snapshot('rolling')
-  const average = tracker.snapshot('average')
-  assert.equal(rolling?.completionTokens, 5)
-  assert.equal(rolling?.tokensPerSecond, 1)
-  assert.equal(average?.tokensPerSecond, 1.25)
-})
-
-test('Chat 回复底部流式展示累计 Token 与近三秒速度，终止后展示平均速度', async () => {
+test('Chat 回复底部只展示模型服务返回的真实 Token 用量', async () => {
   const chatSource = await fs.readFile(
     path.resolve('src/renderer/src/components/ChatPanel.tsx'),
     'utf8'
   )
-  assert.match(chatSource, /message\.status === 'streaming' \? message\.usage : null/)
-  assert.match(chatSource, /输出 \$\{liveUsage\.completionTokens\.toLocaleString\(\)\}/)
-  assert.match(chatSource, /近3秒 \$\{liveUsage\.tokensPerSecond\.toFixed\(2\)\} Tok\/s/)
-  assert.match(chatSource, /平均 \$\{interruptedUsage\.tokensPerSecond\.toFixed\(2\)\} Tok\/s/)
+  assert.match(chatSource, /message\.usage && !message\.usage\.estimated/)
+  assert.doesNotMatch(chatSource, /近3秒|滑动窗口|interruptedUsage|liveUsage/)
+  assert.match(chatSource, /当前模型服务未在本轮响应中返回真实 Token 用量/)
 })
 
 test('精准替换不强制前置读取，但用户编辑锁仍要求读取最新内容', async () => {
@@ -257,12 +218,23 @@ test('精准替换不强制前置读取，但用户编辑锁仍要求读取最�
   assert.match(agentSource, /用户编辑锁：[\s\S]{0,240}必须重新调用 read_file 读取此区间/)
 })
 
-test('Agent 每轮流式输出都会把实时 Token 用量推送到前端', async () => {
+test('Agent 只把模型服务真实 Token 用量推送到前端', async () => {
   const agentSource = await fs.readFile(path.resolve('src/main/agent.ts'), 'utf8')
   assert.match(
     agentSource,
-    /onUsageProgress: \(usage\) => \{[\s\S]{0,320}type: 'context',[\s\S]{0,160}usage: addUsage\(totalUsage, usage\)/
+    /onUsageProgress: \(usage\) => \{[\s\S]{0,120}if \(usage\.estimated\) return[\s\S]{0,320}type: 'context'/
   )
+})
+
+test('模型流严禁根据文本分片估算 Token 或轮询速度', async () => {
+  const modelSource = await fs.readFile(path.resolve('src/main/models.ts'), 'utf8')
+  assert.doesNotMatch(modelSource, /createLiveTokenUsageTracker|rollingWindowMs|tokenSamples/)
+  assert.match(modelSource, /reportProviderUsage\(providerUsage\)/)
+  assert.doesNotMatch(
+    modelSource,
+    /attachGenerationDuration\([\s\S]{0,120}Date\.now\(\) - firstOutputAt/
+  )
+  await assert.rejects(fs.access(path.resolve('src/main/live-token-usage.ts')))
 })
 
 test('生成期间在 Skill 右侧提供当前会话原地截断入口', async () => {

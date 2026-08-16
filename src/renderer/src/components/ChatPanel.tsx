@@ -978,11 +978,8 @@ function AssistantMessageMetaActions({
   onRetry: () => void
 }): React.JSX.Element {
   const exactUsage = message.usage && !message.usage.estimated ? message.usage : null
-  const liveUsage = message.status === 'streaming' ? message.usage : null
-  const interruptedUsage =
-    message.status !== 'streaming' && message.usage?.estimated ? message.usage : null
   const usageUnavailable =
-    message.status !== 'streaming' && !message.usage
+    message.status !== 'streaming' && !exactUsage
 
   return (
     <>
@@ -992,16 +989,6 @@ function AssistantMessageMetaActions({
           title={`输入 ${exactUsage.promptTokens.toLocaleString()} Token，缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} Token，输出 ${exactUsage.completionTokens.toLocaleString()} Token，合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? `，生成速度 ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         >
           {`输入 ${exactUsage.promptTokens.toLocaleString()} · 缓存命中 ${(exactUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${exactUsage.completionTokens.toLocaleString()} · 合计 ${exactUsage.totalTokens.toLocaleString()} Token${exactUsage.tokensPerSecond ? ` · ${exactUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
-        </span>
-      )}
-      {!exactUsage && liveUsage && (
-        <span className="token-usage" title="输入输出随流式分片持续累计，速度采用近 3 秒滑动窗口">
-          {`输入 ${liveUsage.promptTokens.toLocaleString()} · 缓存命中 ${(liveUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${liveUsage.completionTokens.toLocaleString()} · 合计 ${liveUsage.totalTokens.toLocaleString()} Token${liveUsage.tokensPerSecond ? ` · 近3秒 ${liveUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
-        </span>
-      )}
-      {!exactUsage && interruptedUsage && (
-        <span className="token-usage" title="模型流被手动终止，速度按已接收输出的完整生成时段计算平均值">
-          {`输入 ${interruptedUsage.promptTokens.toLocaleString()} · 缓存命中 ${(interruptedUsage.cachedPromptTokens ?? 0).toLocaleString()} · 输出 ${interruptedUsage.completionTokens.toLocaleString()} · 合计 ${interruptedUsage.totalTokens.toLocaleString()} Token${interruptedUsage.tokensPerSecond ? ` · 平均 ${interruptedUsage.tokensPerSecond.toFixed(2)} Tok/s` : ''}`}
         </span>
       )}
       {usageUnavailable && (
