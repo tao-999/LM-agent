@@ -67,3 +67,12 @@ test('同批工具首项失败后取消旧调用并把真实原因交回模型',
   assert.match(agentSource, /工具失败运行时反馈/)
   assert.match(agentSource, /禁止继续沿用本轮尚未执行的旧调用/)
 })
+
+test('insert_lines 会向模型明确暴露条件必填字段', () => {
+  assert.match(
+    agentSource,
+    /始终必填：path、placement、content。条件必填：placement=before_line 或 after_line 时，reference_line 必填/
+  )
+  assert.match(agentSource, /then:\s*\{\s*required: \['reference_line'\]/)
+  assert.match(agentSource, /文件末尾追加必须使用 file_end/)
+})

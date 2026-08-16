@@ -3621,7 +3621,7 @@ export async function runAgent(
       function: {
         name: 'insert_lines',
         description:
-          '在已通过 read_file 读取过的文件中插入内容，不覆盖其他行。placement=file_start 表示文件开头，placement=file_end 表示文件结尾，placement=before_line 或 after_line 表示指定现有行的前方或后方。只有按行定位时才填写 reference_line，禁止用 0、总行数加一或其他魔法行号表达文件边界。',
+          '在文件中插入内容，不覆盖其他行。始终必填：path、placement、content。条件必填：placement=before_line 或 after_line 时，reference_line 必填且必须是大于等于 1 的现有行号；placement=file_start 或 file_end 时必须省略 reference_line。文件末尾追加必须使用 file_end，严禁使用缺少 reference_line 的 after_line。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3632,16 +3632,29 @@ export async function runAgent(
               type: 'string',
               enum: ['file_start', 'file_end', 'before_line', 'after_line'],
               description:
-                '明确的插入位置：文件开头、文件结尾、指定行之前或指定行之后'
+                '必填。file_start=全文开头；file_end=全文末尾；before_line=reference_line 指定行之前；after_line=reference_line 指定行之后'
             },
             reference_line: {
               type: 'integer',
               minimum: 1,
               description:
-                'before_line/after_line 使用的现有行号；file_start/file_end 禁止填写'
+                '条件必填字段。placement 为 before_line 或 after_line 时必须提供大于等于 1 的现有行号；placement 为 file_start 或 file_end 时必须省略'
             },
-            content: { type: 'string', description: '需要插入的完整文本' }
-          }
+            content: { type: 'string', description: '必填。需要插入的完整文本' }
+          },
+          allOf: [
+            {
+              if: {
+                properties: {
+                  placement: { enum: ['before_line', 'after_line'] }
+                },
+                required: ['placement']
+              },
+              then: {
+                required: ['reference_line']
+              }
+            }
+          ]
         }
       }
     },
@@ -3857,7 +3870,7 @@ export async function runAgent(
     '网页事实核验规则：必须比较来源中的关键姓名、标题、日期和数值；来源冲突时继续搜索，证据仍不足时明确说明无法确认，严禁根据常识或搜索摘要补写细节。',
     '网页事实核验规则：最终回答必须列出实际读取过的来源标题与直接网址，禁止引用必应或 DuckDuckGo 跳转链接。',
     'create_file 只用于创建新文件或初始化已读取过的已有空文件；已有非空文件必须使用 replace_in_file、replace_lines 或 insert_lines。',
-    'insert_lines 位置规则：文件开头使用 placement=file_start，文件结尾使用 placement=file_end；指定现有行之前或之后使用 placement=before_line 或 after_line，并填写 reference_line。禁止使用 0、总行数加一或省略参考行来暗示文件边界。',
+    'insert_lines 必填规则：path、placement、content 始终必填；placement=before_line 或 after_line 时 reference_line 也必填，且必须是大于等于 1 的现有行号；placement=file_start 或 file_end 时省略 reference_line。文件末尾追加必须使用 file_end，禁止使用缺少 reference_line 的 after_line。',
     '每次修改尽量小，保持现有编码、换行、结构与风格。',
     `当前权限模式：${permissionMode}。${modelToolScopeInstruction} 读写手动模式要求写入、创建、复制与命令逐次确认；读写自动模式允许上述普通操作自动执行。删除工具、删除命令及包含删除逻辑的项目脚本始终逐次确认。`,
     '执行完成后用简短中文总结结果、改动文件、行范围与验证情况。',
