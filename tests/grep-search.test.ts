@@ -72,17 +72,17 @@ test('Agent 暴露 grep 并默认合并本地会话历史', async () => {
   assert.doesNotMatch(source, /tools\.set\('search_files'/)
 })
 
-test('grep 命中返回前后各五行上下文', async () => {
+test('grep 命中返回前后各十行上下文', async () => {
   await withWorkspace(async (root) => {
-    const lines = Array.from({ length: 20 }, (_, index) => `第 ${index + 1} 行`)
-    lines[9] = '第 10 行包含目标词'
+    const lines = Array.from({ length: 30 }, (_, index) => `第 ${index + 1} 行`)
+    lines[14] = '第 15 行包含目标词'
     await fs.writeFile(path.join(root, 'context.txt'), lines.join('\n'), 'utf8')
     const [result] = await searchWorkspace(root, '目标词')
-    assert.equal(result.line, 10)
+    assert.equal(result.line, 15)
     assert.equal(result.contextStart, 5)
-    assert.equal(result.contextEnd, 15)
+    assert.equal(result.contextEnd, 25)
     assert.match(result.context ?? '', /^5 \| 第 5 行/m)
-    assert.match(result.context ?? '', /^15 \| 第 15 行/m)
+    assert.match(result.context ?? '', /^25 \| 第 25 行/m)
   })
 })
 

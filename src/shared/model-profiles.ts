@@ -51,7 +51,16 @@ export function knownRemoteModelContext(
 
 export function applyKnownRemoteModelProfile(model: ModelConfig): ModelConfig {
   const context = knownRemoteModelContext(model)
-  if (!context) return model
+  if (!context) {
+    if (model.provider === 'openai' && model.connectionId && !model.preset) {
+      return {
+        ...model,
+        contextLength: undefined,
+        maxContextLength: undefined
+      }
+    }
+    return model
+  }
   if (
     model.contextLength === context.contextLength &&
     model.maxContextLength === context.maxContextLength

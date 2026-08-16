@@ -648,8 +648,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       const context = await window.localAgent.model.context(pending)
       const next = {
         ...pending,
-        contextLength: context.contextLength,
-        maxContextLength: context.maxContextLength
+        contextLength: context.contextLength > 0 ? context.contextLength : undefined,
+        maxContextLength: context.maxContextLength > 0 ? context.maxContextLength : undefined
       }
       await window.localAgent.credentials.setModelApiKey(connectionId, apiKey)
       saveCustomModel(next)

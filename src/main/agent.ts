@@ -51,6 +51,7 @@ import {
   type AgentWorkflowStage
 } from './agent-workflow'
 import { expandReadFileWindow } from './read-file-window'
+import { dedupeToolCalls } from './tool-call-dedupe'
 
 const execAsync = promisify(exec)
 
@@ -1929,6 +1930,7 @@ export async function runWebChat(
   let webFailureStreak = 0
   let webFailureTotal = 0
   let webAccessExhausted = false
+  let contextCompressedThisRequest = false
 
   for (let step = 0; step < 18; step += 1) {
     let streamedReasoning = false
@@ -1959,11 +1961,13 @@ export async function runWebChat(
             usage: addUsage(totalUsage, usage)
           })
         },
-        shouldInterruptGeneration: takeManualGenerationInterrupt
+        shouldInterruptGeneration: takeManualGenerationInterrupt,
+        disableContextCompression: contextCompressedThisRequest
       }
     )
     if (completion.contextMemory) {
       applyCompressionMemory(workingMessages, completion.contextMemory)
+      contextCompressedThisRequest = true
       onEvent({ type: 'context', contextMemory: completion.contextMemory })
     }
     forceTool = false
@@ -1973,7 +1977,7 @@ export async function runWebChat(
       usage: visibleWebUsage(),
       contextState: {
         usedTokens: completion.contextTokens,
-        limitTokens: model.contextLength || 8192,
+        limitTokens: model.contextLength || model.maxContextLength || 0,
         estimated: completion.contextEstimated,
         compressed: completion.compressed,
         updatedAt: Date.now()
@@ -3950,6 +3954,7 @@ export async function runAgent(
       images: attachmentImages
     }
   ]
+  let contextCompressedThisRequest = false
   const appendQueuedGuidance = (): boolean => {
     const queued = readGuidance()
     for (const guidance of queued) {
@@ -4211,6 +4216,7 @@ export async function runAgent(
               ? ['等待用户下一个任务', '等待下一个任务']
               : undefined,
           shouldInterruptGeneration: takeManualGenerationInterrupt,
+          disableContextCompression: contextCompressedThisRequest,
           onUsageProgress: (usage) => {
             if (usage.estimated) return
             send({
@@ -4270,6 +4276,7 @@ export async function runAgent(
     }
     if (completion.contextMemory) {
       applyCompressionMemory(messages, completion.contextMemory)
+      contextCompressedThisRequest = true
       send({
         requestId: request.requestId,
         type: 'context',
@@ -4283,7 +4290,7 @@ export async function runAgent(
       usage: visibleAgentUsage(),
       contextState: {
         usedTokens: completion.contextTokens,
-        limitTokens: request.model.contextLength || 8192,
+        limitTokens: request.model.contextLength || request.model.maxContextLength || 0,
         estimated: completion.contextEstimated,
         compressed: completion.compressed,
         updatedAt: Date.now()
@@ -4455,6 +4462,7 @@ export async function runAgent(
       if (normalized.note) toolArgumentNotes.set(call.id, normalized.note)
       toolPresentationArguments.set(call.id, normalized.presentation ?? normalized.arguments)
     }
+    completion.toolCalls = dedupeToolCalls(completion.toolCalls)
     if (completion.toolCalls.length > 0) {
       completion.rawMessage.tool_calls = completion.toolCalls.map((call) => ({
         id: call.id,

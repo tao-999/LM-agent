@@ -661,7 +661,7 @@ export async function searchWorkspace(
   return addSearchContexts(sortSearchResults(results, order).slice(0, limit))
 }
 
-async function addSearchContexts(results: SearchResult[], radius = 5): Promise<SearchResult[]> {
+async function addSearchContexts(results: SearchResult[], radius = 10): Promise<SearchResult[]> {
   const linesByPath = new Map<string, string[]>()
   return Promise.all(
     results.map(async (result) => {

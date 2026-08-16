@@ -44,6 +44,14 @@ import {
   createStreamRepetitionGuard,
   type StreamRepetitionDetection
 } from './stream-repetition-guard'
+import {
+  CONTEXT_COMPRESSION_THRESHOLD,
+  shouldCompressContext
+} from './context-compression'
+import {
+  attachRemoteGenerationDuration,
+  runtimeContextLength
+} from './remote-model-runtime'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -511,8 +519,6 @@ type ToolProtocol =
   | 'mistral-json'
   | 'deepseek'
   | 'auto'
-
-const CONTEXT_COMPRESSION_THRESHOLD = 0.9
 
 function preferredToolProtocol(modelName: string): ToolProtocol {
   const value = modelName.toLocaleLowerCase()
@@ -1047,6 +1053,16 @@ function textField(value: unknown): string {
 
 function isLmStudioEndpoint(model: ModelConfig): boolean {
   return /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost):1234(?:\/|$)/i.test(model.baseUrl)
+}
+
+function isRemoteOpenAiEndpoint(model: ModelConfig): boolean {
+  if (model.provider !== 'openai' || model.preset === 'kimi-code') return false
+  try {
+    const host = new URL(model.baseUrl).hostname.toLocaleLowerCase()
+    return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1'
+  } catch {
+    return false
+  }
 }
 
 function isQwenModel(model: ModelConfig): boolean {
@@ -1639,17 +1655,18 @@ function fitMessagesToContext(
   tools: ToolDefinition[] = [],
   semanticSummary = ''
 ): LlmMessage[] {
-  const contextLength = Math.max(2048, model.contextLength || 8192)
+  const cloned = messages.map((message) => ({
+    ...message,
+    images: message.images ? [...message.images] : undefined
+  }))
+  const contextLength = runtimeContextLength(model)
+  if (!contextLength) return cloned
   const toolTokens = estimateTextTokens(JSON.stringify(tools))
   const usableTokens = Math.max(
     1200,
     Math.floor(contextLength * CONTEXT_COMPRESSION_THRESHOLD) -
       Math.min(toolTokens, Math.floor(contextLength * 0.22))
   )
-  const cloned = messages.map((message) => ({
-    ...message,
-    images: message.images ? [...message.images] : undefined
-  }))
   const latestUserIndex = latestUserMessageIndex(cloned)
   if (latestUserIndex < 0) return cloned
 
@@ -1763,7 +1780,7 @@ async function generateSemanticSummary(
   onProgress?: (content: string) => void
 ): Promise<{ summary: string; usage: TokenUsage }> {
   if (!messages.length) return { summary: '', usage: createUsage(0, 0) }
-  const contextLength = Math.max(2048, model.contextLength || 8192)
+  const contextLength = runtimeContextLength(model) ?? 8192
   const summaryMaxTokens = Math.min(2048, Math.max(256, Math.floor(contextLength * 0.08)))
   const source = shortenContent(
     messages
@@ -1983,7 +2000,8 @@ async function prepareMessages(
   messages: LlmMessage[],
   tools: ToolDefinition[],
   signal: AbortSignal,
-  onCompressionProgress?: (content: string) => void
+  onCompressionProgress?: (content: string) => void,
+  disableContextCompression = false
 ): Promise<{
   messages: LlmMessage[]
   compressionUsage: TokenUsage
@@ -1991,7 +2009,7 @@ async function prepareMessages(
   contextMemory?: ContextCompressionMemory
 }> {
   messages = normalizeSystemMessageOrder(messages)
-  const contextLength = Math.max(2048, model.contextLength || 8192)
+  const contextLength = runtimeContextLength(model)
   const totalTokens =
     messages.reduce(
       (sum, message) =>
@@ -2001,7 +2019,10 @@ async function prepareMessages(
         24,
       0
     ) + estimateTextTokens(JSON.stringify(tools))
-  if (totalTokens < contextLength * CONTEXT_COMPRESSION_THRESHOLD) {
+  if (
+    !contextLength ||
+    !shouldCompressContext(totalTokens, contextLength, disableContextCompression)
+  ) {
     return {
       messages: fitMessagesToContext(model, messages, tools),
       compressionUsage: createUsage(0, 0),
@@ -2255,6 +2276,13 @@ export async function inspectModelContext(
   }
   const knownContext = knownRemoteModelContext(model)
   if (knownContext) return knownContext
+  if (isRemoteOpenAiEndpoint(model)) {
+    return {
+      contextLength: 0,
+      maxContextLength: 0,
+      source: '远程接口无需客户端传入上下文大小'
+    }
+  }
   const fallback = Math.max(2048, model.contextLength || 8192)
   if (!model.baseUrl || !model.model) {
     return { contextLength: fallback, maxContextLength: fallback, source: '保守默认值' }
@@ -2464,9 +2492,17 @@ export async function streamChat(
     disableThinking?: boolean
     maxOutputTokens?: number
     onContextCompressed?: (memory: ContextCompressionMemory) => void
+    disableContextCompression?: boolean
   } = {}
 ): Promise<TokenUsage> {
-  const prepared = await prepareMessages(model, messages, [], signal, onReasoning)
+  const prepared = await prepareMessages(
+    model,
+    messages,
+    [],
+    signal,
+    onReasoning,
+    options.disableContextCompression
+  )
   if (prepared.contextMemory) options.onContextCompressed?.(prepared.contextMemory)
   const estimatedPrompt = prepared.messages.reduce(
     (sum, message) => sum + estimateTextTokens(message.content),
@@ -2599,6 +2635,13 @@ export async function streamChat(
   let providerUsage: TokenUsage | null = null
   let latestUsagePayload: OpenAiUsagePayload | undefined
   let latestTimingsPayload: OpenAiTimingsPayload | undefined
+  let generationStartedAt: number | undefined
+  let generationUpdatedAt: number | undefined
+  const markGenerated = (): void => {
+    const now = Date.now()
+    generationStartedAt ??= now
+    generationUpdatedAt = now
+  }
   openAiChatStream: while (true) {
     const { value, done } = await reader.read()
     if (done) break
@@ -2628,10 +2671,12 @@ export async function streamChat(
       const reasoning =
         textField(delta?.reasoning_content) || textField(delta?.reasoning) || textField(delta?.thinking)
       if (reasoning) {
+        markGenerated()
         normalizedReasoning.push(reasoning)
       }
       const content = delta?.content
       if (content) {
+        markGenerated()
         normalizedContent.push(content)
       }
       if (data.usage) {
@@ -2654,7 +2699,12 @@ export async function streamChat(
   return addUsage(
     prepared.compressionUsage,
     providerUsage
-      ? providerUsage
+      ? attachRemoteGenerationDuration(
+          model,
+          providerUsage,
+          generationStartedAt,
+          generationUpdatedAt
+        )
       : createUsage(estimatedPrompt, estimateTextTokens(output), true)
   )
 }
@@ -2672,9 +2722,17 @@ async function streamCompleteWithTools(
     onUsageProgress?: (usage: TokenUsage) => void
     shouldInterruptGeneration?: () => boolean
     useResponsesApi?: boolean
+    disableContextCompression?: boolean
   } = {}
 ): Promise<CompletionResult> {
-  const prepared = await prepareMessages(model, messages, tools, signal, onReasoning)
+  const prepared = await prepareMessages(
+    model,
+    messages,
+    tools,
+    signal,
+    onReasoning,
+    options.disableContextCompression
+  )
   const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
   const estimatedPrompt =
     compatible.messages.reduce(
@@ -3149,6 +3207,13 @@ async function streamCompleteWithTools(
   let latestUsagePayload: OpenAiUsagePayload | undefined
   let latestTimingsPayload: OpenAiTimingsPayload | undefined
   let finishReason: string | undefined
+  let generationStartedAt: number | undefined
+  let generationUpdatedAt: number | undefined
+  const markGenerated = (): void => {
+    const now = Date.now()
+    generationStartedAt ??= now
+    generationUpdatedAt = now
+  }
   const pendingToolCalls = new Map<
     number,
     { id?: string; name: string; arguments: string }
@@ -3204,12 +3269,21 @@ async function streamCompleteWithTools(
         textField(delta?.reasoning) ||
         textField(delta?.thinking)
       if (thought) {
+        markGenerated()
         normalizedReasoning.push(thought)
       }
       if (delta?.content) {
+        markGenerated()
         normalizedContent.push(delta.content)
       }
       for (const toolDelta of delta?.tool_calls ?? []) {
+        if (
+          toolDelta.id ||
+          toolDelta.function?.name ||
+          toolDelta.function?.arguments
+        ) {
+          markGenerated()
+        }
         const index = toolDelta.index ?? 0
         const current = pendingToolCalls.get(index) ?? { name: '', arguments: '' }
         if (toolDelta.id) current.id = toolDelta.id
@@ -3237,7 +3311,16 @@ async function streamCompleteWithTools(
       }
       providerUsage =
         tokenUsageFromOpenAiPayload(latestUsagePayload, latestTimingsPayload) ?? providerUsage
-      reportProviderUsage(providerUsage)
+      reportProviderUsage(
+        providerUsage
+          ? attachRemoteGenerationDuration(
+              model,
+              providerUsage,
+              generationStartedAt,
+              generationUpdatedAt
+            )
+          : null
+      )
     }
   }
   normalizedContent.flush()
@@ -3277,15 +3360,20 @@ async function streamCompleteWithTools(
           function: { name: call.name, arguments: JSON.stringify(call.arguments) }
         }))
   const liveFinalStats = await liveStatsSession?.waitForFinal()
-  const providerFinalUsage = attachLmStudioFinalStats(
-    providerUsage
+  const providerFinalUsage = attachRemoteGenerationDuration(
+    model,
+    attachLmStudioFinalStats(
+      providerUsage
       ? providerUsage
       : createUsage(
           estimatedPrompt,
           estimateTextTokens(content) + estimateTextTokens(JSON.stringify(rawToolCalls)),
           true
         ),
-    liveFinalStats ?? liveStatsSession?.latest()
+      liveFinalStats ?? liveStatsSession?.latest()
+    ),
+    generationStartedAt,
+    generationUpdatedAt
   )
   reportProviderUsage(providerFinalUsage)
   const finalUsage = providerFinalUsage.estimated
@@ -3333,6 +3421,7 @@ export async function completeWithTools(
     onUsageProgress?: (usage: TokenUsage) => void
     shouldInterruptGeneration?: () => boolean
     useResponsesApi?: boolean
+    disableContextCompression?: boolean
   } = {}
 ): Promise<CompletionResult> {
   if (onReasoning || onContent) {
@@ -3347,7 +3436,14 @@ export async function completeWithTools(
       options
     )
   }
-  const prepared = await prepareMessages(model, messages, tools, signal)
+  const prepared = await prepareMessages(
+    model,
+    messages,
+    tools,
+    signal,
+    undefined,
+    options.disableContextCompression
+  )
   const compatible = compatibleToolRequest(model, prepared.messages, tools, toolChoice)
   const estimatedPrompt =
     compatible.messages.reduce(
