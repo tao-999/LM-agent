@@ -52,6 +52,9 @@ import {
   attachRemoteGenerationDuration,
   runtimeContextLength
 } from './remote-model-runtime'
+import {
+  resolveCompatibleToolChoice
+} from './tool-choice-compat'
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -1150,10 +1153,9 @@ function compatibleToolRequest(
   messages: LlmMessage[],
   tools: ToolDefinition[],
   requested: 'auto' | 'required'
-): { messages: LlmMessage[]; toolChoice: 'auto' | 'required' } {
-  if (model.preset !== 'kimi-code' || requested !== 'required') {
-    return { messages, toolChoice: requested }
-  }
+): { messages: LlmMessage[]; toolChoice?: 'auto' | 'required' } {
+  const toolChoice = resolveCompatibleToolChoice(model, requested)
+  if (toolChoice === requested) return { messages, toolChoice }
   const names = tools.map((tool) => tool.function.name).join('、')
   return {
     messages: [
@@ -1163,7 +1165,7 @@ function compatibleToolRequest(
         content: `当前步骤必须调用一个可用工具后再继续，禁止直接结束任务。可用工具：${names}`
       }
     ],
-    toolChoice: 'auto'
+    toolChoice
   }
 }
 
@@ -2805,7 +2807,9 @@ async function streamCompleteWithTools(
         body: safeJsonBody({
           model: model.model,
           ...parts,
-          ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
+          ...(tools.length > 0 && compatible.toolChoice
+            ? { tool_choice: compatible.toolChoice }
+            : {}),
           stream: true,
           ...responsesThinkingOptions(model)
         })
@@ -3189,7 +3193,10 @@ async function streamCompleteWithTools(
         model: model.model,
         messages: providerMessages(model, compatible.messages),
         ...(tools.length > 0
-          ? { tools, tool_choice: compatible.toolChoice }
+          ? {
+              tools,
+              ...(compatible.toolChoice ? { tool_choice: compatible.toolChoice } : {})
+            }
           : {}),
         stream: true,
         stream_options: { include_usage: true },
@@ -3459,7 +3466,9 @@ export async function completeWithTools(
       body: safeJsonBody({
         model: model.model,
         ...parts,
-        ...(tools.length > 0 ? { tool_choice: compatible.toolChoice } : {}),
+        ...(tools.length > 0 && compatible.toolChoice
+          ? { tool_choice: compatible.toolChoice }
+          : {}),
         stream: false,
         ...responsesThinkingOptions(model)
       })
@@ -3610,7 +3619,10 @@ export async function completeWithTools(
       model: model.model,
       messages: providerMessages(model, compatible.messages),
       ...(tools.length > 0
-        ? { tools, tool_choice: compatible.toolChoice }
+        ? {
+            tools,
+            ...(compatible.toolChoice ? { tool_choice: compatible.toolChoice } : {})
+          }
         : {}),
       stream: false,
       ...openAiThinkingOptions(model),
