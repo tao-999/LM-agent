@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   isQwen38Model,
+  qwen38LmStudioResponsesThinkingOptions,
   qwen38LmStudioThinkingOptions,
   qwen38ReasoningEffort,
   resolveThinkingEnabled,
@@ -67,6 +68,19 @@ test('Qwen3.8 顶层发送 reasoning_effort，chat_template_kwargs 仅保留模�
     supportsReasoningEffort({ ...qwen38, reasoningOptions: ['off', 'low', 'high'] }),
     true
   )
+})
+
+test('LM Studio /v1/responses 对 Qwen3.8 只发送嵌套 reasoning.effort', () => {
+  assert.deepEqual(
+    qwen38LmStudioResponsesThinkingOptions({ ...qwen38, reasoningEffort: 'low' }, true),
+    { reasoning: { effort: 'low' } }
+  )
+  assert.deepEqual(qwen38LmStudioResponsesThinkingOptions(qwen38, true), {
+    reasoning: { effort: 'xhigh' }
+  })
+  assert.deepEqual(qwen38LmStudioResponsesThinkingOptions(qwen38, false), {
+    reasoning: { effort: 'none' }
+  })
 })
 
 test('关闭 Thinking 或使用旧版 Qwen 时不发送 Qwen3.8 思考等级', () => {

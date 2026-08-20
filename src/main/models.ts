@@ -7,6 +7,7 @@ import type {
 import {
   isQwen38Model,
   qwen38LmStudioThinkingOptions,
+  qwen38LmStudioResponsesThinkingOptions,
   qwen38ReasoningEffort,
   resolveThinkingEnabled
 } from '../shared/thinking'
@@ -1075,7 +1076,10 @@ function isQwenModel(model: ModelConfig): boolean {
 function responsesThinkingOptions(model: ModelConfig): Record<string, unknown> {
   const enabled = resolveThinkingEnabled(model)
   if (isLmStudioEndpoint(model) && isQwen38Model(model) && typeof enabled === 'boolean') {
-    return qwen38LmStudioThinkingOptions(model, enabled)
+    // /v1/responses only honors the OpenAI-style nested object, e.g.
+    // "reasoning": { "effort": "low" } — never top-level reasoning_effort or
+    // chat_template_kwargs used by /chat/completions.
+    return qwen38LmStudioResponsesThinkingOptions(model, enabled)
   }
   if (enabled === false) return { reasoning: { effort: 'none' } }
   const available = model.reasoningOptions ?? []

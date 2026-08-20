@@ -34,6 +34,20 @@ export function qwen38LmStudioThinkingOptions(
   }
 }
 
+/**
+ * LM Studio /v1/responses follows the OpenAI Responses schema: thinking is only
+ * controlled by a nested "reasoning": { "effort" } object. Top-level
+ * reasoning_effort or chat_template_kwargs are ignored there, so Qwen3.8 must not
+ * reuse the chat/completions template options on that endpoint.
+ */
+export function qwen38LmStudioResponsesThinkingOptions(
+  model: Pick<ModelConfig, 'model' | 'reasoningEffort'>,
+  enabled: boolean
+): Record<string, unknown> {
+  const effort = qwen38ReasoningEffort(model, enabled)
+  return { reasoning: { effort: effort ?? 'none' } }
+}
+
 export function supportsReasoningEffort(
   model: Pick<ModelConfig, 'model' | 'reasoningOptions'>
 ): boolean {
