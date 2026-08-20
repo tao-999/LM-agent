@@ -120,7 +120,16 @@ test('超长会话持久化使用 IndexedDB 异步写入并避免复制全部会
   assert.match(storeSource, /queueDatabaseWrite\(name, value\)/)
   assert.match(
     storeSource,
-    /selectedComfyWorkflowId:\s*state\.selectedComfyWorkflowId,[\s\S]*?conversations:\s*state\.conversations,\s*activeConversationId/
+    /selectedComfyWorkflowId:\s*state\.selectedComfyWorkflowId,[\s\S]*?conversations:\s*state\.conversations(\.map\(stripThinkingBlocksFromConversation\))?,\s*activeConversationId/
+  )
+})
+
+test('思考块不写入会话持久化存储，仅保留正文与执行轨迹', async () => {
+  const storeSource = await fs.readFile(path.resolve('src/renderer/src/store.ts'), 'utf8')
+  assert.match(storeSource, /block\.type !== 'thinking'/)
+  assert.match(
+    storeSource,
+    /conversations:\s*state\.conversations\.map\(stripThinkingBlocksFromConversation\)/
   )
 })
 

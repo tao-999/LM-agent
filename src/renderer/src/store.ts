@@ -319,7 +319,8 @@ const projectPersistedState = createReferenceMemoizedProjection(
     comfyBaseUrl: state.comfyBaseUrl,
     comfyWorkflows: state.comfyWorkflows,
     selectedComfyWorkflowId: state.selectedComfyWorkflowId,
-    conversations: state.conversations,
+    // 思考过程不持久化：落盘前剥离 agentBlocks 中的 thinking 块，只保留正文与执行轨迹。
+    conversations: state.conversations.map(stripThinkingBlocksFromConversation),
     activeConversationId: state.activeConversationId
   })
 )
@@ -415,6 +416,34 @@ function compactAgentBlocks(
     cleaned.push(content === block.content ? block : { ...block, content })
   }
   return changed ? cleaned : blocks
+}
+
+// 思考块只用于实时展示，不写入持久化存储（正文已足够）；返回 undefined 表示原引用可复用。
+function stripThinkingBlocks(
+  blocks: AgentExecutionBlock[] | undefined
+): AgentExecutionBlock[] | undefined {
+  if (!blocks?.length) return blocks
+  const cleaned = blocks.filter((block) => block.type !== 'thinking')
+  return cleaned.length === blocks.length ? blocks : cleaned
+}
+
+function stripThinkingBlocksFromConversation(
+  conversation: PersistedConversation
+): PersistedConversation {
+  let changed = false
+  const messages = conversation.messages.map((message) => {
+    if (!message.agentBlocks?.length) return message
+    const agentBlocks = stripThinkingBlocks(message.agentBlocks)
+    if (agentBlocks === message.agentBlocks) return message
+    changed = true
+    if (agentBlocks === undefined || agentBlocks.length === 0) {
+      const { agentBlocks: _omitted, ...rest } = message
+      void _omitted
+      return rest
+    }
+    return { ...message, agentBlocks }
+  })
+  return changed ? { ...conversation, messages } : conversation
 }
 
 function settleInterruptedMessage(message: ChatMessage): ChatMessage {
@@ -1005,7 +1034,8 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'local-agent-studio',
-      version: 19,
+      // v20：思考块（thinking）不再持久化，仅保留正文与执行轨迹。
+      version: 20,
       storage: bufferedPersistStorage,
       migrate: (persisted) => {
         const state = persisted as Partial<AppStore>
@@ -1037,7 +1067,7 @@ export const useAppStore = create<AppStore>()(
         state.workspaceTrees = {}
         state.conversations = settleInterruptedConversations(state.conversations).map(
           (conversation) => ({
-            ...conversation,
+            ...stripThinkingBlocksFromConversation(conversation),
             model: applyKnownRemoteModelProfile(
               conversation.model ?? persistedModel(state.model ?? defaultModel)
             ),
