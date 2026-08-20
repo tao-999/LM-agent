@@ -163,11 +163,17 @@ function usageFromLmStudioLiveStats(stats: LmStudioLiveStats): TokenUsage {
   )
 }
 
+
+/**
+ * 用 LM Studio server 日志里 eval time 的速度覆盖本轮速度。
+ * 直接采用 LM 返回的 t/s（不自行重算）；若 API 响应自带 timings，也以日志的 eval time 为准——
+ * 它才是本地服务真实测得的生成速度。每轮结束时调用一次，会话级平均由 agent 对各轮取算术平均。
+ */
 function attachLmStudioFinalStats(
   usage: TokenUsage,
   stats?: LmStudioLiveStats
 ): TokenUsage {
-  if (!stats || usage.tokensPerSecond || stats.averageTokensPerSecond <= 0) return usage
+  if (!stats || !stats.final || stats.averageTokensPerSecond <= 0) return usage
   return createUsage(
     usage.promptTokens,
     usage.completionTokens,
@@ -178,6 +184,7 @@ function attachLmStudioFinalStats(
     usage.cachedPromptTokens ?? 0
   )
 }
+
 
 export function tokenUsageFromOpenAiPayload(
   usage?: OpenAiUsagePayload,

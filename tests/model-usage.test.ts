@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  applyAverageSpeed,
   cachedPromptTokensFromOpenAiPayload,
   generationDurationFromOpenAiTimings,
   mergeOpenAiTimingsPayload,
@@ -106,4 +107,24 @@ test('合并流式 timings 时保留最终生成速度', () => {
       predicted_per_second: 41.25
     }
   )
+})
+
+
+test('会话结束时平均 tok 速度取各轮 eval time 速度的算术平均值', () => {
+  const usage = applyAverageSpeed(
+    { promptTokens: 100_000, completionTokens: 3_000, totalTokens: 103_000 },
+    [40, 41, 42]
+  )
+  // (40+41+42)/3 = 41 t/s；汇总时长仅用于展示，由平均速度反推
+  assert.ok(Math.abs(usage.tokensPerSecond! - 41) < 1e-9)
+  assert.ok(Math.abs(usage.generationDurationMs! - (3_000 * 1000) / 41) < 1e-6)
+})
+
+test('缺少速度的轮次不参与平均，全部缺失时保持原速度不变', () => {
+  const base = { promptTokens: 10, completionTokens: 2_000, totalTokens: 2_010 }
+  const withSomeMissing = applyAverageSpeed(base, [undefined, 40, undefined, 60])
+  assert.ok(Math.abs(withSomeMissing.tokensPerSecond! - 50) < 1e-9)
+
+  const none = applyAverageSpeed({ ...base, tokensPerSecond: 33 }, [undefined, 0])
+  assert.equal(none.tokensPerSecond, 33)
 })

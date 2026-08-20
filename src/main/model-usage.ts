@@ -1,6 +1,9 @@
+import type { TokenUsage } from '../shared/types'
+
 export type OpenAiUsagePayload = {
   prompt_tokens?: number
   completion_tokens?: number
+
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
@@ -89,6 +92,26 @@ export function generationDurationFromOpenAiTimings(
     return (completionTokens / timings.predicted_per_second) * 1000
   }
   return undefined
+}
+
+
+/**
+ * 会话级平均 tok 速度：一次聊天里可能有多轮思考/输出，每轮对应 LM Studio 一条 eval time。
+ * 结束时的平均速度取各轮 eval time 速度的算术平均值（如 (40+41+42)/3），
+ * 而不是总 token ÷ 某一轮速度、也不是整轮墙钟时间；汇总时长仅用于展示，
+ * 由“平均速度 × 总输出”反推。没有有效速度的轮次不参与平均。
+ */
+export function applyAverageSpeed(usage: TokenUsage, roundSpeeds: Array<number | undefined>): TokenUsage {
+  const speeds = roundSpeeds.filter(
+    (speed): speed is number => typeof speed === 'number' && Number.isFinite(speed) && speed > 0
+  )
+  if (!speeds.length || usage.completionTokens <= 0) return usage
+  const average = speeds.reduce((sum, speed) => sum + speed, 0) / speeds.length
+  return {
+    ...usage,
+    generationDurationMs: (usage.completionTokens * 1000) / average,
+    tokensPerSecond: average
+  }
 }
 
 export function cachedPromptTokensFromOpenAiPayload(

@@ -9,6 +9,8 @@ export type LmStudioLiveStats = {
   averageTokensPerSecond: number
   recentTokensPerSecond: number
   final: boolean
+  /** 任务开始（launch）时间戳，仅在能确定时提供；用于短轮次的实时速度估算 */
+  startAt?: number
 }
 
 type Subscription = {
@@ -39,29 +41,124 @@ const RECEIVED_REQUEST_PATTERN = /Received request:\s*POST to\s+(\/[^\s]+)\s+/i
 const MODEL_PATTERN = /\[([^\]]+)]\s+(?:Running chat completion|Streaming response)/i
 const LAUNCH_PATTERN = /launch_slot_:\s+id\s+\d+\s+\|\s+task\s+(\d+)\s+\|\s+processing task[^\n]*is_child\s*=\s*0/i
 const LIVE_TIMING_PATTERN = /task\s+(\d+)\s+\|\s+n_decoded\s*=\s*(\d+),\s*tg\s*=\s*([\d.]+)\s*t\/s,\s*tg_3s\s*=\s*([\d.]+)\s*t\/s/i
-const FINAL_TIMING_PATTERN = /task\s+(\d+)\s+\|[\s\S]*?\|\s+eval time\s*=\s*[\d.]+\s*ms\s*\/\s*(\d+)\s+tokens[^\r\n]*?([\d.]+)\s+tokens per second/i
+// 注意：用 \s+eval time（带前导空白）匹配生成阶段的 eval time，避免误命中 prompt eval time
+const FINAL_TIMING_PATTERN = /task\s+(\d+)\s+\|\s+eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s+tokens[^\r\n]*?([\d.]+)\s+tokens per second/i
 const RELEASE_PATTERN = /release:\s+id\s+\d+\s+\|\s+task\s+(\d+)\s+\|\s+stop processing/i
 
-export function parseLmStudioServerStats(content: string): LmStudioLiveStats | null {
-  const live = LIVE_TIMING_PATTERN.exec(content)
-  if (live) {
-    return {
-      taskId: Number(live[1]),
-      decodedTokens: Number(live[2]),
-      averageTokensPerSecond: Number(live[3]),
-      recentTokensPerSecond: Number(live[4]),
-      final: false
+/** 单个 LM Studio task（一次 API 调用）的跨行运行态 */
+export type LmStudioTaskStatsState = {
+  /** launch 时间戳，用于短轮次（<3s、无 tg_3s）实时速度的墙钟估算基线 */
+  startAt?: number
+  hasFinal: boolean
+  /** 最近一次观察到该 task 日志的时间，用于过期清理孤儿任务 */
+  lastSeen: number
+}
+
+/** 逐行消费 LM Studio server 日志所需的共享状态（bridge 内长期持有） */
+export type LmStudioStatsLogState = {
+  tasks: Map<number, LmStudioTaskStatsState>
+  now?: () => number
+}
+
+export function createLmStudioStatsLogState(now?: () => number): LmStudioStatsLogState {
+  return { tasks: new Map(), now }
+}
+
+function num(value: string | undefined): number {
+  const parsed = Number.parseFloat(value ?? '')
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+/**
+ * 逐行消费 LM Studio server 日志（bridge 每收到一行调用一次）。
+ *
+ * - 实时速度优先读 tg_3s；思考时长 <3s 的轮次可能完全没有 tg_3s，只有结束时的 eval time。
+ *   这种短轮次的实时显示回退为“已解码 token ÷ 自 launch 起流逝墙钟时间”的估算值——
+ *   实时值只是视觉参考，让用户知道大致速度即可。
+ * - 一次 API 调用（同一 task）内可能存在多段思考/输出，每段结束时各有一条 eval time。
+ *   结束速度直接采用 LM 返回的值：单段即该段的 t/s；同一段被重复打印时取最后一条。
+ *   会话级平均 tok 速度由上层对各轮结束速度求算术平均值（如 (40+41+42)/3），见 models.ts addUsage。
+ */
+export function parseLmStudioServerLog(
+  state: LmStudioStatsLogState,
+  content: string
+): Array<LmStudioLiveStats | null> {
+  const now = (state.now ?? Date.now)()
+  const results: Array<LmStudioLiveStats | null> = []
+  for (const rawLine of String(content).split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+
+    const launch = LAUNCH_PATTERN.exec(line)
+    if (launch) {
+      state.tasks.set(Number(launch[1]), { startAt: now, hasFinal: false, lastSeen: now })
+      results.push(null)
+      continue
     }
+
+    const live = LIVE_TIMING_PATTERN.exec(line)
+    if (live) {
+      const taskId = Number(live[1])
+      const decoded = Number(live[2])
+      // 仅当已观察到 launch 行时才有可靠的起点；不在此合成时间戳，保持对外对象形状稳定
+      const task = state.tasks.get(taskId)
+      const recent = Number(live[4])
+      let displaySpeed = recent > 0 ? recent : num(live[3])
+      if (!(displaySpeed > 0) && task?.startAt) {
+        // tg_3s / tg 均不可用（短轮次、<3s）时用墙钟估算兜底，仅作视觉参考
+        const elapsedMs = Math.max(0, now - task.startAt)
+        if (elapsedMs >= 500 && decoded > 0) displaySpeed = (decoded / elapsedMs) * 1000
+      }
+      results.push({
+        taskId,
+        decodedTokens: decoded,
+        averageTokensPerSecond: num(live[3]),
+        recentTokensPerSecond: displaySpeed,
+        final: false,
+        ...(task?.startAt ? { startAt: task.startAt } : {})
+      })
+      continue
+    }
+
+    const final = FINAL_TIMING_PATTERN.exec(line)
+    if (final) {
+      const taskId = Number(final[1])
+      // 直接取 LM 返回的 t/s，不自行用 tokens/ms 重算（用户要求：LM 已经给了 eval time）
+      const speed = num(final[4])
+      // 仅保留 launch 行带来的起点；无 launch 时不合成时间戳，保持对外对象形状稳定
+      const startAt = state.tasks.get(taskId)?.startAt
+      state.tasks.set(taskId, { startAt, hasFinal: true, lastSeen: now })
+      results.push({
+        taskId,
+        decodedTokens: Number(final[3]),
+        averageTokensPerSecond: speed,
+        recentTokensPerSecond: speed,
+        final: true,
+        ...(startAt ? { startAt } : {})
+      })
+      continue
+    }
+
+    const released = RELEASE_PATTERN.exec(line)
+    if (released) {
+      // 任务释放后清理状态，避免长期运行 Map 无限增长；未绑定的孤儿 task 也一并过期清理
+      state.tasks.delete(Number(released[1]))
+      results.push(null)
+      continue
+    }
+
+    results.push(null)
   }
-  const final = FINAL_TIMING_PATTERN.exec(content)
-  if (final) {
-    return {
-      taskId: Number(final[1]),
-      decodedTokens: Number(final[2]),
-      averageTokensPerSecond: Number(final[3]),
-      recentTokensPerSecond: Number(final[3]),
-      final: true
-    }
+  return results
+}
+
+/**
+ * @deprecated 兼容旧调用：对单行内容做一次性解析（无跨行状态）。
+ */
+export function parseLmStudioServerStats(content: string): LmStudioLiveStats | null {
+  const oneShot = createLmStudioStatsLogState()
+  for (const result of parseLmStudioServerLog(oneShot, content)) {
+    if (result) return result
   }
   return null
 }
@@ -78,6 +175,7 @@ class LmStudioServerStatsBridge {
   private readonly subscriptions = new Map<number, Subscription>()
   private readonly subscriptionsByTask = new Map<number, Subscription>()
   private readonly requestMarkers: RequestMarker[] = []
+  private readonly statsState = createLmStudioStatsLogState()
 
   async subscribe(
     model: string,
@@ -202,6 +300,8 @@ class LmStudioServerStatsBridge {
     }
     const launch = LAUNCH_PATTERN.exec(content)
     if (launch) {
+      // 先记录任务起点（供短轮次实时速度估算），再绑定订阅
+      parseLmStudioServerLog(this.statsState, content)
       const taskId = Number(launch[1])
       const marker = [...this.requestMarkers]
         .reverse()
@@ -224,19 +324,13 @@ class LmStudioServerStatsBridge {
       }
       return
     }
-    const stats = parseLmStudioServerStats(content)
-    if (stats) {
+    for (const stats of parseLmStudioServerLog(this.statsState, content)) {
+      if (!stats) continue
       const subscription = this.subscriptionsByTask.get(stats.taskId)
-      if (!subscription) return
+      if (!subscription) continue
       subscription.latest = stats
       subscription.onStats(stats)
       if (stats.final) this.resolveFinalWaiters(subscription)
-      return
-    }
-    const released = RELEASE_PATTERN.exec(content)
-    if (released) {
-      const subscription = this.subscriptionsByTask.get(Number(released[1]))
-      if (subscription) this.resolveFinalWaiters(subscription)
     }
   }
 
@@ -244,6 +338,7 @@ class LmStudioServerStatsBridge {
     const waiters = subscription.finalWaiters.splice(0)
     for (const resolve of waiters) resolve(subscription.latest)
   }
+
 
   private closeSubscription(subscription: Subscription): void {
     this.resolveFinalWaiters(subscription)

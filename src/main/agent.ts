@@ -35,6 +35,10 @@ import {
   type LlmMessage,
   type ToolDefinition
 } from './models'
+import { applyAverageSpeed } from './model-usage'
+
+
+
 import {
   cachePdfResponse,
   formatPaperCacheSummary,
@@ -1912,16 +1916,20 @@ export async function runWebChat(
     completionTokens: 0,
     totalTokens: 0
   }
+  // 每轮生成（一条 LM Studio eval time）的结束速度；会话结束时取算术平均作为平均 tok 速度
+  const roundSpeeds: Array<number | undefined> = []
   let hasConfirmedUsage = false
   const recordWebUsage = (usage: TokenUsage): void => {
     if (usage.estimated) return
     totalUsage = addUsage(totalUsage, usage)
+    roundSpeeds.push(usage.tokensPerSecond)
     hasConfirmedUsage = true
   }
   const visibleWebUsage = (): TokenUsage =>
     hasConfirmedUsage
-      ? totalUsage
+      ? applyAverageSpeed(totalUsage, roundSpeeds)
       : { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: true }
+
   let forceTool = forceWebSearch
   let webSearchUsed = false
   let invalidRetries = 0
@@ -2247,15 +2255,19 @@ export async function runAgent(
     completionTokens: 0,
     totalTokens: 0
   }
+  // 每轮生成（一条 LM Studio eval time）的结束速度；会话结束时取算术平均作为平均 tok 速度
+  const roundSpeeds: Array<number | undefined> = []
   let hasConfirmedUsage = false
   const recordAgentUsage = (usage: TokenUsage): void => {
     if (usage.estimated) return
     totalUsage = addUsage(totalUsage, usage)
+    roundSpeeds.push(usage.tokensPerSecond)
     hasConfirmedUsage = true
   }
   const visibleAgentUsage = (): TokenUsage | undefined => {
-    return hasConfirmedUsage ? totalUsage : undefined
+    return hasConfirmedUsage ? applyAverageSpeed(totalUsage, roundSpeeds) : undefined
   }
+
   const restrictedWebHosts = requestedWebHosts(request.objective)
   const currentTaskText = request.objective.split(/\n\n<(?:selected_code|current_file|file|attachment)\b/i)[0]
   const requiresWorkspaceEdit =
