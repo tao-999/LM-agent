@@ -26,10 +26,10 @@ export function qwen38LmStudioThinkingOptions(
 ): Record<string, unknown> {
   const effort = qwen38ReasoningEffort(model, enabled)
   return {
+    ...(effort ? { reasoning_effort: effort } : {}),
     chat_template_kwargs: {
       enable_thinking: enabled,
-      preserve_thinking: enabled,
-      ...(effort ? { reasoning_effort: effort } : {})
+      preserve_thinking: enabled
     }
   }
 }

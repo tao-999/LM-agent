@@ -33,10 +33,10 @@ test('LM Studio 的 on/off 能力声明不影响 Qwen3.8 模板思考等级', ()
       reasoningEffort: 'xhigh'
     }, true),
     {
+      reasoning_effort: 'xhigh',
       chat_template_kwargs: {
         enable_thinking: true,
-        preserve_thinking: true,
-        reasoning_effort: 'xhigh'
+        preserve_thinking: true
       }
     }
   )
@@ -49,17 +49,17 @@ test('LM Studio 的 on/off 能力声明不影响 Qwen3.8 模板思考等级', ()
   assert.equal(supportsReasoningEffort({ ...qwen38, reasoningOptions: ['off', 'on'] }), true)
 })
 
-test('Qwen3.8 仅通过 chat_template_kwargs 发送 reasoning_effort', () => {
+test('Qwen3.8 顶层发送 reasoning_effort，chat_template_kwargs 仅保留模板开关', () => {
   assert.deepEqual(
     qwen38LmStudioThinkingOptions({
       ...qwen38,
       reasoningEffort: 'low'
     }, true),
     {
+      reasoning_effort: 'low',
       chat_template_kwargs: {
         enable_thinking: true,
-        preserve_thinking: true,
-        reasoning_effort: 'low'
+        preserve_thinking: true
       }
     }
   )
